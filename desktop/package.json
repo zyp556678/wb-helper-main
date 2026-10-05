@@ -1,0 +1,15 @@
+{
+  "name": "workbuddy-gateway-desktop",
+  "private": true,
+  "version": "0.9.0",
+  "description": "WorkBuddy 网关桌面壳的构建入口（仅用于调用 Tauri CLI）",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "dev": "tauri dev",
+    "prepare": "node scripts/prepare-resources.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

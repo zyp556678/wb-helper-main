@@ -1,0 +1,47 @@
+# docker compose 用法：
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down          # 数据在命名卷里，不会被删
+#
+# 只绑宿主回环（127.0.0.1），所以即使忘了设 API Key 也不会暴露到网络上。
+# 要对外提供服务，请在前面放反向代理终止 TLS，而不是把端口改成 0.0.0.0。
+
+services:
+  wb-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Go 小版本标签滞后于官方发布时，用 --build-arg 覆盖即可
+      # args:
+      #   GO_IMAGE: golang:alpine
+    image: wb-gateway:latest
+    container_name: wb-gateway
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8317:8317"
+
+    volumes:
+      # 必须挂卷：凭据、config.json、模型缓存与统计都在这里面。
+      # 不挂卷的话容器一重建账号池就空了。
+      - wb-gateway-data:/app/data
+
+    environment:
+      # 签到、保活、任务中心都按**本地整点**排程。
+      # 容器默认是 UTC，不设这一项会让「9 点签到」在下午触发。
+      - TZ=Asia/Shanghai
+
+    # 想加访问密钥就解开下面这段（同时把 ports 保持不变即可）：
+    # command: ["serve", "--addr", "0.0.0.0", "--port", "8317", "--api-key", "改成你的密钥"]
+
+    healthcheck:
+      # /healthz 在鉴权中间件里被显式豁免，设了密钥也能过。
+      # start_period 给足 40 秒：启动时会先同步拉一次模型目录再监听端口。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8317/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  wb-gateway-data:

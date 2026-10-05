@@ -1,0 +1,71 @@
+# ---- 凭据与运行时数据：绝不提交 ----
+workbuddy*.json
+auths/
+.testdata/
+*.disabled
+workbuddy-status.json
+wb-models-cache.json
+# 余额/请求量的小时桶与采样点，属本机运行数据
+wb-stats.json
+# 任务队列的上次执行结果（含账号名与任务文案），属本机运行数据
+wb-tasks-queue.json
+config.json
+logs/
+
+# ---- 本机 AI 助手的工作数据（记忆、会话、临时文件）----
+.workbuddy-ai/
+.workbuddy/
+
+# ---- 内部调研与提案文档：含第三方项目名与作者信息，不随仓库发布 ----
+三合一可行性分析与项目说明.md
+# 交接文档同理：正文提到上游项目名，且属本机开发交接材料，不入库。
+HANDOVER.md
+
+# ---- 参考源码（三个上游项目的只读克隆）----
+repos/
+
+# ---- 便携工具链与缓存 ----
+.toolchain/
+
+# ---- 构建产物 ----
+/workbuddy-gateway
+/workbuddy-gateway.exe
+/wb-local-agent
+/wb-local-agent.exe
+*.exe~
+dist/
+
+# ---- npm 分发的产物：平台包里的二进制由 scripts/release.sh 填充，不入库 ----
+npm/dist/
+npm/platform/*/bin/
+npm/.tmp-extract/
+
+# ---- 安装包产物（都在 dist/ 下，这里兜底防手滑）----
+*.deb
+*.pkg
+*.dmg
+*.ico.bak
+installer/windows/setup*.sed
+
+# ---- 桌面壳（Tauri）----
+# bin/ 是 prepare-resources.mjs 从项目根复制进来的 Go 二进制，随包生成不入库；
+# gen/ 是 tauri-build 生成的权限 schema；target 已在 .toolchain/cargo-target。
+desktop/src-tauri/bin/
+desktop/src-tauri/gen/
+# WebView2Loader.dll 是微软的第三方二进制（不是本项目代码），不入库。
+# 它由 webview2-com-sys 的 build script 解出来，跑一次 cargo build 就有了；
+# prepare-resources.mjs 会自动从 .toolchain/cargo-target/ 下找回，新克隆无需手动处理。
+desktop/src-tauri/WebView2Loader.dll
+
+# ---- 前端 ----
+node_modules/
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+web/*.tsbuildinfo
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,220 @@
+/*
+ * 设计令牌：整体照搬 wb-switch 的 src/index.css（oklch 色值、:root / .dark 两套）。
+ * 只去掉 Tailwind 自身的 @import，以及 wb-switch 业务专属的 media query。
+ * 这里只放令牌与基础层，入口 src/index.css 负责 @import "tailwindcss" 后再引入本文件。
+ */
+
+/* ---------------------------------------------------------------------------
+ * 文字可读性契约（实测数据支撑，改排版前务必先读这段）
+ *
+ * 用 CDP 审计过全站 1425 个文本节点，两个反面模式都出在这里：
+ *
+ *   1. **不要用透明度去"调淡"文字颜色。** `text-muted-foreground/70` 在浅色底上
+ *      实测只有 2.97:1、`text-sidebar-foreground/45` 只有 2.78:1，都低于
+ *      WCAG AA 的 4.5:1；而 `--muted-foreground` 本身是 5.51:1，完全达标 ——
+ *      即：**问题从来不在令牌，而在乘透明度这个动作**。层级请用字号/字重表达。
+ *      （switch 全仓只有 5 处透明度降色，最低 /50，这是它看起来更"好读"的主因。）
+ *   2. **最小字号是 12px（text-xs）。** 中文在 11px 下笔画会糊在一起；
+ *      switch 只在分辨率极高的密集表格里用 11px，我们把 60 处 11px 全抬到了 12px。
+ *
+ * 另外整块 `opacity-60`（整行/整块淡化）等价于对所有子文字乘 0.6，同样会击穿
+ * 对比度 —— 状态区分请改用 `bg-muted/xx` 淡色底 + badge。
+ *
+ * 现状（改完后的目标值）：浅色模式下 --foreground ≈ 15:1，
+ * --muted-foreground ≈ 5.5:1，二者都能满足 AA。
+ * ------------------------------------------------------------------------- */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  color-scheme: light;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.21 0.01 264);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.01 264);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.01 264);
+  --primary: oklch(0.725 0.133 163.03);
+  --primary-foreground: oklch(0.99 0.002 247.839);
+  --secondary: oklch(0.96 0.004 264);
+  --secondary-foreground: oklch(0.32 0.01 264);
+  --muted: oklch(0.96 0.004 264);
+  --muted-foreground: oklch(0.52 0.012 264);
+  --accent: oklch(0.955 0.004 264);
+  --accent-foreground: oklch(0.24 0.01 264);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.99 0.002 270);
+  --border: oklch(0.91 0.006 264);
+  --input: oklch(0.91 0.006 264);
+  --ring: oklch(0.725 0.133 163.03);
+  --brand: oklch(0.725 0.133 163.03);
+  --brand-foreground: oklch(0.985 0.002 247.839);
+  /*
+   * 品牌色当「文字」时用的深色版本。
+   *
+   * 品牌绿 oklch(0.725 0.133 163) 在浅色底上只有 2.29:1、在 bg-primary/12 的浅绿
+   * tint 上只有 2.07:1 —— 远低于 AA 的 4.5:1，12px 的 badge 标签会明显发虚。
+   * 但直接把它调暗会连带改变按钮、侧栏高亮、图表等所有**填充**的品牌观感，
+   * 而那些地方本来就是大色块、对比度不成问题。
+   * 所以拆成两个令牌：--primary 继续做填充（与 switch 完全一致），
+   * --primary-ink 只用于文字。实测浅色下 4.70–5.28:1，深色下沿用原品牌绿（6.38:1）。
+   */
+  --primary-ink: oklch(0.5 0.15 163);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --radius: 0.75rem;
+  --sidebar: oklch(0.973 0.003 264);
+  --sidebar-foreground: oklch(0.24 0.01 264);
+  --sidebar-primary: oklch(0.725 0.133 163.03);
+  --sidebar-primary-foreground: oklch(0.99 0.002 247.839);
+  --sidebar-accent: oklch(0.93 0.004 264);
+  --sidebar-accent-foreground: oklch(0.21 0.01 264);
+  --sidebar-border: oklch(0.91 0.006 264);
+  --sidebar-ring: oklch(0.725 0.133 163.03);
+  --data-series-emerald: oklch(0.62 0.13 163);
+  --data-series-teal: oklch(0.66 0.1 190);
+  --data-series-indigo: oklch(0.55 0.11 265);
+  --data-series-violet: oklch(0.63 0.11 300);
+  --data-series-amber: oklch(0.72 0.12 78);
+  --data-series-rose: oklch(0.64 0.12 20);
+  --data-series-sky: oklch(0.63 0.1 235);
+  --data-series-lime: oklch(0.67 0.11 125);
+  --data-series-orange: oklch(0.67 0.15 48);
+  --data-series-pink: oklch(0.72 0.13 350);
+  --data-series-cyan: oklch(0.55 0.09 205);
+  --data-series-slate: oklch(0.58 0.03 250);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.208 0.042 265.755);
+  --foreground: oklch(0.929 0.013 255.508);
+  --card: oklch(0.279 0.041 260.031);
+  --card-foreground: oklch(0.929 0.013 255.508);
+  --popover: oklch(0.279 0.041 260.031);
+  --popover-foreground: oklch(0.929 0.013 255.508);
+  --primary: oklch(0.696 0.17 162.48);
+  --primary-foreground: oklch(0.208 0.042 265.755);
+  --secondary: oklch(0.279 0.041 260.031);
+  --secondary-foreground: oklch(0.929 0.013 255.508);
+  --muted: oklch(0.279 0.041 260.031);
+  --muted-foreground: oklch(0.704 0.04 256.788);
+  --accent: oklch(0.279 0.041 260.031);
+  --accent-foreground: oklch(0.929 0.013 255.508);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0.002 247.839);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.696 0.17 162.48);
+  --brand: oklch(0.696 0.17 162.48);
+  --brand-foreground: oklch(0.208 0.042 265.755);
+  /* 深色主题下品牌绿本身就是浅色，在深底上已有 6.38:1，无需再加深。 */
+  --primary-ink: oklch(0.696 0.17 162.48);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.279 0.041 260.031);
+  --sidebar-foreground: oklch(0.929 0.013 255.508);
+  --sidebar-primary: oklch(0.696 0.17 162.48);
+  --sidebar-primary-foreground: oklch(0.208 0.042 265.755);
+  --sidebar-accent: oklch(0.279 0.041 260.031);
+  --sidebar-accent-foreground: oklch(0.929 0.013 255.508);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.696 0.17 162.48);
+  --data-series-emerald: oklch(0.73 0.13 163);
+  --data-series-teal: oklch(0.76 0.1 190);
+  --data-series-indigo: oklch(0.77 0.11 265);
+  --data-series-violet: oklch(0.78 0.11 300);
+  --data-series-amber: oklch(0.81 0.12 78);
+  --data-series-rose: oklch(0.77 0.12 20);
+  --data-series-sky: oklch(0.76 0.1 235);
+  --data-series-lime: oklch(0.78 0.11 125);
+  --data-series-orange: oklch(0.8 0.15 48);
+  --data-series-pink: oklch(0.79 0.12 350);
+  --data-series-cyan: oklch(0.75 0.09 205);
+  --data-series-slate: oklch(0.78 0.03 250);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-primary-ink: var(--primary-ink);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  /* 数字与品牌名专用（与 switch 一致）：等宽数字在大字号下更整齐，
+     该字体自带 tabular 字形，比给系统字体加 font-variant-numeric 更稳。 */
+  --font-display: "Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif;
+  /* 等宽字：面板里 mono 承载的是**标识符**而不是代码 —— 账号文件名、模型 id、
+     trace id、日志时间戳、配置字段名。此前没定义 --font-mono，跟着 Tailwind 默认
+     落到系统等宽字（Windows 是 Consolas，macOS 是 SF Mono），同一份界面在两台机器上
+     字形不同，且 Consolas 的 `0/O`、`1/l` 区分度弱，扫 id 时容易读错。
+     定成具体字体后跨机一致。整套子集由 unicode-range 按需加载，实际只会下载 latin
+     那一份（约 40KB），不要为了「瘦身」去删 index.css 里的其他子集。 */
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", "Cascadia Mono", Consolas,
+    "Liberation Mono", monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    @apply bg-background text-foreground;
+    min-width: 320px;
+    height: 100%;
+    overflow: hidden;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+      "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+}

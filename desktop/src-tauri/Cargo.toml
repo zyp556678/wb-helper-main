@@ -1,0 +1,37 @@
+[package]
+name = "workbuddy-gateway-desktop"
+version = "0.9.0"
+description = "WorkBuddy 网关桌面壳 —— 代管 Go 网关并以原生窗口承载面板"
+authors = ["workbuddy-gateway"]
+edition = "2021"
+rust-version = "1.77"
+
+# 桌面壳的职责刻意收窄为「进程代管 + 窗口 + 托盘」，不含任何业务逻辑：
+# 面板与 API 同源（均 127.0.0.1:8317），因此不需要 Tauri IPC，
+# 也就不需要给远程域开 IPC 权限。依赖表保持最小，以控制首轮编译时间与产物体积。
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+# 托盘里切换自启时要弹确认框：桌面版与命令行版共用 8317 端口，冲突必须当面问清楚，
+# 不能替用户选。这是壳唯一的额外 UI 依赖。
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 生成接入密钥用。取操作系统 CSPRNG，不用时间戳之类的弱随机源 ——
+# 用弱随机数当密钥比不设密钥更糟，会给人虚假的安全感。
+# 选它而不是 rand：只要这一个函数，且已经在依赖树里（Cargo.lock 有 0.3.4）。
+getrandom = "0.3"
+
+# 单实例互斥：第二个实例必须在内建窗口/托盘/启动后端之前退出，
+# 否则会出现两个壳各自拉起一个网关抢端口。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+codegen-units = 1

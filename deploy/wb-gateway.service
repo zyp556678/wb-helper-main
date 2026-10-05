@@ -1,0 +1,53 @@
+[Unit]
+Description=WorkBuddy Gateway（CodeBuddy 账号池网关）
+Documentation=https://github.com/CangShui/workbuddy-gateway
+# 需要网络就绪后再启动：网关启动时会同步拉一次模型目录，
+# 网络没起来会退化到缓存，日志里出现一条可误读的警告。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 专用非特权用户：预创建
+#   sudo useradd --system --home /var/lib/wb-gateway --shell /usr/sbin/nologin wb-gateway
+User=wb-gateway
+Group=wb-gateway
+
+# 工作目录即数据目录：凭据、config.json、模型缓存、统计文件都落在这里。
+# 换成 -auth-dir 也可以，但要保证该目录对当前用户可读写。
+WorkingDirectory=/var/lib/wb-gateway
+
+# 只绑回环。网关自身不做反向代理与 TLS，对外暴露请在前面放 nginx/Caddy，
+# 或者改这里绑到 0.0.0.0 并设置 --api-key（二选一，别两样都不做）。
+ExecStart=/opt/wb-gateway/workbuddy-gateway serve \
+    --addr 127.0.0.1 \
+    --port 8317
+# 需要访问密钥时用下面这行（把 <你的密钥> 换掉，并确保该文件只有 root 可读）：
+# ExecStart=/opt/wb-gateway/workbuddy-gateway serve --addr 127.0.0.1 --port 8317 --api-key <你的密钥>
+
+Restart=always
+# 始终重启，但间隔留长一点：如果是配置写错导致启动即退出，
+# 高频重启只会把日志刷满，1 分钟足够人看清原因。
+RestartSec=60
+
+# SIGTERM 让网关走优雅退出：会先关停本机代理（若在跑），再刷一次统计落盘。
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# 日志走 journald：journalctl -u wb-gateway -f
+StandardOutput=journal
+StandardError=journal
+
+# 最小权限加固：网关只需要自己的数据目录和网络。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/wb-gateway
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+WorkBuddy Gateway - Windows installation
+=======================================
+
+This folder is the unpacked installer payload. You normally do not need to read
+this: the setup program already installed everything.
+
+If you are installing from this folder manually (for example on a machine where
+running a downloaded .exe is blocked), open a PowerShell window here and run:
+
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Launch
+
+Useful switches:
+
+    -Port 9000            listen on another port
+    -ApiKey "your-key"    require this key for the panel and /v1 endpoints
+    -AutoStart            also start the gateway hidden at logon
+    -Launch               open the panel when installation finishes
+
+What gets installed
+-------------------
+    %LOCALAPPDATA%\Programs\workbuddy-gateway
+        workbuddy-gateway.exe   the gateway (admin panel is embedded in it)
+        wb-local-agent.exe      optional: powers the "local client" panel page
+        run.cmd                 launcher used by the shortcuts
+        uninstall.ps1           uninstaller
+
+    %LOCALAPPDATA%\wb-gateway
+        credentials (workbuddy*.json), config.json, model cache, usage stats
+
+Everything is per-user: no administrator rights are needed and nothing is written
+outside your own profile.
+
+Uninstalling
+------------
+Settings > Apps > "WorkBuddy Gateway" > Uninstall, or run uninstall.ps1 from the
+install folder. Your data directory is kept unless you explicitly confirm deleting
+it (it contains credentials).
+
+Two things worth knowing
+-----------------------
+1. At startup the gateway pulls the model catalog once before it starts listening,
+   so the first /healthz answer takes about 30 seconds. This is by design, not a
+   hang.
+
+2. The setup program is not code-signed. Windows SmartScreen may therefore warn you
+   on first run. This is the same situation as most small open-source tools;
+   choose "More info" > "Run anyway" only if you obtained the file from a source
+   you trust.

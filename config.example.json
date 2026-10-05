@@ -1,0 +1,39 @@
+{
+  "upstream": {
+    "headerTimeoutSeconds": 300,
+    "idleTimeoutSeconds": 120,
+    "transientRetries": 2
+  },
+  "debug": {
+    "enabled": false
+  },
+  "models": {
+    "blocklist": [],
+    "allowlist": [],
+    "accounts": {}
+  },
+  "logging": {
+    "request_archive_enabled": true,
+    "request_retention_days": 7,
+    "request_archive_max_mb": 100
+  },
+  "prompt": {
+    "mode": "append",
+    "text": "",
+    "file": "",
+    "sanitize": true,
+    "degraded_retry": true,
+    "strict_first_system": true
+  },
+  "local": {
+    "enabled": true,
+    "bin": "wb-local-agent",
+    "data_dir": ""
+  },
+  "server": {
+    "read_timeout": "300s"
+  },
+  "schedule": {
+    "include_disabled_in_tasks": false
+  }
+}

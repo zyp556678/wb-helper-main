@@ -1,0 +1,44 @@
+# 构建上下文裁剪：镜像里只需要源码与前端清单。
+# 排除掉的东西要么体积大（.toolchain 是 76MB 便携工具链、repos 是三个克隆），
+# 要么是敏感数据（凭据、日志、运行时统计），一律不进构建上下文。
+
+# ---- 凭据与运行时数据（绝不能进镜像）----
+.testdata/
+workbuddy*.json
+*.disabled
+auths/
+logs/
+workbuddy-status.json
+wb-models-cache.json
+wb-stats.json
+config.json
+
+# ---- npm 分发产物（平台包里的二进制，镜像内用不到）----
+npm/dist/
+npm/platform/*/bin/
+
+# ---- 参考源码与工具链 ----
+repos/
+.toolchain/
+.workbuddy/
+
+# ---- 前端依赖与产物（镜像内会重新构建）----
+web/node_modules/
+web/dist/
+
+# ---- 构建产物与发行包 ----
+dist/
+*.exe
+*.exe~
+workbuddy-gateway
+wb-local-agent
+
+# ---- 文档与编辑器 ----
+*.md
+!README.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.git/
+.gitignore

@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>WorkBuddy 网关</title>
+    <!--
+      启动页。窗口先加载本页，等 Go 后端的 /healthz 通了再由壳导航到面板。
+
+      为什么不让窗口直接指向面板：后端首次启动要读配置、校验凭据、拉模型目录，
+      是秒级到数十级的耗时。窗口直连面板的结果就是白屏或"无法连接"，
+      用户既不知道在等什么，也拿不到失败原因。这里把这段等待显式化。
+
+      配色与面板保持一致（浅色 #ffffff/#1b1b21，深色 #1e293b/#e8eaf2，
+      品牌主色 #10ac96），避免启动页与主界面之间出现一次生硬跳变。
+    -->
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #1b1b21;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --brand: #10ac96;
+        --brand-soft: rgba(16, 172, 150, 0.12);
+        --danger: #dc2626;
+        --track: #eef0f4;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e293b;
+          --fg: #e8eaf2;
+          --muted: #9aa4b8;
+          --border: #33415a;
+          --brand: #2dd4bf;
+          --brand-soft: rgba(45, 212, 191, 0.14);
+          --danger: #f87171;
+          --track: #26334a;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        /* 无边框感：窗口本身就是应用，不需要再套一层描边 */
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .card {
+        width: 100%;
+        max-width: 420px;
+        padding: 0 32px;
+        text-align: center;
+      }
+      .mark {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 20px;
+        display: block;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .sub {
+        margin: 0 0 26px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+      .status {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        min-height: 20px;
+      }
+      .status.error {
+        color: var(--danger);
+        font-weight: 600;
+      }
+      .bar {
+        position: relative;
+        height: 3px;
+        margin: 16px 0 0;
+        border-radius: 999px;
+        background: var(--track);
+        overflow: hidden;
+      }
+      .bar span {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        width: 36%;
+        border-radius: 999px;
+        background: var(--brand);
+        animation: slide 1.25s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          left: -36%;
+        }
+        100% {
+          left: 100%;
+        }
+      }
+      .bar[hidden] {
+        display: none;
+      }
+      .detail {
+        margin: 18px 0 0;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--brand-soft);
+        font-size: 12.5px;
+        line-height: 1.65;
+        color: var(--fg);
+        text-align: left;
+        white-space: pre-wrap;
+        word-break: break-all;
+        /* 错误信息要能被复制出去（贴给同事 / 提 issue），所以这里必须可选 */
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .detail[hidden] {
+        display: none;
+      }
+      .hint {
+        margin: 14px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .hint[hidden] {
+        display: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .bar span {
+          animation: none;
+          left: 32%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <!-- 与 installer/tools/make-icons.py 生成的图标同一造型：青绿圆角方块 + 转发箭头 -->
+      <svg class="mark" viewBox="0 0 64 64" role="img" aria-label="WorkBuddy 网关">
+        <rect x="0" y="0" width="64" height="64" rx="15" fill="#10ac96" />
+        <path
+          d="M17 32h22M33 22l10 10-10 10"
+          fill="none"
+          stroke="#ffffff"
+          stroke-width="6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        <path d="M17 20v-4M17 48v-4" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.55" />
+      </svg>
+
+      <h1>WorkBuddy 网关</h1>
+      <p class="sub">正在准备本地服务</p>
+
+      <p id="status" class="status">正在启动网关服务…</p>
+      <div class="bar" id="bar"><span></span></div>
+
+      <p id="detail" class="detail" hidden></p>
+      <p id="hint" class="hint" hidden>
+        可右键任务栏托盘图标，选择「重新启动网关」或「打开数据目录」查看日志。
+      </p>
+    </div>
+
+    <script>
+      // 壳通过 eval 调用本函数注入状态。参数：
+      //   state: 'progress' | 'error'
+      //   text : 展示文案（错误态下为可诊断的完整说明）
+      window.__wbStatus = function (state, text) {
+        var status = document.getElementById("status");
+        var detail = document.getElementById("detail");
+        var hint = document.getElementById("hint");
+        var bar = document.getElementById("bar");
+
+        if (state === "error") {
+          status.textContent = "启动失败";
+          status.className = "status error";
+          detail.textContent = text || "未知错误";
+          detail.hidden = false;
+          hint.hidden = false;
+          bar.hidden = true;
+          return;
+        }
+
+        status.textContent = text || "正在启动…";
+        status.className = "status";
+        detail.hidden = true;
+        hint.hidden = true;
+        bar.hidden = false;
+      };
+    </script>
+  </body>
+</html>

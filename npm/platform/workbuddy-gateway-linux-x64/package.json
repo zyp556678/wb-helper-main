@@ -1,0 +1,15 @@
+{
+  "name": "workbuddy-gateway-linux-x64",
+  "version": "0.9.0-slice8",
+  "description": "workbuddy-gateway platform binaries (linux-x64)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "license": "MIT"
+}

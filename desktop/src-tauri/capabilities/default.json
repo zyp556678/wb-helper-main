@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "桌面壳主窗口的默认能力。面板与 API 同源，业务一律走 HTTP，不使用 IPC，故只保留核心权限。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

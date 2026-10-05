@@ -1,0 +1,291 @@
+# 发布工作流：一条 tag 打出全部安装包与发行包，并上传到 GitHub Release。
+#
+# 为什么分三段（前端 / 二进制 / 打包）而不是一个大矩阵：
+#   * 前端只需构建一次。放进 6 个平台的矩阵里会重复 6 次 npm ci + vite build，
+#     纯浪费（每次约 1 分钟）；
+#   * 各平台安装包必须在**对应系统**上打包（deb 要 dpkg-deb、pkg/dmg 要
+#     pkgbuild/hdiutil、setup.exe 要 iexpress），所以二进制先行、打包job 再挑平台跑。
+#
+# 触发：推送 v* tag；也可以在 Actions 页面手动触发（此时不创建 Release，
+# 只产出 artifacts，便于上线前试跑）。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # 二进制与前端产物之间的传递名，几个 job 保持一致
+  ARTIFACT_BIN: wb-binaries
+  ARTIFACT_WEB: wb-web-dist
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 前端：只构建一次，供各平台矩阵复用
+  # ---------------------------------------------------------------------------
+  web:
+    name: build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_WEB }}
+          path: web/dist
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # 2) 二进制：六平台交叉编译（纯 Go，无 CGO，不需要目标平台）
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: binaries ${{ matrix.target }}
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 交叉编译本身在哪个 runner 上做都可以，选便宜的 Linux
+          - target: linux/amd64
+            runs_on: ubuntu-latest
+          - target: linux/arm64
+            runs_on: ubuntu-latest
+          - target: windows/amd64
+            runs_on: ubuntu-latest
+          - target: windows/arm64
+            runs_on: ubuntu-latest
+          - target: darwin/amd64
+            runs_on: ubuntu-latest
+          - target: darwin/arm64
+            runs_on: ubuntu-latest
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_WEB }}
+          path: web/dist
+      - name: Test
+        run: go vet ./... && go test ./...
+      - name: Package
+        run: ./scripts/release.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_BIN }}-${{ strategy.job-index }}
+          # 每个矩阵 job 只产出自己那个平台的一个 tar.gz / zip
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # 3) 平台安装包
+  # ---------------------------------------------------------------------------
+  windows-setup:
+    name: windows setup.exe
+    needs: binaries
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+      # iexpress 是 Windows 自带组件，无需额外安装
+      - name: Build setup.exe (x64)
+        shell: bash
+        run: ./installer/windows/build-setup.sh x64
+      - name: Build setup.exe (arm64)
+        shell: bash
+        run: ./installer/windows/build-setup.sh arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-windows
+          path: dist/*-setup.exe
+          retention-days: 3
+
+  linux-deb:
+    name: linux deb
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+      - name: Build .deb
+        run: |
+          chmod +x installer/linux/build-deb.sh
+          ARCH=amd64 ./installer/linux/build-deb.sh
+          ARCH=arm64 ./installer/linux/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-linux
+          path: dist/*.deb
+          retention-days: 3
+
+  macos-pkg:
+    name: macos pkg + dmg
+    needs: binaries
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+      - name: Build .pkg and .dmg
+        run: |
+          chmod +x installer/macos/build-pkg.sh
+          ARCH=arm64 ./installer/macos/build-pkg.sh
+          ARCH=amd64 ./installer/macos/build-pkg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-macos
+          path: |
+            dist/*.pkg
+            dist/*.dmg
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # 4) npm 包：主包 + 各平台二进制包
+  # ---------------------------------------------------------------------------
+  npm:
+    name: npm packages
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+      - name: Fill platform packages and pack
+        run: |
+          chmod +x npm/scripts/build-packages.sh
+          ./npm/scripts/build-packages.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-npm-tarballs
+          path: npm/dist/*.tgz
+          retention-days: 3
+      # 只在前述产物都成功后发布；NPM_TOKEN 未配置时跳过（不阻断 Release）
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "NPM_TOKEN not configured - skipping npm publish."
+            echo "The packed tarballs are attached to the Release instead."
+            exit 0
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > ~/.npmrc
+          # 先发平台包再发主包：主包的 optionalDependencies 指向它们，
+          # 顺序反了会让先装的用户因为"找不到平台包"而拿不到二进制。
+          for pkg in $(ls -d npm/platform/*/); do
+            [ -n "$(ls -A "$pkg/bin" 2>/dev/null || true)" ] || continue
+            npm publish "$pkg" --access public
+          done
+          npm publish npm --access public
+
+  # ---------------------------------------------------------------------------
+  # 5) 汇总到 Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: publish release
+    needs: [windows-setup, linux-deb, macos-pkg, npm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: wb-installer-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: wb-installer-linux
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: wb-installer-macos
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: wb-npm-tarballs
+          path: dist/npm
+      - name: List assets
+        run: ls -lh dist dist/npm
+      - uses: softprops/action-gh-release@v2
+        with:
+          # 未找到 tag 对应的 Release 时自动创建，已存在则覆盖同名资产
+          files: |
+            dist/*
+            dist/npm/*
+          generate_release_notes: true
+          body: |
+            ## 安装方式（三选一）
+
+            **1. 平台安装包**（推荐，双击安装）
+
+            下载本页附件的对应文件后运行：
+
+            | 平台 | 文件 | 说明 |
+            | --- | --- | --- |
+            | Windows x64 / ARM64 | `*_x64-setup.exe` / `*_arm64-setup.exe` | 双击安装，按提示选择是否随登录启动；数据在 `%LOCALAPPDATA%\\wb-gateway` |
+            | Linux x64 / ARM64 | `*_amd64.deb` / `*_arm64.deb` | `sudo dpkg -i` 安装为 systemd 服务；数据在 `/var/lib/workbuddy-gateway` |
+            | macOS Intel / Apple Silicon | `*_amd64.pkg` / `*_arm64.pkg`（含 `.dmg`） | 双击安装；数据在 `~/.wb-gateway` |
+
+            安装后打开 <http://127.0.0.1:8317/panel/>。首次启动会先拉取模型目录，
+            约 30 秒后才开始监听端口，属预期行为。
+
+            **2. npm 全局安装**
+
+            ```
+            npm i -g workbuddy-gateway
+            workbuddy-gateway          # 起服务并自动打开面板
+            ```
+
+            数据目录固定为 `~/.wb-gateway`（可用 `WB_GATEWAY_DATA_DIR` 覆盖）。
+
+            **3. 免安装压缩包**
+
+            `*.tar.gz` / `*.zip` 解压即用：`./workbuddy-gateway serve`。
+
+            ## 说明
+
+            - 所有安装包均**未做代码签名**。Windows SmartScreen 与 macOS Gatekeeper
+              会提示来源未知，需手动允许（参见 `DEPLOY.md`）。
+            - 账号凭据请通过面板的「添加账号」获取，或把 `workbuddy*.json` 放进数据目录。
+            - 本项目是非官方网关，使用上游账号涉及目标平台服务条款与封号风险，
+              仅限本人授权账号与私有环境使用。

@@ -1,0 +1,34 @@
+{
+  "name": "workbuddy-gateway",
+  "version": "0.9.0-slice8",
+  "description": "WorkBuddy / CodeBuddy 账号池网关：本地反代 + Web 管理面板（npm i -g 后一条命令起服务）",
+  "bin": {
+    "workbuddy-gateway": "bin/workbuddy-gateway.js"
+  },
+  "files": [
+    "bin/workbuddy-gateway.js",
+    "scripts"
+  ],
+  "optionalDependencies": {
+    "workbuddy-gateway-darwin-arm64": "0.9.0-slice8",
+    "workbuddy-gateway-darwin-x64": "0.9.0-slice8",
+    "workbuddy-gateway-win32-x64": "0.9.0-slice8",
+    "workbuddy-gateway-linux-x64": "0.9.0-slice8",
+    "workbuddy-gateway-linux-arm64": "0.9.0-slice8"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "workbuddy",
+    "codebuddy",
+    "gateway",
+    "proxy",
+    "openai",
+    "account-pool"
+  ],
+  "license": "MIT"
+}
