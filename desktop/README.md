@@ -69,37 +69,54 @@ self-contained / dlltool 的修补是 `x86_64-pc-windows-gnu` 专属问题，不
 cd desktop/src-tauri && cargo build
 ```
 
-出安装包（NSIS，每用户安装、免 UAC）：
+出安装包 —— 三个平台各一个入口，都是一步到位，产物落在 `dist/`：
 
 ```bash
-node desktop/scripts/prepare-resources.mjs   # 先构建 Go 侧二进制
-cd desktop/src-tauri && cargo tauri build    # 需要 @tauri-apps/cli
+./installer/windows/build-desktop-setup.sh    # → workbuddy-gateway-desktop_<v>_x64-setup.exe
+./installer/macos/build-desktop-pkg.sh        # → workbuddy-gateway-desktop_<v>_arm64.dmg
+./installer/linux/build-desktop-deb.sh        # → workbuddy-gateway-desktop_<v>_amd64.deb
 ```
 
-出 Linux 安装包（.deb，装成带窗口和托盘的普通应用）：
+每个脚本做的都是同一件事：解出 `dist/<os>_<arch>/` 的 Go 二进制 →
+`prepare-resources.mjs` 把它们复制进 `src-tauri/bin/` → `tauri build`（Tauri 按平台自动
+叠加 `tauri.<os>.conf.json`）→ 把产出的安装包按 `dist/` 的命名习惯复制一份。
 
-```bash
-./installer/linux/build-desktop-deb.sh       # 一步到位，产物在 dist/
-```
+平台差异全部按分支处理，没有复制第二套代码：
 
-它做的事：解出 `dist/linux_<arch>/` 的 Go 二进制 → `prepare-resources.mjs`
-把它们复制进 `src-tauri/bin/` → `tauri build`（叠加 `tauri.linux.conf.json` 的
-`deb` 目标与 Linux 资源清单）→ 把 Tauri 产出的 deb 按 `dist/` 的命名习惯复制一份。
+| 关注点 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 打包目标 | `nsis` + `tauri.windows.conf.json` | `tauri.macos.conf.json` 的 `dmg` | `tauri.linux.conf.json` 的 `deb` |
+| WebView | WebView2 | 系统 WKWebView | 系统 WebKitGTK |
+| 额外资源 | **仅 gnu 目标**需要 `WebView2Loader.dll` | 不需要 | 不需要 |
+| Go 产物名 | `workbuddy-gateway.exe` | `workbuddy-gateway` | `workbuddy-gateway` |
+| 数据目录 | `%LOCALAPPDATA%\wb-gateway` | `~/.wb-gateway` | `~/.wb-gateway` |
+| 壳的资源目录 | exe 同目录（+ `bin/`） | `Contents/Resources/`（+ `bin/`） | `/usr/lib/WorkBuddy Gateway/`（+ `bin/`） |
 
-平台差异集中在三个文件，都是按平台分支而不是复制一套：
+最后一行是三个平台里最容易踩的坑：**只有 Windows** 的资源与壳在同一目录下，macOS 的
+`.app` 与 Linux 的 deb 都把资源放到与可执行文件**不同级**的地方。所以
+`backend.rs::locate()` 必须额外向 Tauri 要 `resource_dir()`（`PackageInfo.name` 就是
+productName），只靠「exe 同目录 / 上一级」这类相对路径永远找不到 —— 症状是装完打开就报
+「未找到 workbuddy-gateway」。
 
-| 关注点 | Windows | Linux |
+## Windows：MSVC 与 windows-gnu 两条路
+
+同一个平台有两套可行工具链，本仓库两条都保留：
+
+| | MSVC（CI / 一般机器） | windows-gnu（作者本机） |
 | --- | --- | --- |
-| 打包目标 | `tauri.conf.json` 的 `nsis` + `tauri.windows.conf.json` | `tauri.linux.conf.json` 的 `deb` |
-| 额外资源 | 需要 `WebView2Loader.dll`（放在 Windows 专属配置里） | 不需要，用系统 WebKitGTK |
-| Go 产物名 | `workbuddy-gateway.exe` | `workbuddy-gateway`（`prepare-resources.mjs` 按平台取后缀） |
-| 数据目录 | `%LOCALAPPDATA%\wb-gateway` | `~/.wb-gateway`（`backend.rs::base_data_dir`） |
-| 资源目录 | exe 同目录，`locate()` 的相对路径就能命中 | `/usr/lib/WorkBuddy Gateway/`，与 `/usr/bin` 里的壳**不同级** |
+| 入口 | `installer/windows/build-desktop-setup.sh` | `scripts/build-desktop.sh` |
+| 前置 | VS Build Tools（GitHub runner 自带） | `desktop/scripts/setup-rust-toolchain.sh` 补齐 mingw |
+| `WebView2Loader.dll` | **静态链接，不需要** | **动态链接，必须随包分发** |
+| 额外产物 | — | 绿色版 `*-portable.zip`（`scripts/package-desktop.py`） |
 
-最后一行是 Linux 上最容易踩的坑：deb 把壳装到 `/usr/bin/`，资源放到
-`/usr/lib/<productName>/`，两者不是父子目录。所以 `backend.rs::locate()` 必须额外
-向 Tauri 要 `resource_dir()`（`PackageInfo.name` 就是 productName），只靠「exe 同目录 /
-上一级」这类相对路径永远找不到 —— 症状是装完打开就报「未找到 workbuddy-gateway」。
+作者本机走 gnu 是因为其网络下 aka.ms（VS Build Tools 引导器）不可达 —— 那是本机网络
+问题，CI 的 runner 上不存在，所以 CI 走 MSVC 更省事。
+
+这个差异会直接影响打包配置：`tauri.windows.conf.json` 里为 gnu 显式声明了
+`WebView2Loader.dll` 这个资源，而 MSVC 下该文件不存在，会让打包直接失败。所以 MSVC
+那条路用 `--config` 把 `bundle.resources` 覆盖成只有 `bin/*`（实测确认 Tauri 的
+`--config` 对数组是**替换**而非合并，这条覆盖才真正生效）。`prepare-resources.mjs`
+也据此按 `rustc -vV` 的 host 分叉：gnu 缺 DLL 硬失败，msvc 直接跳过。
 
 ## 运行期布局
 
