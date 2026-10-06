@@ -280,7 +280,7 @@
 
 四条路，装的是同一个网关。除容器外都不需要管理员权限。
 
-**零、桌面应用（Windows，切片 9）**
+**零、桌面应用（Windows / Linux，切片 9）**
 
 `dist/workbuddy-gateway-desktop_0.9.0_x64-setup.exe`：Tauri 壳 + 网关 + 本机代理
 一起安装到 `%LOCALAPPDATA%\WorkBuddy Gateway`（每用户安装、免 UAC），开始菜单启动
@@ -289,6 +289,15 @@
 **与命令行版共用同一份账号池**；卸载保留数据目录。绿色版用
 `workbuddy-gateway-desktop_0.9.0_x64.exe`（需保持其与 `bin/` 的相对布局）。
 构建方式与工具链修补见 `desktop/README.md`。
+
+Linux 桌面对应 `dist/workbuddy-gateway-desktop_0.9.0_amd64.deb`：同一个壳，装成
+`/usr/bin/workbuddy-gateway-desktop`（菜单里显示「WorkBuddy Gateway」），网关与本机代理
+作为壳的资源落在 `/usr/lib/WorkBuddy Gateway/bin/`，数据目录是 `~/.wb-gateway`。
+它与**服务端包**（`workbuddy-gateway_<版本>_amd64.deb`，装 systemd 服务、只有浏览器访问）
+是两件事：要窗口就装前者，要开机常驻的无界面服务就装后者。两者 dpkg 包名不同
+（`work-buddy-gateway` / `workbuddy-gateway`），可以共存，但共用 8317 端口。
+构建：`./installer/linux/build-desktop-deb.sh`。
+> GNOME 下托盘图标需要 AppIndicator 扩展；没装扩展时窗口一切正常，只是没有托盘图标。
 
 **开机自启动默认关闭**，两个地方可以开：托盘菜单的「开机自启动」勾选项，或面板
 「配置 → 开机自启动」的开关（桌面版、命令行版、容器版的面板里都有这一项，读的是

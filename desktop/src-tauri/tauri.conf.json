@@ -33,8 +33,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "bin/*",
-      "WebView2Loader.dll"
+      "bin/*"
     ],
     "windows": {
       "nsis": {

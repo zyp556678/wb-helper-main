@@ -21,23 +21,48 @@
 _ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _ROOT="$(cd "$_ENV_DIR/../.." && pwd)/.toolchain"
 
-# Rust/Go 都是 Windows 原生程序，要的是 Windows 形态的路径，不是 MSYS 的 /d/...。
-if command -v cygpath >/dev/null 2>&1; then
-  _ROOT_WIN="$(cygpath -w "$_ROOT")"
+# 平台判定：MSYS2 / Git-Bash 的 uname 报 MINGW64_NT-* 或 MSYS_NT-*，Linux 报 Linux。
+# 不拿「有没有 cygpath」当判据 —— Linux 上装了 mingw 交叉工具链时同样会有 cygpath，
+# 那会把 Linux 误判成 Windows，进而设出 `...\.toolchain\rust` 这种带反斜杠的路径。
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) _IS_WINDOWS=1 ;;
+  *) _IS_WINDOWS=0 ;;
+esac
+
+if [ "$_IS_WINDOWS" = "1" ]; then
+  # Rust/Go 都是 Windows 原生程序，要的是 Windows 形态的路径，不是 MSYS 的 /d/...。
+  if command -v cygpath >/dev/null 2>&1; then
+    _ROOT_WIN="$(cygpath -w "$_ROOT")"
+  else
+    _ROOT_WIN="$_ROOT"
+  fi
+
+  export RUSTUP_HOME="$_ROOT_WIN\\rust"
+  export CARGO_HOME="$_ROOT_WIN\\cargo"
+  export GOCACHE="$_ROOT_WIN\\gocache"
+
+  _CARGO_BIN="$_ROOT/cargo/bin"
+  _MINGW_BIN="$_ROOT/msys2/mingw64/bin"
+  _GO_BIN="$_ROOT/go/bin"
+  _SC="$_ROOT/rust/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained"
+
+  export PATH="$_SC:$_CARGO_BIN:$_MINGW_BIN:$_GO_BIN:$PATH"
 else
-  _ROOT_WIN="$_ROOT"
+  # Linux / macOS：同一个 .toolchain/ 隔离目录，只是路径是普通的 Unix 形态。
+  # 下面那一大段 mingw / self-contained / dlltool 修补全部不适用 —— 那些是
+  # `x86_64-pc-windows-gnu` 专属的问题，Linux 上用的是系统 gcc 链接器。
+  export RUSTUP_HOME="$_ROOT/rust"
+  export CARGO_HOME="$_ROOT/cargo"
+  export GOCACHE="$_ROOT/gocache"
+
+  export PATH="$_ROOT/cargo/bin:$_ROOT/go/bin:$PATH"
 fi
 
-export RUSTUP_HOME="$_ROOT_WIN\\rust"
-export CARGO_HOME="$_ROOT_WIN\\cargo"
-export GOCACHE="$_ROOT_WIN\\gocache"
-
-_CARGO_BIN="$_ROOT/cargo/bin"
-_MINGW_BIN="$_ROOT/msys2/mingw64/bin"
-_GO_BIN="$_ROOT/go/bin"
-_SC="$_ROOT/rust/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained"
-
-export PATH="$_SC:$_CARGO_BIN:$_MINGW_BIN:$_GO_BIN:$PATH"
+# cargo 的构建产物目录固定到 .toolchain/ 内 —— 这是仓库既有约定
+# （见 .gitignore 第 52 行与 prepare-resources.mjs 找回 WebView2Loader.dll 的路径）。
+# 放在这里而不是各脚本里，是为了让 `cargo build` 与打包脚本看到同一个 target 目录：
+# 手工 `cargo build` 一次就能自愈缺失的 DLL / 复用增量产物，不必两处各编一遍。
+export CARGO_TARGET_DIR="$_ROOT/cargo-target"
 
 # ─────────────────────────────────────────────────────────────────────
 # 为什么需要 windows-gnu 而不是 MSVC

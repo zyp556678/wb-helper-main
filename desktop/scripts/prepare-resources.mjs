@@ -6,7 +6,7 @@
 //  2. 复制后校验大小，防止半截文件被当成有效产物打进去。
 //  3. 打印版本号，便于确认打进包里的到底是哪一版 Go 后端。
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -15,7 +15,33 @@ const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..", "..");
 const resourceDir = resolve(here, "..", "src-tauri", "bin");
 
-const BINARIES = ["workbuddy-gateway.exe", "wb-local-agent.exe"];
+// 壳要代管的两个 Go 产物。后缀按平台取：Windows 是 `.exe`，Linux/macOS 不带。
+// 这个后缀同时决定「拷成什么名字」—— 壳运行期按这个名字去 spawn。
+const isWindows = process.platform === "win32";
+const EXE = isWindows ? ".exe" : "";
+const BINARIES = [`workbuddy-gateway${EXE}`, `wb-local-agent${EXE}`];
+
+/**
+ * 按顺序定位一个 Go 产物。
+ *
+ * 1) 项目根目录 —— `scripts/build.sh` 的落点（一直是这条路）；
+ * 2) `dist/linux_<arch>/` —— `scripts/release.sh` 产出的 tar.gz 解压后的结构。
+ *
+ * 为什么需要第 2 条：`build.sh` 把产物名写死成 `.exe`，在 Linux 上跑出来的名字
+ * 是错的；Linux 上正确的来源是 `release.sh` 的交叉编译产物。没有这一步，
+ * Linux 桌面版就只能靠手工把二进制摆到根目录才能打包成功。
+ */
+function findBinary(name) {
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const candidates = [
+    join(projectRoot, name),
+    join(projectRoot, "dist", `linux_${arch}`, name),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
 /**
  * 从 cargo 构建产物里找回 WebView2Loader.dll。
@@ -60,9 +86,14 @@ mkdirSync(resourceDir, { recursive: true });
 
 let failed = false;
 for (const name of BINARIES) {
-  const source = join(projectRoot, name);
-  if (!existsSync(source)) {
-    console.error(`[prepare] 缺少 ${name}，请先在项目根目录执行 Go 构建`);
+  const source = findBinary(name);
+  if (!source) {
+    console.error(
+      `[prepare] 缺少 ${name}，请先产出 Go 侧二进制：\n` +
+        "          Linux/macOS： ./scripts/release.sh <os>/<arch>" +
+        "，再解压 dist/*.tar.gz（或把二进制放到项目根目录）\n" +
+        "          Windows    ： ./scripts/build.sh",
+    );
     failed = true;
     continue;
   }
@@ -74,11 +105,16 @@ for (const name of BINARIES) {
   }
   const target = join(resourceDir, name);
   copyFileSync(source, target);
-  console.log(`[prepare] ${name} → ${target} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+  // 非 Windows 上必须显式补可执行位：Tauri 只把它当资源打包，运行期壳要直接
+  // spawn 它，少这一位在打包时毫无征兆，装完却是「启动失败：Permission denied」。
+  if (!isWindows) chmodSync(target, 0o755);
+  console.log(`[prepare] ${name} ← ${source} (${(size / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 if (failed) process.exit(1);
 
+// ---- Windows 专属：WebView2Loader.dll ----
+//
 // WebView2Loader.dll 必须与壳同目录，否则壳启动后会静默退出（进程存活但没有窗口、
 // 也不拉起后端，release 版无控制台所以看不到任何错误）。
 //
@@ -92,22 +128,29 @@ if (failed) process.exit(1);
 // 2) cargo 构建产物里的 —— webview2-com-sys 的 build script 会把它解到
 //    target/<profile>/ 与 target/<profile>/build/webview2-com-sys-*/out/x64/ 下。
 // 这样新克隆的仓库跑一次构建就能自愈，不必先把二进制提交进仓库。
-const webviewLoader = resolve(here, "..", "src-tauri", "WebView2Loader.dll");
-if (!existsSync(webviewLoader)) {
-  const recovered = recoverWebViewLoader(projectRoot, webviewLoader);
-  if (!recovered) {
-    console.error(
-      `[prepare] 缺少 WebView2Loader.dll，且在构建产物里也没找到：${webviewLoader}\n` +
-        "          先跑一次 `cargo build`（webview2-com-sys 会解出这个 DLL），" +
-        "或手动从 .toolchain/cargo-target/<profile>/ 复制过来。",
-    );
-    process.exit(1);
+//
+// Linux / macOS 用系统 WebKitGTK，没有也不需要有这个组件；这里整段跳过，
+// 而不是造一个占位文件 —— 缺 DLL 在 Windows 上必须继续是硬失败。
+if (isWindows) {
+  const webviewLoader = resolve(here, "..", "src-tauri", "WebView2Loader.dll");
+  if (!existsSync(webviewLoader)) {
+    const recovered = recoverWebViewLoader(projectRoot, webviewLoader);
+    if (!recovered) {
+      console.error(
+        `[prepare] 缺少 WebView2Loader.dll，且在构建产物里也没找到：${webviewLoader}\n` +
+          "          先跑一次 `cargo build`（webview2-com-sys 会解出这个 DLL），" +
+          "或手动从 .toolchain/cargo-target/<profile>/ 复制过来。",
+      );
+      process.exit(1);
+    }
+    console.log(`[prepare] WebView2Loader.dll 从构建产物找回：${recovered}`);
   }
-  console.log(`[prepare] WebView2Loader.dll 从构建产物找回：${recovered}`);
+  console.log(
+    `[prepare] WebView2Loader.dll 就位 (${(statSync(webviewLoader).size / 1024).toFixed(0)} KB)`,
+  );
+} else {
+  console.log("[prepare] 非 Windows 平台，跳过 WebView2Loader.dll（用系统 WebKitGTK）");
 }
-console.log(
-  `[prepare] WebView2Loader.dll 就位 (${(statSync(webviewLoader).size / 1024).toFixed(0)} KB)`,
-);
 
 // 版本号取自治的网关二进制本身，而不是另抄一份常量 —— 避免文档/包名与真实后端不一致。
 try {

@@ -339,6 +339,11 @@ fn current_exe_path() -> Option<PathBuf> {
 /// 跑一条命令并收下 (是否成功, stdout+stderr)，全程不弹窗口。
 ///
 /// 返回 `None` 表示命令压根没起来（找不到可执行文件等）。
+///
+/// 只有 Windows 分支（`reg` / `schtasks`）与单元测试会用到它；macOS / Linux 的
+/// 自启落点是直接写文件，不需要起子进程。不加这个属性的话，Linux 上构建会得到
+/// 一条 `function is never used` 警告 —— 那会掩盖真正需要注意的警告。
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn hidden_output(program: &str, args: &[&str]) -> Option<(bool, String)> {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);

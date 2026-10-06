@@ -53,6 +53,9 @@ source desktop/scripts/env.sh    # 设好 RUSTUP_HOME / CARGO_HOME / GOCACHE / P
 
 `env.sh` 会自动把 `.toolchain/` 转成 Windows 形态的路径（Rust/Go 是原生程序，
 认不了 MSYS 的 `/d/...`），并把补齐过的 self-contained 工具集加进 `PATH`。
+它内部按 `uname` 分平台：Linux / macOS 走普通 Unix 路径，下面那些 mingw /
+self-contained / dlltool 的修补是 `x86_64-pc-windows-gnu` 专属问题，不会生效。
+两种平台都把 `CARGO_TARGET_DIR` 固定到 `.toolchain/cargo-target`。
 
 > **依赖源注意事项**：Rust 工具链使用 `x86_64-pc-windows-gnu`，rustup 自带的
 > self-contained 链接器（`ld.exe` / `x86_64-w64-mingw32-gcc.exe`）使构建**不需要
@@ -73,6 +76,31 @@ node desktop/scripts/prepare-resources.mjs   # 先构建 Go 侧二进制
 cd desktop/src-tauri && cargo tauri build    # 需要 @tauri-apps/cli
 ```
 
+出 Linux 安装包（.deb，装成带窗口和托盘的普通应用）：
+
+```bash
+./installer/linux/build-desktop-deb.sh       # 一步到位，产物在 dist/
+```
+
+它做的事：解出 `dist/linux_<arch>/` 的 Go 二进制 → `prepare-resources.mjs`
+把它们复制进 `src-tauri/bin/` → `tauri build`（叠加 `tauri.linux.conf.json` 的
+`deb` 目标与 Linux 资源清单）→ 把 Tauri 产出的 deb 按 `dist/` 的命名习惯复制一份。
+
+平台差异集中在三个文件，都是按平台分支而不是复制一套：
+
+| 关注点 | Windows | Linux |
+| --- | --- | --- |
+| 打包目标 | `tauri.conf.json` 的 `nsis` + `tauri.windows.conf.json` | `tauri.linux.conf.json` 的 `deb` |
+| 额外资源 | 需要 `WebView2Loader.dll`（放在 Windows 专属配置里） | 不需要，用系统 WebKitGTK |
+| Go 产物名 | `workbuddy-gateway.exe` | `workbuddy-gateway`（`prepare-resources.mjs` 按平台取后缀） |
+| 数据目录 | `%LOCALAPPDATA%\wb-gateway` | `~/.wb-gateway`（`backend.rs::base_data_dir`） |
+| 资源目录 | exe 同目录，`locate()` 的相对路径就能命中 | `/usr/lib/WorkBuddy Gateway/`，与 `/usr/bin` 里的壳**不同级** |
+
+最后一行是 Linux 上最容易踩的坑：deb 把壳装到 `/usr/bin/`，资源放到
+`/usr/lib/<productName>/`，两者不是父子目录。所以 `backend.rs::locate()` 必须额外
+向 Tauri 要 `resource_dir()`（`PackageInfo.name` 就是 productName），只靠「exe 同目录 /
+上一级」这类相对路径永远找不到 —— 症状是装完打开就报「未找到 workbuddy-gateway」。
+
 ## 运行期布局
 
 安装后（Windows，每用户安装）：
@@ -88,6 +116,21 @@ cd desktop/src-tauri && cargo tauri build    # 需要 @tauri-apps/cli
 因此**桌面版、命令行版、浏览器版看到的是同一份账号池**，不会各存一份。
 壳会把后端的 stdout/stderr 追加到 `%LOCALAPPDATA%\wb-gateway\logs\gateway.log`：
 壳是托盘应用、没有控制台，后台启动失败若没有任何落盘日志将无法排查。
+
+安装后（Linux，deb）：
+
+```
+/usr/bin/workbuddy-gateway-desktop          壳（菜单项「WorkBuddy Gateway」）
+/usr/lib/WorkBuddy Gateway/bin/workbuddy-gateway  网关后端
+/usr/lib/WorkBuddy Gateway/bin/wb-local-agent     本机代理
+/usr/share/applications/WorkBuddy Gateway.desktop 菜单项
+/usr/share/icons/hicolor/256x256/apps/workbuddy-gateway-desktop.png 图标
+```
+
+Linux 的数据目录是 `~/.wb-gateway`（`backend.rs::base_data_dir` 取 `$HOME`，
+Windows 才取 `%LOCALAPPDATA%`），日志同样在 `<数据目录>/logs/gateway.log`。
+服务端包（`installer/linux/build-deb.sh`）把网关装到 `/usr/bin/workbuddy-gateway`
+并配 systemd 单元，两者 dpkg 包名不同、可以共存，但共用 8317 端口。
 
 ## 已知取舍
 

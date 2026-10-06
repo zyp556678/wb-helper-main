@@ -92,14 +92,20 @@ fn existing_api_key() -> Option<String> {
 ///
 /// 查找顺序（先近后远）：
 ///   1. 可执行文件同目录          —— 安装包 / 便携包布局
-///   2. 可执行文件同目录 bin/     —— Tauri 资源目录布局
-///   3. 开发布局：向上找到项目根   —— `cargo run` 时 exe 在 target/ 深处
-fn locate(name: &str) -> Option<PathBuf> {
+///   2. 可执行文件同目录 bin/     —— Tauri 资源目录布局（Windows 每用户安装）
+///   3. `extra_dirs`              —— Tauri 的 `resource_dir()`，见 `resource_dirs()`
+///   4. 开发布局：向上找到项目根   —— `cargo run` 时 exe 在 target/ 深处
+fn locate(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             dirs.push(parent.to_path_buf());
             dirs.push(parent.join("bin"));
+        }
+    }
+    dirs.extend(extra_dirs.iter().cloned());
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
             // 开发时 target/<profile>/ 距项目根有 3 层
             let mut cursor = parent.to_path_buf();
             for _ in 0..4 {
@@ -123,6 +129,23 @@ fn locate(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Tauri 声明的资源目录（`bundle.resources` 的落点），以及它下面的 `bin/`。
+///
+/// 为什么必须单独向 Tauri 要这两个路径：Linux 的 deb 布局把壳装在 `/usr/bin/`，
+/// 而资源被放到 `/usr/lib/<产品名>/` —— **两者不同级**，靠「exe 同目录 / 上一级」
+/// 这类相对路径永远找不到。少了这一步，装完打开就是
+/// 「未找到 workbuddy-gateway 可执行文件」，而这在打包期毫无征兆。
+///
+/// Windows 上 `resource_dir()` 等于 exe 同目录，与第 1、2 条候选重合，无副作用。
+fn resource_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        dirs.push(dir.join("bin"));
+        dirs.push(dir);
+    }
+    dirs
+}
+
 /// 网关数据目录：与安装包/npm 入口保持同一处，保证「桌面版看到的账号池」
 /// 和「命令行版看到的」是同一份，不会各存一份让人困惑。
 fn data_dir() -> PathBuf {
@@ -131,10 +154,31 @@ fn data_dir() -> PathBuf {
             return PathBuf::from(explicit);
         }
     }
-    let base = std::env::var("LOCALAPPDATA")
+    base_data_dir().join("wb-gateway")
+}
+
+/// 各平台的「用户数据根目录」。
+///
+/// Windows 取 `%LOCALAPPDATA%`；macOS / Linux 取 `$HOME` —— 与 Go 网关自己的
+/// 默认值、npm 入口落在同一处，三个入口共用同一份账号池。
+///
+/// 为什么要显式分出非 Windows 分支：原来两边都写 `LOCALAPPDATA` 取不到就回退
+/// `temp_dir()`，在 Linux 上意味着数据目录变成 `/tmp/wb-gateway` —— 重启即丢，
+/// 且与 README 承诺的 `~/.wb-gateway` 不符，用户看到的现象是「装完桌面版，
+/// 之前命令行版登录的账号全没了」。只有在连 `HOME` 都取不到的退化环境里
+/// 才用临时目录兜底，保证仍能启动而不是直接崩。
+#[cfg(windows)]
+fn base_data_dir() -> PathBuf {
+    std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("wb-gateway")
+        .unwrap_or_else(|_| std::env::temp_dir())
+}
+
+#[cfg(not(windows))]
+fn base_data_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
 }
 
 #[cfg(windows)]
@@ -247,7 +291,10 @@ pub fn boot(app: AppHandle, port: u16) {
         return;
     }
 
-    let Some(bin) = locate("workbuddy-gateway.exe").or_else(|| locate("workbuddy-gateway")) else {
+    let extra_dirs = resource_dirs(&app);
+    let Some(bin) = locate("workbuddy-gateway.exe", &extra_dirs)
+        .or_else(|| locate("workbuddy-gateway", &extra_dirs))
+    else {
         set_error(
             &app,
             "未找到 workbuddy-gateway 可执行文件。\n请把它与本程序放在同一目录，或使用完整安装包。",
