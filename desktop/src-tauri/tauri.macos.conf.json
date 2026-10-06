@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["dmg"],
+    "icon": ["icons/icon.png"],
+    "resources": ["bin/*"],
+    "shortDescription": "WorkBuddy 网关桌面版（窗口 + 托盘）",
+    "longDescription": "WorkBuddy / CodeBuddy 账号池网关的桌面形态：原生窗口承载管理面板，托盘常驻，壳代管网关进程。窗口内是与命令行版、浏览器版完全相同的那套面板，三个入口共用同一份账号池。",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

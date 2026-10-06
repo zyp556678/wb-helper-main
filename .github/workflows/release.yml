@@ -95,11 +95,18 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------------------
-  # 3) 平台安装包
+  # 3) 平台安装包（**无窗口**形态：装成服务或命令行，只能开浏览器看面板）
+  #
+  # 这一组只在手动触发时跑（workflow_dispatch）：
+  #   · 它们的产物不再进 Release（Release 只发布带窗口的桌面版，见第 5 节）；
+  #   · 打 tag 时跑它们纯属浪费 Actions 分钟，而且 windows-setup 用的 iexpress
+  #     实测会空转 20 分钟以上，把整条流水线的状态一直吊在 in_progress。
+  # 需要这些包时：Actions 页面 → release → Run workflow。
   # ---------------------------------------------------------------------------
   windows-setup:
     name: windows setup.exe
     needs: binaries
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,6 +131,7 @@ jobs:
   linux-deb:
     name: linux deb
     needs: binaries
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -211,9 +219,114 @@ jobs:
           path: dist/workbuddy-gateway-desktop_*.deb
           retention-days: 3
 
+  # ---------------------------------------------------------------------------
+  # 3b) 桌面版：另外两个平台（Linux 那个见上面）
+  #
+  # 这三个作业产出的才是 Release 发布的东西。它们与第 3 节那组的区别不只是图标：
+  # 桌面壳是 Tauri 应用，三个平台各绑一套完全不同的 WebView（WebKitGTK / WKWebView /
+  # WebView2），**必须各平台本地编译**，Go 的交叉编译在这里帮不上忙。
+  # 三个作业都只依赖 binaries，互不阻塞 —— 任何一个失败都不会拖住另外两个。
+  # ---------------------------------------------------------------------------
+  macos-desktop-dmg:
+    name: macos desktop dmg
+    needs: binaries
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 与 Linux 那个作业同一套口径：Rust 装进仓库内的 .toolchain/ 并缓存。
+      # macos-14 是 arm64 runner，rustup 的默认 host 就是 aarch64-apple-darwin，
+      # 所以只出 arm64 的 dmg（Intel Mac 需要额外加 x86_64 target，见 README 的说明）。
+      - name: Cache Rust toolchain and target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            .toolchain/rust
+            .toolchain/cargo
+            .toolchain/cargo-target
+          key: rust-${{ runner.os }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Install Rust into .toolchain
+        run: |
+          export RUSTUP_HOME="$PWD/.toolchain/rust"
+          export CARGO_HOME="$PWD/.toolchain/cargo"
+          if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+          fi
+          "$CARGO_HOME/bin/cargo" --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+
+      # 打包脚本从 dist/darwin_<arch>/ 取壳要代管的两个 Go 产物。
+      - name: Unpack darwin binaries
+        run: tar -xzf dist/workbuddy-gateway_*_darwin_arm64.tar.gz -C dist
+
+      - name: Build .dmg
+        run: ./installer/macos/build-desktop-pkg.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-macos-desktop
+          path: dist/workbuddy-gateway-desktop_*.dmg
+          retention-days: 3
+
+  windows-desktop-setup:
+    name: windows desktop setup.exe
+    needs: binaries
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 走 MSVC：GitHub 的 windows runner 自带 VS Build Tools。作者本机之所以绕道
+      # windows-gnu，是因为其网络下 aka.ms（VS Build Tools 引导器）不可达 ——
+      # 那是本机网络问题，runner 上不存在。打包脚本里另有关于 WebView2Loader.dll
+      # 在这两条路上差异的说明。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+
+      - name: Unpack windows binaries
+        shell: bash
+        run: tar -xzf dist/workbuddy-gateway_*_windows_amd64.tar.gz -C dist
+
+      - name: Build setup.exe
+        shell: bash
+        run: ./installer/windows/build-desktop-setup.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-windows-desktop
+          path: dist/workbuddy-gateway-desktop_*-setup.exe
+          retention-days: 3
+
   macos-pkg:
     name: macos pkg + dmg
     needs: binaries
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -241,6 +354,7 @@ jobs:
   npm:
     name: npm packages
     needs: binaries
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -282,28 +396,28 @@ jobs:
           npm publish npm --access public
 
   # ---------------------------------------------------------------------------
-  # 5) 汇总到 Release
+  # 5) 汇总到 Release：只发布**桌面版**（带原生窗口 + 托盘），三个平台各一个包
   #
-  # 只发布**桌面版**（带原生窗口 + 托盘的那个包）。
+  # 为什么把第 3 节那组排除在 Release 之外：Windows setup.exe / Linux 服务端 deb /
+  # macOS pkg+dmg / npm 包全是**无窗口**形态（装成服务或命令行，只能开浏览器看面板）。
+  # 两种形态混在同一页附件里，用户很容易装错，而「装完没有窗口」正是最常见的误解。
+  # 要无窗口形态的走 DEPLOY.md 里的那几条路。
   #
-  # 为什么把其它产物排除在 Release 之外：本工作流另外还产出 Windows setup.exe、
-  # Linux 服务端 deb、macOS pkg/dmg、npm 包 —— 它们全是**无窗口**形态（装成服务或
-  # 命令行，只能开浏览器看面板）。把两种形态混在同一页附件里，用户很容易装错，
-  # 而"装完没有窗口"正是最常见的误解。要无窗口形态的走 DEPLOY.md 里的那几条路。
-  #
-  # 这些产物仍然照常构建并上传为本次运行的 artifacts，需要时从 Actions 页面取；
-  # 它们不再作为 Release 的依赖，所以任何一个失败也不会再挡住桌面版的发布。
+  # 三个桌面作业互不阻塞，但这里的 needs 要求三个都成功才发布 —— 宁可暂时不发，
+  # 也不要发出一个"看着齐、其实少一个平台"的 Release。缺哪个就看那个作业的日志。
   # ---------------------------------------------------------------------------
   release:
     name: publish release
-    needs: [linux-desktop-deb]
+    needs: [linux-desktop-deb, macos-desktop-dmg, windows-desktop-setup]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 三个桌面作业的 artifacts 命名统一是 wb-installer-<os>-desktop，一次取齐。
       - uses: actions/download-artifact@v4
         with:
-          name: wb-installer-linux-desktop
+          pattern: wb-installer-*-desktop
+          merge-multiple: true
           path: dist
       - name: List assets
         run: ls -lh dist
@@ -311,16 +425,23 @@ jobs:
         with:
           # 未找到 tag 对应的 Release 时自动创建，已存在则覆盖同名资产
           #
-          # 用带前缀的 glob 而不是 dist/*：这个目录里只该有桌面版那个 deb，
+          # 逐平台写 glob 而不是 dist/*：这个目录里只该有三种桌面版包，
           # 万一以后有人往 dist/ 里加了别的产物，也不该被顺手发到这个 Release 上。
-          files: dist/workbuddy-gateway-desktop_*.deb
+          files: |
+            dist/workbuddy-gateway-desktop_*.deb
+            dist/workbuddy-gateway-desktop_*.dmg
+            dist/workbuddy-gateway-desktop_*-setup.exe
           generate_release_notes: true
           body: |
-            ## 本页附件
+            ## 本页附件（三个平台，都是**带原生窗口 + 托盘**的桌面版）
 
-            | 平台 | 文件 | 形态 |
-            | --- | --- | --- |
-            | Linux x86_64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` | **桌面版**：原生窗口 + 托盘常驻的 Tauri 壳 |
+            | 平台 | 文件 |
+            | --- | --- |
+            | Linux x86_64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` |
+            | macOS Apple Silicon | `workbuddy-gateway-desktop_<版本>_arm64.dmg` |
+            | Windows x64 | `workbuddy-gateway-desktop_<版本>_x64-setup.exe` |
+
+            **Linux**
 
             ```
             sudo dpkg -i workbuddy-gateway-desktop_<版本>_amd64.deb
@@ -328,13 +449,27 @@ jobs:
             ```
 
             装完在应用菜单里找「WorkBuddy Gateway」，或直接运行 `workbuddy-gateway-desktop`。
-            关闭窗口是收进托盘（网关继续常驻），真正的退出走托盘菜单的「退出」。
-            数据目录 `~/.wb-gateway`，日志 `~/.wb-gateway/logs/gateway.log`。
-            首次启动会先拉取模型目录，就绪后面板自动加载，属预期行为。
 
             > GNOME 下托盘图标依赖 AppIndicator 扩展（Ubuntu 默认已启用
             > `ubuntu-appindicators`）。没有该扩展时窗口一切正常，只是没有托盘图标 ——
             > 此时点关闭会把界面收进托盘却无处可点。
+
+            **macOS**
+
+            打开 `.dmg`，把「WorkBuddy Gateway」拖进「应用程序」。首次打开会被 Gatekeeper
+            拦下（未签名），右键 →「打开」即可。
+
+            **Windows**
+
+            双击运行 `*-setup.exe`，每用户安装、免 UAC。
+
+            ## 三个平台一致的用法
+
+            - 关闭窗口 = 收进托盘（网关继续常驻），**不是**退出应用
+            - 真正的退出走托盘菜单的「退出」
+            - 窗口内是与命令行版、浏览器版完全相同的那套面板，三个入口共用同一份账号池
+            - 数据目录：Linux / macOS 是 `~/.wb-gateway`，Windows 是 `%LOCALAPPDATA%\wb-gateway`
+            - 首次启动会先拉取模型目录，就绪后面板自动加载，属预期行为
 
             ## 需要「无窗口」形态的话
 
@@ -348,7 +483,9 @@ jobs:
 
             ## 说明
 
-            - 安装包**未做代码签名**。
+            - 安装包**未做代码签名**（Windows SmartScreen 与 macOS Gatekeeper 会提示）。
+            - macOS 目前只出 Apple Silicon（arm64）。Intel Mac 需要额外补
+              `x86_64-apple-darwin` 目标，见 `installer/macos/build-desktop-pkg.sh`。
             - 账号凭据请通过面板的「添加账号」获取，或把 `workbuddy*.json` 放进数据目录。
             - 本项目是非官方网关，使用上游账号涉及目标平台服务条款与封号风险，
               仅限本人授权账号与私有环境使用。

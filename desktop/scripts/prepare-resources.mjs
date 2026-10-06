@@ -25,22 +25,49 @@ const BINARIES = [`workbuddy-gateway${EXE}`, `wb-local-agent${EXE}`];
  * 按顺序定位一个 Go 产物。
  *
  * 1) 项目根目录 —— `scripts/build.sh` 的落点（一直是这条路）；
- * 2) `dist/linux_<arch>/` —— `scripts/release.sh` 产出的 tar.gz 解压后的结构。
+ * 2) `dist/<os>_<arch>/` —— `scripts/release.sh` 产出的 tar.gz 解压后的结构。
  *
- * 为什么需要第 2 条：`build.sh` 把产物名写死成 `.exe`，在 Linux 上跑出来的名字
- * 是错的；Linux 上正确的来源是 `release.sh` 的交叉编译产物。没有这一步，
- * Linux 桌面版就只能靠手工把二进制摆到根目录才能打包成功。
+ * 为什么需要第 2 条：`build.sh` 把产物名写死成 `.exe`，在非 Windows 上跑出来的
+ * 名字是错的；其它平台正确的来源是 `release.sh` 的交叉编译产物。没有这一步，
+ * 各平台桌面版就只能靠手工把二进制摆到根目录才能打包成功。
+ *
+ * 目录名与 release.sh 的 `${GOOS}_${GOARCH}` 严格一致（windows/darwin/linux ×
+ * amd64/arm64），所以三个平台的 CI 作业都能直接命中。
  */
 function findBinary(name) {
   const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const os = isWindows ? "windows" : process.platform === "darwin" ? "darwin" : "linux";
   const candidates = [
     join(projectRoot, name),
-    join(projectRoot, "dist", `linux_${arch}`, name),
+    join(projectRoot, "dist", `${os}_${arch}`, name),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * 当前 Rust 主机目标是不是 `windows-gnu`。
+ *
+ * 这个判断决定要不要 `WebView2Loader.dll`：
+ *   - `windows-gnu`  —— **动态链接**，必须随包分发（tauri-bundler 默认假设的是
+ *                       MSVC 的静态链接路径，不会自动带上；缺了就是装完启动即静默退出）
+ *   - `windows-msvc` —— 静态链接，不需要这个文件
+ *
+ * 为什么两条路都要支持：作者本机走 gnu（MSVC 引导器在其网络下不可达），而 GitHub
+ * 的 windows runner 自带 VS Build Tools，CI 上走 MSVC 更省事。同一份仓库要能各自打包。
+ */
+function isWindowsGnu() {
+  try {
+    const out = execFileSync("rustc", ["-vV"], { encoding: "utf8", timeout: 20000 });
+    const m = out.match(/^host:\s*(\S+)/m);
+    return m ? m[1].includes("windows-gnu") : true;
+  } catch {
+    // 取不到 host 就按 gnu 处理：宁可要求 DLL（缺了会明确报错），
+    // 也不要悄悄漏掉一个 gnu 构建真正需要的文件。
+    return true;
+  }
 }
 
 /**
@@ -129,9 +156,14 @@ if (failed) process.exit(1);
 //    target/<profile>/ 与 target/<profile>/build/webview2-com-sys-*/out/x64/ 下。
 // 这样新克隆的仓库跑一次构建就能自愈，不必先把二进制提交进仓库。
 //
-// Linux / macOS 用系统 WebKitGTK，没有也不需要有这个组件；这里整段跳过，
-// 而不是造一个占位文件 —— 缺 DLL 在 Windows 上必须继续是硬失败。
-if (isWindows) {
+// Linux / macOS 用系统 WebKitGTK / WKWebView，没有也不需要有这个组件；Windows 上
+// 还要再看目标：gnu 需要（硬失败），msvc 不需要（静态链接）。整段跳过而不是造一个
+// 占位文件 —— 缺 DLL 在**真正需要它**的 gnu 构建上必须继续是硬失败。
+if (!isWindows) {
+  console.log("[prepare] 非 Windows 平台，跳过 WebView2Loader.dll（用系统 WebKitGTK / WKWebView）");
+} else if (!isWindowsGnu()) {
+  console.log("[prepare] Windows MSVC 目标，跳过 WebView2Loader.dll（静态链接，不需要）");
+} else {
   const webviewLoader = resolve(here, "..", "src-tauri", "WebView2Loader.dll");
   if (!existsSync(webviewLoader)) {
     const recovered = recoverWebViewLoader(projectRoot, webviewLoader);
@@ -148,8 +180,6 @@ if (isWindows) {
   console.log(
     `[prepare] WebView2Loader.dll 就位 (${(statSync(webviewLoader).size / 1024).toFixed(0)} KB)`,
   );
-} else {
-  console.log("[prepare] 非 Windows 平台，跳过 WebView2Loader.dll（用系统 WebKitGTK）");
 }
 
 // 版本号取自治的网关二进制本身，而不是另抄一份常量 —— 避免文档/包名与真实后端不一致。
