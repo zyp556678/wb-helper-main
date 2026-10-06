@@ -143,6 +143,74 @@ jobs:
           path: dist/*.deb
           retention-days: 3
 
+  # 桌面版：带原生窗口 + 托盘常驻的 Tauri 壳（与上面那个服务端 deb 是两回事）。
+  #
+  # 为什么必须单独一个 Linux 作业：Tauri 在 Linux 上要靠系统 WebKitGTK **编译**，
+  # 这是 Go 交叉编译覆盖不到的 —— 缺 dev 包就在链接期报一堆 pkg-config 找不到。
+  #
+  # 为什么只依赖 binaries、不要 web：面板是**网关内嵌**的（go:embed），壳自带启动页，
+  # 所以桌面壳本身不消费 web/dist，那个产物在 binaries 作业里已经被烙进网关二进制了。
+  linux-desktop-deb:
+    name: linux desktop deb
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 注意是 **-dev** 包：编译期要头文件与 pkg-config 描述文件，运行时包不够用。
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Rust 也装进仓库内的 .toolchain/（与本地口径一致），并把工具链与增量产物缓存起来：
+      # 首轮要编译约 400 个 crate，没有缓存的话每个 tag 都得从头再来一遍。
+      - name: Cache Rust toolchain and target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            .toolchain/rust
+            .toolchain/cargo
+            .toolchain/cargo-target
+          key: rust-${{ runner.os }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Install Rust into .toolchain
+        run: |
+          export RUSTUP_HOME="$PWD/.toolchain/rust"
+          export CARGO_HOME="$PWD/.toolchain/cargo"
+          if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+          fi
+          "$CARGO_HOME/bin/cargo" --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.ARTIFACT_BIN }}-*
+          merge-multiple: true
+          path: dist
+
+      # build-desktop-deb.sh 从 dist/linux_<arch>/ 取壳要代管的两个 Go 产物，
+      # 而 artifacts 里是压缩包 —— 先解开成它期望的目录结构。
+      - name: Unpack linux binaries
+        run: tar -xzf dist/workbuddy-gateway_*_linux_amd64.tar.gz -C dist
+
+      - name: Build .deb
+        run: ./installer/linux/build-desktop-deb.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-installer-linux-desktop
+          path: dist/workbuddy-gateway-desktop_*.deb
+          retention-days: 3
+
   macos-pkg:
     name: macos pkg + dmg
     needs: binaries
@@ -215,77 +283,72 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 5) 汇总到 Release
+  #
+  # 只发布**桌面版**（带原生窗口 + 托盘的那个包）。
+  #
+  # 为什么把其它产物排除在 Release 之外：本工作流另外还产出 Windows setup.exe、
+  # Linux 服务端 deb、macOS pkg/dmg、npm 包 —— 它们全是**无窗口**形态（装成服务或
+  # 命令行，只能开浏览器看面板）。把两种形态混在同一页附件里，用户很容易装错，
+  # 而"装完没有窗口"正是最常见的误解。要无窗口形态的走 DEPLOY.md 里的那几条路。
+  #
+  # 这些产物仍然照常构建并上传为本次运行的 artifacts，需要时从 Actions 页面取；
+  # 它们不再作为 Release 的依赖，所以任何一个失败也不会再挡住桌面版的发布。
   # ---------------------------------------------------------------------------
   release:
     name: publish release
-    needs: [windows-setup, linux-deb, macos-pkg, npm]
+    needs: [linux-desktop-deb]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: ${{ env.ARTIFACT_BIN }}-*
-          merge-multiple: true
+          name: wb-installer-linux-desktop
           path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: wb-installer-windows
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: wb-installer-linux
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: wb-installer-macos
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: wb-npm-tarballs
-          path: dist/npm
       - name: List assets
-        run: ls -lh dist dist/npm
+        run: ls -lh dist
       - uses: softprops/action-gh-release@v2
         with:
           # 未找到 tag 对应的 Release 时自动创建，已存在则覆盖同名资产
-          files: |
-            dist/*
-            dist/npm/*
+          #
+          # 用带前缀的 glob 而不是 dist/*：这个目录里只该有桌面版那个 deb，
+          # 万一以后有人往 dist/ 里加了别的产物，也不该被顺手发到这个 Release 上。
+          files: dist/workbuddy-gateway-desktop_*.deb
           generate_release_notes: true
           body: |
-            ## 安装方式（三选一）
+            ## 本页附件
 
-            **1. 平台安装包**（推荐，双击安装）
-
-            下载本页附件的对应文件后运行：
-
-            | 平台 | 文件 | 说明 |
+            | 平台 | 文件 | 形态 |
             | --- | --- | --- |
-            | Windows x64 / ARM64 | `*_x64-setup.exe` / `*_arm64-setup.exe` | 双击安装，按提示选择是否随登录启动；数据在 `%LOCALAPPDATA%\\wb-gateway` |
-            | Linux x64 / ARM64 | `*_amd64.deb` / `*_arm64.deb` | `sudo dpkg -i` 安装为 systemd 服务；数据在 `/var/lib/workbuddy-gateway` |
-            | macOS Intel / Apple Silicon | `*_amd64.pkg` / `*_arm64.pkg`（含 `.dmg`） | 双击安装；数据在 `~/.wb-gateway` |
-
-            安装后打开 <http://127.0.0.1:8317/panel/>。首次启动会先拉取模型目录，
-            约 30 秒后才开始监听端口，属预期行为。
-
-            **2. npm 全局安装**
+            | Linux x86_64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` | **桌面版**：原生窗口 + 托盘常驻的 Tauri 壳 |
 
             ```
-            npm i -g workbuddy-gateway
-            workbuddy-gateway          # 起服务并自动打开面板
+            sudo dpkg -i workbuddy-gateway-desktop_<版本>_amd64.deb
+            # 若提示缺依赖： sudo apt -f install
             ```
 
-            数据目录固定为 `~/.wb-gateway`（可用 `WB_GATEWAY_DATA_DIR` 覆盖）。
+            装完在应用菜单里找「WorkBuddy Gateway」，或直接运行 `workbuddy-gateway-desktop`。
+            关闭窗口是收进托盘（网关继续常驻），真正的退出走托盘菜单的「退出」。
+            数据目录 `~/.wb-gateway`，日志 `~/.wb-gateway/logs/gateway.log`。
+            首次启动会先拉取模型目录，就绪后面板自动加载，属预期行为。
 
-            **3. 免安装压缩包**
+            > GNOME 下托盘图标依赖 AppIndicator 扩展（Ubuntu 默认已启用
+            > `ubuntu-appindicators`）。没有该扩展时窗口一切正常，只是没有托盘图标 ——
+            > 此时点关闭会把界面收进托盘却无处可点。
 
-            `*.tar.gz` / `*.zip` 解压即用：`./workbuddy-gateway serve`。
+            ## 需要「无窗口」形态的话
+
+            本仓库另有几条安装路径，**不在本页附件里**（两种形态混在一页容易装错）：
+
+            - 装成 systemd 服务、只开浏览器看面板：`installer/linux/build-deb.sh`
+            - 免安装压缩包：解压后 `./workbuddy-gateway serve`
+            - npm 全局安装：`npm i -g workbuddy-gateway`
+
+            具体步骤见仓库里的 `DEPLOY.md`。
 
             ## 说明
 
-            - 所有安装包均**未做代码签名**。Windows SmartScreen 与 macOS Gatekeeper
-              会提示来源未知，需手动允许（参见 `DEPLOY.md`）。
+            - 安装包**未做代码签名**。
             - 账号凭据请通过面板的「添加账号」获取，或把 `workbuddy*.json` 放进数据目录。
             - 本项目是非官方网关，使用上游账号涉及目标平台服务条款与封号风险，
               仅限本人授权账号与私有环境使用。

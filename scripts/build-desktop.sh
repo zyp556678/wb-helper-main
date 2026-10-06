@@ -23,8 +23,10 @@ cd "$ROOT"
 
 # ---- 定位 Node（与 build.sh 同口径）----
 NODE_BIN=""
+# `${USERNAME:-}` 的默认值不能省：USERNAME 只有 Git Bash 会设，而本脚本开了 set -u，
+# Linux 上直接写 $USERNAME 会以 "unbound variable" 中断。
 for cand in \
-  "C:/Users/$USERNAME/.workbuddy/binaries/node/versions/22.22.2-3" \
+  "C:/Users/${USERNAME:-}/.workbuddy/binaries/node/versions/22.22.2-3" \
   "$(dirname "$(command -v node 2>/dev/null || true)")"; do
   if [ -n "$cand" ] && { [ -x "$cand/node.exe" ] || [ -x "$cand/node" ]; }; then
     NODE_BIN="$cand"

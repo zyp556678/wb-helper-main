@@ -30,8 +30,10 @@ fi
 # node/npm：与 scripts/build.sh 用同一套定位逻辑
 NODE_BIN="${NODE_BIN:-}"
 if [ -z "$NODE_BIN" ]; then
+  # `${USERNAME:-}` 的默认值不能省：USERNAME 只有 Git Bash 会设，而本脚本开了 set -u，
+  # Linux 上直接写 $USERNAME 会以 "unbound variable" 中断（CI 的 npm 作业就是这么挂的）。
   for cand in \
-    "C:/Users/$USERNAME/.workbuddy/binaries/node/versions/22.22.2-3" \
+    "C:/Users/${USERNAME:-}/.workbuddy/binaries/node/versions/22.22.2-3" \
     "$(dirname "$(command -v node 2>/dev/null || true)")"; do
     if [ -n "$cand" ] && [ -x "$cand/node.exe" ]; then NODE_BIN="$cand"; break; fi
     if [ -n "$cand" ] && [ -x "$cand/node" ]; then NODE_BIN="$cand"; break; fi
@@ -51,8 +53,17 @@ PLATFORM_MAP=(
   "linux_arm64:linux-arm64"
 )
 
+# 定位 Python：Debian/Ubuntu 只有 python3，没有 python 这个别名，写死 `python`
+# 会在 Linux 上以 "python: 未找到命令" 静默中断（set -e 下脚本直接停在版本号同步）。
+# 与 scripts/build-desktop.sh 用同一口径。
+PY_BIN="$(command -v python || command -v python3 || true)"
+if [ -z "$PY_BIN" ]; then
+  echo "!! 未找到 Python（python / python3 都没有），无法同步各 package.json 的版本号" >&2
+  exit 1
+fi
+
 echo "==> 同步版本号到各 package.json"
-python - "$VERSION" <<'PY'
+"$PY_BIN" - "$VERSION" <<'PY'
 import io, json, sys, glob, os
 version = sys.argv[1]
 files = ["npm/package.json"] + glob.glob("npm/platform/*/package.json")
