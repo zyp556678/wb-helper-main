@@ -421,8 +421,24 @@ jobs:
           path: dist
       - name: List assets
         run: ls -lh dist
+      # 版本号从源码里解析，而不是在正文里写死：否则每次发版都得记着改模板，
+      # 忘了就会出现「附件文件名是 0.9.0、说明里写着 0.8.0」这种自相矛盾的一页。
+      - name: Resolve versions
+        id: ver
+        run: |
+          DESKTOP=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' desktop/src-tauri/tauri.conf.json | head -1)
+          GATEWAY=$(sed -n 's/^const version = "\(.*\)"/\1/p' main.go | head -1)
+          if [ -z "$DESKTOP" ] || [ -z "$GATEWAY" ]; then
+            echo "!! 未能从 tauri.conf.json / main.go 解析出版本号" >&2
+            exit 1
+          fi
+          echo "desktop=$DESKTOP" >> "$GITHUB_OUTPUT"
+          echo "gateway=$GATEWAY" >> "$GITHUB_OUTPUT"
+          echo "壳版本 $DESKTOP / 内含网关版本 $GATEWAY"
       - uses: softprops/action-gh-release@v2
         with:
+          # 标题也带上版本号，避免 Release 列表里一排「桌面版」分不出哪个是哪个。
+          name: 桌面版 ${{ steps.ver.outputs.desktop }} · Windows / macOS / Linux（原生窗口 + 托盘）
           # 未找到 tag 对应的 Release 时自动创建，已存在则覆盖同名资产
           #
           # 逐平台写 glob 而不是 dist/*：这个目录里只该有三种桌面版包，
@@ -433,45 +449,82 @@ jobs:
             dist/workbuddy-gateway-desktop_*-setup.exe
           generate_release_notes: true
           body: |
-            ## 本页附件（三个平台，都是**带原生窗口 + 托盘**的桌面版）
+            ## WorkBuddy 网关 · 桌面版 ${{ steps.ver.outputs.desktop }}
+
+            原生窗口 + 托盘常驻的桌面应用。窗口里承载的就是那套 React 管理面板 ——
+            与命令行版、浏览器版是**同一份界面、同一份账号池**；壳只负责代管 Go 网关
+            进程，并在它就绪后把窗口切到面板。
+
+            ### 下载
 
             | 平台 | 文件 |
             | --- | --- |
-            | Linux x86_64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` |
-            | macOS Apple Silicon | `workbuddy-gateway-desktop_<版本>_arm64.dmg` |
-            | Windows x64 | `workbuddy-gateway-desktop_<版本>_x64-setup.exe` |
+            | Linux x86_64 | `workbuddy-gateway-desktop_${{ steps.ver.outputs.desktop }}_amd64.deb` |
+            | macOS（Apple Silicon） | `workbuddy-gateway-desktop_${{ steps.ver.outputs.desktop }}_arm64.dmg` |
+            | Windows x64 | `workbuddy-gateway-desktop_${{ steps.ver.outputs.desktop }}_x64-setup.exe` |
 
-            **Linux**
+            三个包内嵌的网关版本都是 `${{ steps.ver.outputs.gateway }}`。
 
-            ```
-            sudo dpkg -i workbuddy-gateway-desktop_<版本>_amd64.deb
+            ### 安装
+
+            **Linux** —— 需要 WebKitGTK 4.1（Ubuntu 24.04 及以上自带）
+
+            ```bash
+            sudo dpkg -i workbuddy-gateway-desktop_${{ steps.ver.outputs.desktop }}_amd64.deb
             # 若提示缺依赖： sudo apt -f install
             ```
 
-            装完在应用菜单里找「WorkBuddy Gateway」，或直接运行 `workbuddy-gateway-desktop`。
+            装完在应用菜单里找「WorkBuddy Gateway」，或运行 `workbuddy-gateway-desktop`。
 
             > GNOME 下托盘图标依赖 AppIndicator 扩展（Ubuntu 默认已启用
             > `ubuntu-appindicators`）。没有该扩展时窗口一切正常，只是没有托盘图标 ——
-            > 此时点关闭会把界面收进托盘却无处可点。
+            > 此时点关闭会把界面收进托盘却无处可点，只能从命令行结束进程。
 
-            **macOS**
+            **macOS** —— 需要 macOS 10.15+
 
             打开 `.dmg`，把「WorkBuddy Gateway」拖进「应用程序」。首次打开会被 Gatekeeper
             拦下（未签名），右键 →「打开」即可。
 
-            **Windows**
+            **Windows** —— 需要 WebView2 运行时（Windows 11 自带）
 
-            双击运行 `*-setup.exe`，每用户安装、免 UAC。
+            双击运行，每用户安装、免 UAC，装完从开始菜单启动。
 
-            ## 三个平台一致的用法
+            ### 首次运行
 
-            - 关闭窗口 = 收进托盘（网关继续常驻），**不是**退出应用
-            - 真正的退出走托盘菜单的「退出」
-            - 窗口内是与命令行版、浏览器版完全相同的那套面板，三个入口共用同一份账号池
-            - 数据目录：Linux / macOS 是 `~/.wb-gateway`，Windows 是 `%LOCALAPPDATA%\wb-gateway`
-            - 首次启动会先拉取模型目录，就绪后面板自动加载，属预期行为
+            1. 窗口先显示启动页：壳在后台拉起网关并等它就绪。冷启动要读配置、拉模型目录，
+               几秒到几十秒不等，属预期行为。
+            2. 就绪后自动切到管理面板。此时**账号池还是空的** —— 点面板里的「添加账号」
+               完成登录授权，或把 `workbuddy*.json` 放进数据目录。
+            3. 之后 CLI / IDE 就能把 `http://127.0.0.1:8317/v1` 当作 OpenAI 兼容端点调用
+               （端口与命令行版一致，写好的配置不用改）。
 
-            ## 需要「无窗口」形态的话
+            ### 日常操作
+
+            | 想做什么 | 怎么做 |
+            | --- | --- |
+            | 关掉界面但让网关继续常驻 | 直接关窗口（收进托盘） |
+            | 真正退出应用 | 托盘菜单 →「退出」 |
+            | 开机自启 | 托盘菜单，或面板「配置 → 开机自启动」（默认**关**） |
+            | 看后台日志 | 数据目录下的 `logs/gateway.log` |
+            | 数据与凭据目录 | Linux / macOS：`~/.wb-gateway`；Windows：`%LOCALAPPDATA%\wb-gateway` |
+
+            > 本桌面版与命令行安装包**共用 8317 端口**，所以只能给其中一个设置开机自启，
+            > 否则登录时两个进程会抢同一个端口（表现为「有时能连上、有时连不上」）。
+
+            ### 怎么确认这个包是从本提交构建的
+
+            三个附件都由 GitHub Actions 在**对应的真实操作系统**上构建（Linux / macOS /
+            Windows runner），可自行读出包内二进制的构建信息核对：
+
+            ```bash
+            # 以 Linux 的 deb 为例
+            dpkg-deb -x workbuddy-gateway-desktop_${{ steps.ver.outputs.desktop }}_amd64.deb /tmp/d
+            strings "/tmp/d/usr/lib/WorkBuddy Gateway/bin/workbuddy-gateway" \
+              | grep -E 'vcs\.(revision|modified)'
+            # vcs.revision 应等于本页 tag 指向的提交；vcs.modified 应为 false
+            ```
+
+            ### 需要「无窗口」形态？
 
             本仓库另有几条安装路径，**不在本页附件里**（两种形态混在一页容易装错）：
 
@@ -481,11 +534,10 @@ jobs:
 
             具体步骤见仓库里的 `DEPLOY.md`。
 
-            ## 说明
+            ### 已知限制
 
             - 安装包**未做代码签名**（Windows SmartScreen 与 macOS Gatekeeper 会提示）。
-            - macOS 目前只出 Apple Silicon（arm64）。Intel Mac 需要额外补
+            - macOS 目前只有 Apple Silicon（arm64）。Intel Mac 需要额外补
               `x86_64-apple-darwin` 目标，见 `installer/macos/build-desktop-pkg.sh`。
-            - 账号凭据请通过面板的「添加账号」获取，或把 `workbuddy*.json` 放进数据目录。
             - 本项目是非官方网关，使用上游账号涉及目标平台服务条款与封号风险，
               仅限本人授权账号与私有环境使用。
