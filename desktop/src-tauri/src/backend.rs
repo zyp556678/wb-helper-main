@@ -146,6 +146,20 @@ fn resource_dirs(app: &AppHandle) -> Vec<PathBuf> {
     dirs
 }
 
+/// 数据目录的**目录名**。
+///
+/// 两边命名有意不同，不是笔误：Windows 的约定是 `%LOCALAPPDATA%\wb-gateway`
+/// （不隐藏），而 macOS / Linux 的约定是 `~/.wb-gateway`（点开头，算隐藏目录）——
+/// Go 网关自己的默认值、npm 入口、DEPLOY.md 与 README 都按这个口径写。
+///
+/// 少了这个点，壳会把数据写进主目录下一个显眼的 `~/wb-gateway`，而命令行版仍读
+/// `~/.wb-gateway`，现象正好是「装完桌面版，之前登录的账号全没了」—— 与
+/// `base_data_dir()` 要修的是同一类问题，只是更隐蔽：路径看着完全合理。
+#[cfg(windows)]
+const DATA_DIR_NAME: &str = "wb-gateway";
+#[cfg(not(windows))]
+const DATA_DIR_NAME: &str = ".wb-gateway";
+
 /// 网关数据目录：与安装包/npm 入口保持同一处，保证「桌面版看到的账号池」
 /// 和「命令行版看到的」是同一份，不会各存一份让人困惑。
 fn data_dir() -> PathBuf {
@@ -154,7 +168,7 @@ fn data_dir() -> PathBuf {
             return PathBuf::from(explicit);
         }
     }
-    base_data_dir().join("wb-gateway")
+    base_data_dir().join(DATA_DIR_NAME)
 }
 
 /// 各平台的「用户数据根目录」。
