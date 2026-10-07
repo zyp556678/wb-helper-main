@@ -72,12 +72,22 @@ BIN_DIR="$ROOT/dist/windows_${ARCH}"
 GO_VERSION="$(sed -n 's/^const version = "\(.*\)"/\1/p' main.go | head -1)"
 [ -n "$GO_VERSION" ] || { echo "!! 未能从 main.go 解析版本号" >&2; exit 1; }
 
-if [ ! -f "$BIN_DIR/workbuddy-gateway.exe" ] || [ ! -f "$BIN_DIR/wb-local-agent.exe" ]; then
-  TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_windows_${ARCH}.tar.gz"
-  if [ ! -f "$TARBALL" ]; then
-    echo "==> dist/ 下没有 windows_${ARCH} 产物，先编译"
-    bash scripts/release.sh "windows/${ARCH}"
-  fi
+TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_windows_${ARCH}.tar.gz"
+if [ ! -f "$TARBALL" ]; then
+  echo "==> dist/ 下没有 windows_${ARCH} 的发行包，先编译"
+  bash scripts/release.sh "windows/${ARCH}"
+fi
+
+# 解包判据是「tarball 比已解出的二进制新」，**不是**「二进制不存在」——
+# 后者在 dist/windows_<arch>/ 残留上一版二进制时会静默跳过解包，
+# 于是包名是新的、里面是旧的。详见 installer/linux/build-desktop-deb.sh 里的说明。
+NEED_UNPACK=1
+if [ -f "$BIN_DIR/workbuddy-gateway.exe" ] && [ -f "$BIN_DIR/wb-local-agent.exe" ] \
+   && [ "$BIN_DIR/workbuddy-gateway.exe" -nt "$TARBALL" ]; then
+  NEED_UNPACK=0
+  echo "==> dist/windows_${ARCH} 的二进制比发行包新，跳过解包"
+fi
+if [ "$NEED_UNPACK" = 1 ]; then
   echo "==> 解出 windows_${ARCH} 二进制"
   tar -xzf "$TARBALL" -C "$ROOT/dist"
 fi
@@ -101,11 +111,18 @@ echo "==> tauri build（nsis）"
 
 # ---- 5) 归拢到 dist/，命名与作者原有的桌面包一致 ----
 DESKTOP_VERSION="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' desktop/src-tauri/tauri.conf.json | head -1)"
+[ -n "$DESKTOP_VERSION" ] || { echo "!! 未能从 tauri.conf.json 解析版本号" >&2; exit 1; }
 # 没设 CARGO_TARGET_DIR 时 cargo 默认落在 desktop/src-tauri/target。
 BUNDLE_DIR="${CARGO_TARGET_DIR:-$ROOT/desktop/src-tauri/target}/release/bundle/nsis"
-BUILT="$(ls -1 "$BUNDLE_DIR"/*-setup.exe 2>/dev/null | head -1)"
+
+# 按本次版本号精确匹配，别用 `ls *-setup.exe | head -1`：bundle 目录会累积历次产物，
+# ls 又按字母序排，旧版本会被优先选中 → 包名新、内容旧。
+# 详见 installer/linux/build-desktop-deb.sh 里同一处的说明。
+BUILT="$(ls -1 "$BUNDLE_DIR"/*_"${DESKTOP_VERSION}"_*-setup.exe 2>/dev/null | head -1)"
 if [ -z "$BUILT" ]; then
-  echo "!! 未在 $BUNDLE_DIR 找到 *-setup.exe" >&2
+  echo "!! 未在 $BUNDLE_DIR 找到 ${DESKTOP_VERSION} 版的 *-setup.exe" >&2
+  echo "   该目录现有：" >&2
+  ls -1 "$BUNDLE_DIR" 2>/dev/null | sed 's/^/     /' >&2
   exit 1
 fi
 

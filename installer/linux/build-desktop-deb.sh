@@ -69,13 +69,26 @@ fi
 BIN_DIR="$ROOT/dist/linux_${ARCH}"
 GO_VERSION="$(sed -n 's/^const version = "\(.*\)"/\1/p' main.go | head -1)"
 [ -n "$GO_VERSION" ] || { echo "!! 未能从 main.go 解析版本号" >&2; exit 1; }
+TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_linux_${ARCH}.tar.gz"
 
-if [ ! -x "$BIN_DIR/workbuddy-gateway" ] || [ ! -x "$BIN_DIR/wb-local-agent" ]; then
-  TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_linux_${ARCH}.tar.gz"
-  if [ ! -f "$TARBALL" ]; then
-    echo "==> dist/ 下没有 linux_${ARCH} 产物，先编译"
-    bash scripts/release.sh "linux/${ARCH}"
-  fi
+if [ ! -f "$TARBALL" ]; then
+  echo "==> dist/ 下没有 linux_${ARCH} 的发行包，先编译"
+  bash scripts/release.sh "linux/${ARCH}"
+fi
+
+# 解包判据是「tarball 比已解出的二进制新」，**不是**「二进制不存在」。
+#
+# 后者有个很难发现的坑：dist/linux_<arch>/ 里若残留上一版的二进制（比如删了旧
+# tarball 却忘了删解包目录），解包会被静默跳过，于是**包名是新的、里面装的是旧的** ——
+# 构建一路成功，装上去现象一点没变。scripts/package-desktop.py 的文档里专门警告过
+# 这类误判，这里同理。（真踩过，就在升 0.9.1 的时候。）
+NEED_UNPACK=1
+if [ -x "$BIN_DIR/workbuddy-gateway" ] && [ -x "$BIN_DIR/wb-local-agent" ] \
+   && [ "$BIN_DIR/workbuddy-gateway" -nt "$TARBALL" ]; then
+  NEED_UNPACK=0
+  echo "==> dist/linux_${ARCH} 的二进制比发行包新，跳过解包"
+fi
+if [ "$NEED_UNPACK" = 1 ]; then
   echo "==> 解出 linux_${ARCH} 二进制"
   tar -xzf "$TARBALL" -C "$ROOT/dist"
 fi
@@ -98,10 +111,19 @@ echo "==> tauri build（deb）"
 
 # ---- 5) 归拢到 dist/，命名与 Windows 桌面包对齐 ----
 DESKTOP_VERSION="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' desktop/src-tauri/tauri.conf.json | head -1)"
+[ -n "$DESKTOP_VERSION" ] || { echo "!! 未能从 tauri.conf.json 解析版本号" >&2; exit 1; }
 BUNDLE_DIR="$CARGO_TARGET_DIR/release/bundle/deb"
-BUILT="$(ls -1 "$BUNDLE_DIR"/*.deb 2>/dev/null | head -1)"
+
+# 按**本次版本号**精确匹配，不能写成 `ls "$BUNDLE_DIR"/*.deb | head -1`：
+# bundle 目录会累积历次构建的产物，而 ls 按字母序排列 —— 升到 0.9.1 之后，
+# `head -1` 取到的仍然是 `WorkBuddy Gateway_0.9.0_amd64.deb`，
+# 于是**包名是新的、内容是旧的**（真踩过，就在这次升版本时）。
+# 版本号两侧带下划线，顺带防住 0.9.1 与 0.9.10 这类的名字误配。
+BUILT="$(ls -1 "$BUNDLE_DIR"/*_"${DESKTOP_VERSION}"_*.deb 2>/dev/null | head -1)"
 if [ -z "$BUILT" ]; then
-  echo "!! 未在 $BUNDLE_DIR 找到 .deb" >&2
+  echo "!! 未在 $BUNDLE_DIR 找到 ${DESKTOP_VERSION} 版的 .deb" >&2
+  echo "   该目录现有：" >&2
+  ls -1 "$BUNDLE_DIR" 2>/dev/null | sed 's/^/     /' >&2
   exit 1
 fi
 

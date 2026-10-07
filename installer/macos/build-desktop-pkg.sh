@@ -52,13 +52,23 @@ command -v node >/dev/null 2>&1 || { echo "!! 未找到 Node，无法调用 Taur
 BIN_DIR="$ROOT/dist/darwin_${ARCH}"
 GO_VERSION="$(sed -n 's/^const version = "\(.*\)"/\1/p' main.go | head -1)"
 [ -n "$GO_VERSION" ] || { echo "!! 未能从 main.go 解析版本号" >&2; exit 1; }
+TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_darwin_${ARCH}.tar.gz"
 
-if [ ! -x "$BIN_DIR/workbuddy-gateway" ] || [ ! -x "$BIN_DIR/wb-local-agent" ]; then
-  TARBALL="$ROOT/dist/workbuddy-gateway_${GO_VERSION}_darwin_${ARCH}.tar.gz"
-  if [ ! -f "$TARBALL" ]; then
-    echo "==> dist/ 下没有 darwin_${ARCH} 产物，先编译"
-    bash scripts/release.sh "darwin/${ARCH}"
-  fi
+if [ ! -f "$TARBALL" ]; then
+  echo "==> dist/ 下没有 darwin_${ARCH} 的发行包，先编译"
+  bash scripts/release.sh "darwin/${ARCH}"
+fi
+
+# 解包判据是「tarball 比已解出的二进制新」，**不是**「二进制不存在」——
+# 后者在 dist/darwin_<arch>/ 残留上一版二进制时会静默跳过解包，
+# 于是包名是新的、里面是旧的。详见 installer/linux/build-desktop-deb.sh 里的说明。
+NEED_UNPACK=1
+if [ -x "$BIN_DIR/workbuddy-gateway" ] && [ -x "$BIN_DIR/wb-local-agent" ] \
+   && [ "$BIN_DIR/workbuddy-gateway" -nt "$TARBALL" ]; then
+  NEED_UNPACK=0
+  echo "==> dist/darwin_${ARCH} 的二进制比发行包新，跳过解包"
+fi
+if [ "$NEED_UNPACK" = 1 ]; then
   echo "==> 解出 darwin_${ARCH} 二进制"
   tar -xzf "$TARBALL" -C "$ROOT/dist"
 fi
@@ -81,10 +91,17 @@ echo "==> tauri build（dmg）"
 
 # ---- 5) 归拢到 dist/，命名与另外两个平台的桌面包对齐 ----
 DESKTOP_VERSION="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' desktop/src-tauri/tauri.conf.json | head -1)"
+[ -n "$DESKTOP_VERSION" ] || { echo "!! 未能从 tauri.conf.json 解析版本号" >&2; exit 1; }
 BUNDLE_DIR="$CARGO_TARGET_DIR/release/bundle/dmg"
-BUILT="$(ls -1 "$BUNDLE_DIR"/*.dmg 2>/dev/null | head -1)"
+
+# 按本次版本号精确匹配，别用 `ls *.dmg | head -1`：bundle 目录会累积历次产物，
+# ls 又按字母序排，旧版本会被优先选中 → 包名新、内容旧。
+# 详见 installer/linux/build-desktop-deb.sh 里同一处的说明。
+BUILT="$(ls -1 "$BUNDLE_DIR"/*_"${DESKTOP_VERSION}"_*.dmg 2>/dev/null | head -1)"
 if [ -z "$BUILT" ]; then
-  echo "!! 未在 $BUNDLE_DIR 找到 .dmg" >&2
+  echo "!! 未在 $BUNDLE_DIR 找到 ${DESKTOP_VERSION} 版的 .dmg" >&2
+  echo "   该目录现有：" >&2
+  ls -1 "$BUNDLE_DIR" 2>/dev/null | sed 's/^/     /' >&2
   exit 1
 fi
 

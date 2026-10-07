@@ -30,8 +30,10 @@ VERSION="$(sed -n 's/^const version = "\(.*\)"/\1/p' main.go | head -1)"
 [ -n "$VERSION" ] || { echo "!! 未能从 main.go 解析版本号" >&2; exit 1; }
 
 # Debian 版本号不允许随意用 prerelease 语法（`-` 会开始 Debian revision），
-# 这里把 `0.9.0-slice8` 转成 `0.9.0~slice8`：`~` 在 dpkg 里排序低于正式版，
-# 于是 0.9.0~slice8 < 0.9.0，符合预发布版本的语义。
+# 所以这里把 `-` 一律换成 `~`：`~` 在 dpkg 里排序低于正式版，于是
+# `0.9.0~slice8 < 0.9.0`，符合预发布版本的语义。
+# 当前版本（0.9.1）没有预发布后缀，这一步是恒等变换 —— 保留它是为了以后再
+# 打出 `-rc1` / `-sliceN` 这类版本时不用回头改这里。
 DEB_VERSION="$(printf '%s' "$VERSION" | sed 's/-/~/g')"
 
 TARBALL="$ROOT/dist/workbuddy-gateway_${VERSION}_linux_${ARCH}.tar.gz"

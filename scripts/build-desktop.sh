@@ -92,6 +92,10 @@ echo "==> 5/5 打包并同步到 dist/"
 
 echo
 echo "完成。dist/ 产物："
+# 版本号从 tauri.conf.json 现取，不写死：写死的话升版本后这里会 ls 不到文件，
+# 打印出一行红字错误，看着像「构建失败」，其实只是提示里的名字过期了。
+DESKTOP_VERSION="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' desktop/src-tauri/tauri.conf.json | head -1)"
+[ -n "$DESKTOP_VERSION" ] || { echo "!! 未能从 tauri.conf.json 解析版本号" >&2; exit 1; }
 ls -la --time-style=+%H:%M:%S \
-  dist/workbuddy-gateway-desktop_0.9.0_x64-setup.exe \
-  dist/workbuddy-gateway-desktop_0.9.0_x64-portable.zip
+  "dist/workbuddy-gateway-desktop_${DESKTOP_VERSION}_x64-setup.exe" \
+  "dist/workbuddy-gateway-desktop_${DESKTOP_VERSION}_x64-portable.zip"

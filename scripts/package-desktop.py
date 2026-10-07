@@ -17,6 +17,7 @@
 """
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -29,9 +30,26 @@ DIST = os.path.join(ROOT, "dist")
 STAGE = os.path.join(ROOT, ".toolchain", "portable-stage")
 RELEASE = os.path.join(ROOT, ".toolchain", "cargo-target", "release")
 
-SETUP_SRC = os.path.join(RELEASE, "bundle", "nsis", "WorkBuddy Gateway_0.9.0_x64-setup.exe")
-SETUP_DST = os.path.join(DIST, "workbuddy-gateway-desktop_0.9.0_x64-setup.exe")
-ZIP_DST = os.path.join(DIST, "workbuddy-gateway-desktop_0.9.0_x64-portable.zip")
+
+def tauri_field(name: str) -> str:
+    """从 desktop/src-tauri/tauri.conf.json 读一个字段。
+
+    产品名与版本号**只从那里读**，不在这里写死：`tauri build` 的产物文件名就是
+    `<productName>_<version>_x64-setup.exe`，而 dist/ 里的目标名也要跟着同一个版本走。
+    任何一处写死，升版本时都会变成「构建成功、这个脚本却去找一个不存在的文件」——
+    正好是本文档开头说的那类最难查的误判。
+    """
+    path = os.path.join(ROOT, "desktop", "src-tauri", "tauri.conf.json")
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)[name]
+
+
+VERSION = tauri_field("version")
+PRODUCT = tauri_field("productName")
+
+SETUP_SRC = os.path.join(RELEASE, "bundle", "nsis", f"{PRODUCT}_{VERSION}_x64-setup.exe")
+SETUP_DST = os.path.join(DIST, f"workbuddy-gateway-desktop_{VERSION}_x64-setup.exe")
+ZIP_DST = os.path.join(DIST, f"workbuddy-gateway-desktop_{VERSION}_x64-portable.zip")
 
 # 便携包内的文件：源路径 → 包内相对路径
 MEMBERS = [

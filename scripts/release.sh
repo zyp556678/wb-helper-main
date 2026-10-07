@@ -6,8 +6,10 @@
 #   ./scripts/release.sh linux/amd64    # 只编指定平台（可多次传参）
 #
 # 产物落在 dist/ 下，命名形如：
-#   workbuddy-gateway_0.9.0-slice8_linux_amd64.tar.gz
-#   workbuddy-gateway_0.9.0-slice8_windows_amd64.zip
+#   workbuddy-gateway_0.9.1_linux_amd64.tar.gz
+#   workbuddy-gateway_0.9.1_windows_amd64.zip
+#
+# 版本号取自 main.go 的 `const version`，不在本脚本里写死。
 #
 # 每个包内含两个二进制：网关（含内嵌面板）与本机代理。
 # 本机代理只在「本机形态」下有用；服务端部署可以只用网关，缺本机代理时
