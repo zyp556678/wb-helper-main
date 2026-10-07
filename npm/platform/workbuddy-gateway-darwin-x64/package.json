@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-gateway-darwin-x64",
-  "version": "0.9.0-slice8",
+  "version": "0.9.1",
   "description": "workbuddy-gateway platform binaries (darwin-x64)",
   "os": [
     "darwin"

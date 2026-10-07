@@ -45,7 +45,7 @@ import (
 )
 
 // version 是网关版本号。
-const version = "0.9.0-slice8"
+const version = "0.9.1"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
