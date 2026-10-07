@@ -106,6 +106,18 @@ func Enable() (Status, error) {
 		return Query(), errors.New(
 			"无法确定应该自启哪个程序：请从桌面版设置，或使用安装包自带的开机自启选项")
 	}
+	// 写进自启项的必须是**绝对且真实存在**的路径。两个理由：
+	//   1. 自启是「下次登录」才生效的延迟执行 —— 写错了当场没有任何反馈，
+	//      只会在用户重启后表现为「开了自启却什么都没发生」，极难排查；
+	//   2. 本模块确实踩过这个坑：Linux 上父进程名被内核截断成 15 字符后又被当成
+	//      路径写了进去（见 exec_unix.go 里 procExePath 的说明）。这道检查把
+	//      那类失败从「下次开机静默失败」提前到「写入时报错」。
+	if !filepath.IsAbs(host) {
+		return Query(), fmt.Errorf("自启项目标不是绝对路径（%q），拒绝写入", host)
+	}
+	if info, err := os.Stat(host); err != nil || info.IsDir() {
+		return Query(), fmt.Errorf("自启项目标不存在或不是普通文件：%s", host)
+	}
 	if c := detectConflict(kind); c != nil {
 		st := Query()
 		st.Conflict = c
