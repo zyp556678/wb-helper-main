@@ -718,3 +718,15 @@ var ErrGrowthUnsupported = fmt.Errorf("该站点不支持成长域活动")
 func GrowthSupported(p *Profile) bool {
 	return p.SupportsGrowthActivity()
 }
+
+// GrowthAllowed 报告该账号能否做成长类动作（成长任务 / 连登 / 猫猫旅行 / 抽奖 / 夜猫子）。
+//
+// 与 GrowthSupported 的区别：那个只看**站点**，这个还要求**不是企业版**。
+// 两个条件正交 —— 企业号可以在国内站，而企业版没有个人成长体系。
+//
+// 周期任务应当用它而不是 GrowthSupported：企业号上那批请求注定 400 code 10001
+// 或 403「growth system is only available for personal users」（实测依据见
+// auth.Credential.IsEnterprise），白发一轮只会在日志里留噪声。
+func GrowthAllowed(p *Profile, cred *CredentialView) bool {
+	return p.SupportsGrowthActivity() && !cred.IsEnterprise()
+}

@@ -59,6 +59,32 @@ func (c *Credential) Site() string {
 	return c.site
 }
 
+// IsEnterprise 报告账号是否为企业版（凭据里带非空 enterpriseId）。
+//
+// # 为什么需要它
+//
+// 企业版账号**没有个人成长体系**，上游对这些端点一律拒绝。参考实现
+// （wb2api-panel）2026-10-07 做过同一时刻 A/B 实测：
+//
+//	POST /v2/billing/meter/daily-checkin                → 400 code 10001「企业账号不支持该操作」
+//	POST /billing/meter/claim-gift / claim-compensation → 400 code 10001 同上
+//	GET  /activity/growth/{streak,buddy/info,heatmap}   → 403「growth system is only available for personal users」
+//	GET  /v2/activity/growth/tasks                      → 403 同上
+//
+// 所以签到 / 成长任务 / 连登管家 / 猫猫旅行 / 夜猫子这五类**周期任务**必须先跳过，
+// 否则每个周期都白发一批注定 400/403 的请求，在日志里留下一串噪声，让人误以为是
+// 网络问题。显式动作（用户在面板点按钮）不走这条门控 —— 那类失败已被
+// tasks.PreconditionError 归成 409「重试无用」。
+//
+// 注意它与**站点**门控（upstream.Profile.SupportsCheckin / SupportsGrowthActivity）
+// **正交**：企业号可以在国内站，所以「国内站」不代表能做成长任务。
+//
+// 不受影响的能力：选号派发、保活（token 刷新）、额度查询 —— 企业额度改走
+// /v2/billing/meter/get-enterprise-user-usage。
+func (c *Credential) IsEnterprise() bool {
+	return c != nil && strings.TrimSpace(c.EnterpriseID) != ""
+}
+
 // SiteLabel 返回站点中文名。
 func SiteLabel(site string) string {
 	if site == SiteINTL {

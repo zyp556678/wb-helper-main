@@ -65,6 +65,16 @@ export interface Account {
   nickname: string;
   enterprise_id: string;
   /**
+   * 是否为企业版账号（后端计算值，= enterprise_id 非空）。
+   *
+   * 企业版**没有个人成长体系**：签到 / 成长任务 / 连登管家 / 猫猫旅行 / 夜猫子
+   * 在上游一律被拒（400 code 10001 或 403）。所以卡片要把这些入口藏掉 ——
+   * 留一个点了必然报错的按钮，比没有按钮更糟。
+   *
+   * 用后端下发的标志而不是前端自己判 `enterprise_id !== ""`：那条规则只该有一份。
+   */
+  is_enterprise?: boolean;
+  /**
    * 企业名（批次 4 加法字段）。本项目凭据模型里没有该数据源，
    * 后端按「有才下发」处理；账号信息弹窗在缺失时回退展示 enterprise_id。
    */

@@ -364,11 +364,13 @@ function MoreMenu({
             账号信息
           </button>
           {/*
-            签到只在支持签到的一侧出现。国际站后端会直接 400，与其让用户点了才发现，
-            不如不显示 —— 但**不能用禁用态代替隐藏**：灰着一条「国际站不支持」的
-            菜单项，等于每条菜单都在提醒一个恒定不变的事实。
+            签到只在**做得到**的账号上出现，两条互斥条件：
+              - 站点：国际站后端直接 400（没有签到接口）；
+              - 账号类型：企业版没有个人成长体系，上游回 400 code 10001。
+            与其让用户点了才发现，不如不显示 —— 但**不能用禁用态代替隐藏**：
+            灰着一条「不支持」的菜单项，等于每条菜单都在提醒一个恒定不变的事实。
           */}
-          {account.site !== "intl" ? (
+          {account.site !== "intl" && !account.is_enterprise ? (
             <button
               type="button"
               role="menuitem"
@@ -830,6 +832,17 @@ export function AccountCard({
                 : "bg-primary/12 text-primary-ink"
             }
           />
+          {/*
+            企业版：没有个人成长体系。这里只做一个说明性标签 —— 真正做不了的那些
+            入口（手动签到等）已经直接隐藏，标签是给「为什么没有那些按钮」一个答案。
+          */}
+          {account.is_enterprise ? (
+            <StatusIcon
+              icon={Building2}
+              label="企业版账号：上游没有个人成长体系，签到与成长任务不可用"
+              className="bg-violet-500/15 text-violet-600 dark:text-violet-300"
+            />
+          ) : null}
           {/* 套餐 / 付费 */}
           {quota.known && quota.plan ? (
             <StatusIcon

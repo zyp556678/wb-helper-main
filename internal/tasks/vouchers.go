@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"workbuddy-gateway/internal/upstream"
 )
 
 // VoucherGroup 是一个账号的券码集合。
@@ -54,7 +56,7 @@ func (m *Manager) SchoolVouchers(ctx context.Context, accountID string) ([]Vouch
 			Account: tg.ID, UID: tg.UID, Nickname: tg.Nick,
 			SiteLabel: tg.SiteName, Vouchers: []VoucherItem{},
 		}
-		if !tg.Prof.SupportsGrowthActivity() {
+		if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 			g.Note = tg.SiteName + "没有开学季活动"
 			out = append(out, g)
 			continue

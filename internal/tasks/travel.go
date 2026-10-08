@@ -72,7 +72,7 @@ func (m *Manager) TravelInspect(ctx context.Context) (string, error) {
 		if ctx.Err() != nil {
 			break
 		}
-		if !tg.Prof.SupportsGrowthActivity() {
+		if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 			gated++
 			continue
 		}

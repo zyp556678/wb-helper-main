@@ -120,13 +120,17 @@ type QuotaView struct {
 
 type AccountState struct {
 	// ID 是账号稳定标识（凭据文件名），单账号操作接口用它做路径参数。
-	ID             string `json:"id"`
-	File           string `json:"file"`
-	Site           string `json:"site"`
-	SiteLabel      string `json:"site_label"`
-	UID            string `json:"uid"`
-	Nickname       string `json:"nickname"`
-	EnterpriseID   string `json:"enterprise_id"`
+	ID           string `json:"id"`
+	File         string `json:"file"`
+	Site         string `json:"site"`
+	SiteLabel    string `json:"site_label"`
+	UID          string `json:"uid"`
+	Nickname     string `json:"nickname"`
+	EnterpriseID string `json:"enterprise_id"`
+	// IsEnterprise 是**计算值**（EnterpriseID 非空即真），不落盘。
+	// 面板据此隐藏「签到 / 任务」这类企业版做不了的入口，并显示「企业版」标签 ——
+	// 让前端自己去判 enterprise_id 是否为空，等于把这条规则抄成两份。
+	IsEnterprise   bool   `json:"is_enterprise"`
 	Disabled       bool   `json:"disabled"`
 	DisabledReason string `json:"disabled_reason"`
 	CooldownUntil  int64  `json:"cooldown_until"`
@@ -616,6 +620,7 @@ func (p *Pool) StateOf(a *Account) AccountState {
 		UID:            a.Cred.UID,
 		Nickname:       a.Cred.Nickname,
 		EnterpriseID:   a.Cred.EnterpriseID,
+		IsEnterprise:   a.Cred.IsEnterprise(),
 		Disabled:       a.disabled,
 		DisabledReason: a.disabledReason,
 		CooldownReason: a.cooldownReason,

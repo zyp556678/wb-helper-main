@@ -96,6 +96,15 @@ type CredentialView struct {
 	DeviceToken  string
 }
 
+// IsEnterprise 报告账号是否为企业版（凭据带非空 enterpriseId）。
+//
+// 与 auth.Credential.IsEnterprise 同一判据 —— 那一侧有完整的实测依据说明
+// （企业号没有个人成长体系，上游对成长域一律 400/403）。这里复制一份是因为
+// 反代层拿到的是 CredentialView 而不是 auth.Credential，两边不能互相引用。
+func (c *CredentialView) IsEnterprise() bool {
+	return c != nil && strings.TrimSpace(c.EnterpriseID) != ""
+}
+
 // -----------------------------------------------------------------------------
 // 控制类请求
 // -----------------------------------------------------------------------------

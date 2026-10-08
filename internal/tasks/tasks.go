@@ -746,13 +746,20 @@ func (m *Manager) Scan(ctx context.Context) *ScanResult {
 		as := AccountScan{UID: tg.UID, ID: tg.ID, Nickname: tg.Nick, Site: tg.Site, SiteLabel: tg.SiteName}
 
 		// 成长中心只有国内站有（Profile.SupportsGrowthActivity，与参考实现的
-		// WbVariant::supports_travel 同口径）。国际站账号在这里就标注并跳过。
+		// WbVariant::supports_travel 同口径），且**企业版账号没有个人成长体系**。
+		// 两者都在这里标注并跳过。
 		//
-		// 为什么不直接发请求然后记 Error：那会拿到 404，然后被渲染成红色的
+		// 为什么不直接发请求然后记 Error：那会拿到 404 / 403，然后被渲染成红色的
 		// 「读取任务失败」—— 把「本就不存在的能力」说成了故障，用户会去查网络。
 		// Note 是中性标注，与 Error 分开。
-		if !tg.Prof.SupportsGrowthActivity() {
-			as.Note = tg.SiteName + "没有成长中心活动"
+		if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
+			// 两种原因必须分开说：企业号可以出现在国内站，此时说「国内站没有成长
+			// 中心活动」是一句明显错误的话，用户会以为站点选错了。
+			if tg.Cred.IsEnterprise() {
+				as.Note = "企业版账号没有个人成长体系"
+			} else {
+				as.Note = tg.SiteName + "没有成长中心活动"
+			}
 			res.Accounts = append(res.Accounts, as)
 			continue
 		}
@@ -807,7 +814,7 @@ func (m *Manager) Scan(ctx context.Context) *ScanResult {
 		}
 
 		// 活动状态（连登 / 旅行 / 抽奖）——失败不影响任务扫描
-		if upstream.GrowthSupported(tg.Prof) {
+		if upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 			if st, err := m.client.GrowthStreak(ctx, tg.Cred, tg.Prof); err == nil && st != nil {
 				as.Streak = st.Streak.Days
 			}
@@ -1542,9 +1549,19 @@ func (m *Manager) ReportActivity(ctx context.Context, accountID, model string) (
 		return "", fmt.Errorf("没有可用的账号")
 	}
 	ok := 0
+	gated := 0
 	var firstErr error
 	var suspects []string
 	for _, tg := range list {
+		// 活跃上报走的是成长域端点（ReportChatActivity 在 internal/upstream/growth.go）。
+		// 两类账号注定失败，先跳过、别白发请求：
+		//   - 企业版：没有个人成长体系（auth.Credential.IsEnterprise）
+		//   - 国际站：没有成长中心（Profile.SupportsGrowthActivity）
+		// 这是「面板点补活跃」与排程共用的入口，所以门控放在这里。
+		if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
+			gated++
+			continue
+		}
 		cid := fmt.Sprintf("wbgw-manual-%d", time.Now().UnixMilli())
 		if err := m.client.ReportChatActivity(ctx, tg.Cred, tg.Prof, cid, "", model, ""); err != nil {
 			if firstErr == nil {
@@ -1563,6 +1580,10 @@ func (m *Manager) ReportActivity(ctx context.Context, accountID, model string) (
 		return "", firstErr
 	}
 	detail := fmt.Sprintf("已上报 %d/%d 个账号的对话活跃事件", ok, len(list))
+	// 跳过的原因写出来，否则「上报 0/3」看着像失败。
+	if gated > 0 {
+		detail += fmt.Sprintf("；跳过 %d 个（企业版或国际站，无成长体系）", gated)
+	}
 	if len(suspects) > 0 {
 		detail += "；注意：" + strings.Join(suspects, "；")
 	}
@@ -1577,7 +1598,7 @@ func (m *Manager) TravelAction(ctx context.Context, uid, action string) (string,
 	}
 	// 派猫猫旅行是成长中心的活动，只有国内站有（与参考实现的 WbVariant::supports_travel 同口径）。
 	// 在发请求前就拒掉：否则用户会看到一个 404 文案，误以为是网络或上游故障。
-	if !tg.Prof.SupportsGrowthActivity() {
+	if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 		return "", precondition("%s 没有成长中心活动，无法执行旅行动作", tg.SiteName)
 	}
 	switch action {

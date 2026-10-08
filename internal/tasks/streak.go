@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"workbuddy-gateway/internal/upstream"
 )
 
 // StreakBonusResult 是一次连登管家的逐账号结果（面板与日志共用）。
@@ -76,7 +78,7 @@ func (m *Manager) StreakBonusResults() []StreakBonusResult {
 func (m *Manager) streakBonusAccount(ctx context.Context, tg target) StreakBonusResult {
 	res := StreakBonusResult{Account: tg.Nick}
 	// 国际站没有 CN 的连登体系（发请求只会拿到业务错误），直接跳过。
-	if !tg.Prof.SupportsGrowthActivity() {
+	if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 		res.Notes = append(res.Notes, "国际站账号不参与连登活动")
 		return res
 	}
@@ -178,7 +180,7 @@ type StreakCheck struct {
 // 所以上报成功 ≠ 计分成功，需要回读验证闭环。GET 失败不影响主流程
 // （上报本身已成功，且按天幂等，不做重试）。
 func (m *Manager) CheckActivityStreak(ctx context.Context, tg target) StreakCheck {
-	if !tg.Prof.SupportsGrowthActivity() {
+	if !upstream.GrowthAllowed(tg.Prof, tg.Cred) {
 		return StreakCheck{Note: "国际站账号无连登体系"}
 	}
 	full, err := m.client.GrowthStreak(ctx, tg.Cred, tg.Prof)

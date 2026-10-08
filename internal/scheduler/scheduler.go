@@ -463,11 +463,14 @@ func (s *Scheduler) runCheckin(ctx context.Context, excluded map[string]bool) (C
 			sum.Count(CheckinFailed, err.Error())
 			continue
 		}
-		// 签到只有国内站有接口（Profile.SupportsCheckin，与参考实现的
-		// WbVariant::supports_checkin 同口径）。国际站账号跳过签到，
-		// 但**下面的额度刷新照做** —— 那个两站都需要，一起跳过会让国际站账号
-		// 永远刷不到余额。
-		if !a.Profile().SupportsCheckin() {
+		// 签到有两道门控，彼此正交：
+		//   - 站点：只有国内站有签到接口（Profile.SupportsCheckin，与参考实现的
+		//     WbVariant::supports_checkin 同口径）；
+		//   - 账号类型：企业版没有个人成长体系，上游对签到一律
+		//     400 code 10001「企业账号不支持该操作」（auth.Credential.IsEnterprise）。
+		// 两者都**只跳过签到本身**，下面的额度刷新照做 —— 余额查询两站、两类账号
+		// 都需要，一起跳过会让它们永远刷不到余额。
+		if !a.Profile().SupportsCheckin() || a.Cred.IsEnterprise() {
 			sum.Count(CheckinSkipped, "")
 		} else {
 			res, err := s.client.Checkin(ctx, a.View(), a.Profile())
