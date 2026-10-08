@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -308,15 +309,125 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/", s.handleIndex)
 
-	return s.cors(s.auth(mux))
+	// 最外层是管理面守卫：它要在被拒绝的请求上也把安全头写好，
+	// 因此必须排在 cors/auth 之前。
+	return s.panelSecurity(s.cors(s.auth(mux)))
 }
 
 // -----------------------------------------------------------------------------
 // 中间件
 // -----------------------------------------------------------------------------
 
+// panelCSP 是面板页面的内容安全策略。
+//
+// 为什么 style-src 留 'unsafe-inline'：React 与若干组件库会直接写 style 属性，
+// 禁掉会把面板样式打散；而 script-src 不留 —— 面板产物里**没有任何内联脚本**
+// （Vite 只注入同源的 <script src>），所以这条能真正挡住注入执行。
+//
+// 其余几项：frame-ancestors 'none' 防点击劫持（面板会把接入密钥显示给用户）、
+// object-src 'none' 与 base-uri 'none' 关掉两条老注入路径、
+// form-action 'self' 防止被诱导把表单提交到别处。
+const panelCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+	"object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+// isModelAPIPath 判断请求是否落在「给外部客户端调用」的模型接口上。
+func isModelAPIPath(path string) bool {
+	return path == "/v1" || strings.HasPrefix(path, "/v1/")
+}
+
+// isAdminPath 判断请求是否落在管理面（面板页面本身与面板接口）。
+//
+// 注意 `/` 也算：它服务的就是面板单页应用。而 /status、/healthz 这些是网关自身
+// 的状态接口，不在这里 —— 它们的数据同样敏感，但走的是 Bearer 鉴权那条路。
+func isAdminPath(path string) bool {
+	return path == "/" || path == "/panel" || strings.HasPrefix(path, "/panel/")
+}
+
+// sameOrigin 判断 Origin 头是否与本请求同源。
+//
+// 逐项卡死而不是只比 Host：`http://127.0.0.1:8317@evil.com` 这类带 userinfo 的
+// 写法、以及带 path/query 的畸形 Origin，都不该被当成同源。
+func sameOrigin(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.User != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
+}
+
+// panelSecurity 给管理面加同源校验与安全响应头。
+//
+// # 为什么需要它
+//
+// 面板接口与模型接口**共用同一个端口**，而鉴权用的是 Authorization 头。
+// 传统 CSRF（靠浏览器自动带 Cookie）因此本来就不成立，但还有一条更隐蔽的路：
+//
+//	**DNS rebinding** —— 攻击者把自己的域名解析到 127.0.0.1，浏览器就会把他的
+//	页面当成与我们同源，此时同源策略不再提供任何保护。
+//
+// Origin 与 Sec-Fetch-Site 是浏览器自己填的、页面脚本无法伪造的信号，据此可以
+// 把跨站来源挡在门外。这也是上游（workbuddy-gateway）在 6565407 里补的那一层。
+//
+// 安全头则针对面板页面的特点：它会把接入密钥显示给用户，所以不能被缓存、
+// 不能被别的站点嵌进 iframe、也不该被 MIME 嗅探。
+func (s *Server) panelSecurity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAdminPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		h := w.Header()
+		h.Set("Cache-Control", "no-store")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", panelCSP)
+
+		reject := func(reason string) {
+			s.logf("[管理来源校验] 结果=拒绝 原因=%s 路径=%s 状态码=403", reason, r.URL.Path)
+			h.Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": http.StatusForbidden, "message": reason},
+			})
+		}
+
+		// Origin 缺失是允许的：同源的导航请求与命令行工具本来就不带它
+		// （curl、脚本、桌面壳的首次加载）。带上了就必须与本机同源。
+		if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
+			reject("管理面只接受同源请求")
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+			reject("拒绝跨站管理请求")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// cors 只对 /v1/* 放开跨域。
+//
+// 这里曾经对**所有**路由设 `Access-Control-Allow-Origin: *`。问题在于面板接口与
+// 模型接口共用一个端口：通配 CORS 意味着任何网站都能向 http://127.0.0.1:8317
+// 发带 Authorization 头的跨域请求并**读到响应** —— 唯一的门槛就只剩密钥本身。
+//
+// 浏览器里的客户端确实需要跨域调 /v1/*，但管理面不需要：面板自己与桌面壳都是
+// 同源访问（壳把密钥走 URL fragment 注入，见 web/src/lib/injected-key.ts）。
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isModelAPIPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "*")
@@ -633,7 +744,9 @@ func (s *Server) handlePanelStatic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(rel, "assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
-		w.Header().Set("Cache-Control", "no-cache")
+		// no-store 而不是 no-cache：面板页面会把接入密钥显示给用户，
+		// no-cache 只要求「用前校验」，磁盘上仍然留得下这份带密钥的 HTML。
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	_, _ = w.Write(data)
 }
@@ -645,7 +758,8 @@ func serveEmbeddedIndex(w http.ResponseWriter, fsys fs.FS) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	// 面板 HTML 会显示接入密钥，必须 no-store（理由同 handlePanelStatic）。
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 
