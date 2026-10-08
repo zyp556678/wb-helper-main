@@ -109,6 +109,14 @@ func (p *Profile) QuotaSummaryURL() string {
 	return p.Origin + "/billing/meter/get-user-resource-summary"
 }
 
+// EnterpriseQuotaURL 企业版额度（走站点 Web 域）。
+//
+// 与个人口径是两个体系：企业号在 get-user-resource-summary 上恒返回空 Packages，
+// 必须走这条。详见 Client.enterpriseQuota 的说明。
+func (p *Profile) EnterpriseQuotaURL() string {
+	return p.Origin + "/v2/billing/meter/get-enterprise-user-usage"
+}
+
 // DailyCheckinURL 每日签到（走站点 Web 域）。
 func (p *Profile) DailyCheckinURL() string {
 	return p.Origin + "/v2/billing/meter/daily-checkin"

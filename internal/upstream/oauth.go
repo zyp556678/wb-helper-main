@@ -146,6 +146,12 @@ func (c *Client) FetchQuota(ctx context.Context, cred *CredentialView, p *Profil
 			r.Header.Set("X-Enterprise-Id", cred.EnterpriseID)
 		}
 	}
+	// 企业版额度**不在个人资源包体系内**：个人口径的 get-user-resource-summary
+	// 对 enterpriseId 非空的账号恒返回空 Packages（上游实测：code 0 且 Packages 为
+	// null），面板因此长期显示 0 / 未知 —— 而额度其实是有的。所以先分流。
+	if cred.IsEnterprise() {
+		return c.enterpriseQuota(ctx, p, headers)
+	}
 	data, _, err := c.doJSON(ctx, http.MethodPost, p.QuotaSummaryURL(), headers, strings.NewReader("{}"))
 	if err != nil {
 		return out, err
@@ -170,6 +176,65 @@ func (c *Client) FetchQuota(ctx context.Context, cred *CredentialView, p *Profil
 	// 国际站是 免费/pro/Pro试用。摘要里没带编码时给出保守值（不假装免费），
 	// 完整识别（含权益有效期）走 IdentifyPlan，见 plans.go。
 	out.Plan = planLabelFromSummary(p.Key, s)
+	return out, nil
+}
+
+// enterpriseQuota 走企业口径查额度。
+//
+// # 上游口径（参考实现 wb2api-panel 2026-10-07 实测，企业号 a6239ec8）
+//
+//	POST /v2/billing/meter/get-enterprise-user-usage   （X-Enterprise-Id 由 headers 注入）
+//	{"credit":812.45,"limitNum":2000,"cycleStartTime":"...","cycleEndTime":"...","cycleResetTime":"..."}
+//
+// **注意语义与个人口径相反**：个人口径的 CapacityRemain 是「剩余」，而企业的
+// credit 是「本周期**已用**」。故 remain = limitNum − credit、total = limitNum。
+// 照抄个人口径的解析会把「已用 812」当成「还剩 812」—— 数字看着正常，方向完全反了。
+//
+// 两个边界：
+//
+//   - `limitNum < 0` 表示不限量。此时不作废、也没有"剩余"可言，Total/Remaining 留 0
+//     并在 Plan 里说明，而不是让面板显示成"额度已用尽"；
+//   - 企业**池**总额度是另一回事，成员账号无权查询（上游实测所有池端点 403
+//     not_authorized）。这里只反映该账号被分配的额度。
+//
+// 字段命名两套都收：上游桌面端有两条解析路径，分别读 camelCase 与 snake_case。
+func (c *Client) enterpriseQuota(ctx context.Context, p *Profile, headers func(*http.Request)) (Quota, error) {
+	var out Quota
+	data, _, err := c.doJSON(ctx, http.MethodPost, p.EnterpriseQuotaURL(), headers, strings.NewReader("{}"))
+	if err != nil {
+		return out, err
+	}
+	var resp struct {
+		Credit        float64 `json:"credit"`
+		LimitNum      int64   `json:"limitNum"`
+		LimitNumSnake int64   `json:"limit_num"`
+		UsedNum       float64 `json:"used_num"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return out, fmt.Errorf("解析企业额度响应失败: %w", err)
+	}
+	limit := resp.LimitNum
+	if limit == 0 {
+		limit = resp.LimitNumSnake
+	}
+	used := resp.Credit
+	if used == 0 {
+		used = resp.UsedNum
+	}
+
+	out.Plan = "企业版"
+	out.Paid = true
+	if limit < 0 {
+		out.Plan = "企业版（不限量）"
+		return out, nil
+	}
+	out.Total = float64(limit)
+	out.Used = used
+	out.Remaining = float64(limit) - used
+	if out.Remaining < 0 {
+		// 超额使用时上游仍返回正数 credit，钳到 0 —— 负的"剩余"没有意义。
+		out.Remaining = 0
+	}
 	return out, nil
 }
 
