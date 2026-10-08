@@ -629,8 +629,9 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 	// 「总耗时=11s 输出token=364346」这种看着像计数 bug 的行（真把排查的人骗了一次：
 	// 11 秒 36 万 token 意味着 3 万 tok/s，物理上不可能）。实际上那些请求的
 	// prompt 本来就大，total 是对的，错的只是标签。
-	s.logf("[请求完成] 模型=%s 账号=%s 流式 首字=%v 总耗时=%v 输入token=%d 输出token=%d 总token=%d",
-		modelName, acc.Cred.AccountID(), ttft, time.Since(started), inputTokens, outputTokens, total)
+	s.logf("[请求完成] 模型=%s 账号=%s 流式 首字=%v 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",
+		modelName, acc.Cred.AccountID(), ttft, time.Since(started), inputTokens, outputTokens, total,
+		tokensPerSecond(outputTokens, time.Since(started), ttft))
 }
 
 // aggregateChatResponse 把上游 SSE 聚合成一次完整的非流式响应。
@@ -680,8 +681,10 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 	s.logRequest(r, modelName, accountLogLabel(acc), "chat/aggregate",
 		0, time.Since(started), total, false)
 
-	s.logf("[请求完成] 模型=%s 账号=%s 非流式 总耗时=%v 输入token=%d 输出token=%d 总token=%d",
-		modelName, acc.Cred.AccountID(), time.Since(started), inputTokens, outputTokens, total)
+	// 非流式没有首字时刻，TTFB 记 0 → 分母自然落到端到端，与上游同口径。
+	s.logf("[请求完成] 模型=%s 账号=%s 非流式 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",
+		modelName, acc.Cred.AccountID(), time.Since(started), inputTokens, outputTokens, total,
+		tokensPerSecond(outputTokens, time.Since(started), 0))
 }
 
 // -----------------------------------------------------------------------------

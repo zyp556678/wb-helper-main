@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // stripDataPrefix 去掉 SSE 行的 "data:" 前缀并裁掉空白。
@@ -178,6 +179,46 @@ func tokensFromUsage(usage map[string]any) int64 {
 //
 // 上游若只给 total_tokens（不分输入输出），这里两个返回值都是 0；
 // 调用方必须同时把总量传给 stats.RecordInput.TotalTokens，否则会丢量。
+// minGenWindow 是「可信生成窗口」的下限。
+//
+// 见 tokensPerSecond 的说明：扣除 TTFB 后剩余不足这个值，就认为生成时长不可测。
+const minGenWindow = 200 * time.Millisecond
+
+// tokensPerSecond 计算生成速率（token/秒）。
+//
+// # 分母怎么选，是这里唯一的难点
+//
+// 三种候选，各有各的错法：
+//
+//  1. 端到端耗时（total）—— 把排队、上游思考、网络往返都算进去，**低估**真实生成速度；
+//  2. 首字到末字（total − ttfb）—— 只覆盖生成阶段，正常情况下最准；
+//  3. 拿 2 但当窗口过小 —— 会**高估**到荒谬的量级。
+//
+// 第 3 种是真踩过的坑（上游 workbuddy2api-panel issue #127）：当上游把整个响应攒到
+// 最后一次性下发（假流式 / 中间层攒批刷新），首个 SSE 帧与末帧几乎同时到达，
+// total − ttfb 只剩几毫秒 —— 几百 token 除出**上万 tok/s 的幻数**。
+// 这种形态下"生成时长"根本不可测，诚实的分母只有端到端耗时。
+//
+// 所以：扣除 TTFB 后不足 minGenWindow 就退回端到端。
+// 200ms 这个阈值取得很低：真流式下首帧到末帧通常铺满整个剩余窗口，
+// 缓存命中后的爆发式输出也不会被误伤成"不可测"。
+//
+// 分子用**输出** token 而不是总量：速率问的是"每秒生成多少"，
+// 把 prompt 算进分子会让长上下文请求看起来快得离谱。
+func tokensPerSecond(outputTokens int64, total, ttfb time.Duration) float64 {
+	if outputTokens <= 0 || total <= 0 {
+		return 0
+	}
+	window := total
+	if g := total - ttfb; g >= minGenWindow {
+		window = g
+	}
+	if window <= 0 {
+		return 0
+	}
+	return float64(outputTokens) / window.Seconds()
+}
+
 func splitTokensFromUsage(usage map[string]any) (input, output int64) {
 	if usage == nil {
 		return 0, 0
