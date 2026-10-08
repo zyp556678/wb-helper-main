@@ -136,6 +136,7 @@ func registerCommonFlags(fs *flag.FlagSet, cfg *config.Config) (authFile, authDi
 	authFile = fs.String("auth", "", "凭据文件路径（可逗号分隔）")
 	authDir = fs.String("auth-dir", "", "凭据目录")
 	fs.StringVar(&cfg.APIKey, "api-key", "", "访问网关所需的 API Key")
+	fs.StringVar(&cfg.AdminKey, "admin-key", "", "管理面板专用 Key；留空则沿用 -api-key")
 	fs.StringVar(&cfg.ProxyURL, "proxy", "", "上游请求代理")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "输出详细日志")
 	fs.IntVar(&cfg.ReloadInterval, "reload-interval", 0, "凭据热加载扫描间隔（秒）")

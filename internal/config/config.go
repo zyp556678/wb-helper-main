@@ -187,9 +187,12 @@ type Config struct {
 	setFlags
 
 	// ---- 启动层 ----
-	Addr         string // 监听地址，默认 127.0.0.1
-	Port         int    // 监听端口，默认 8317
-	APIKey       string // 为空表示不校验 Bearer
+	Addr   string // 监听地址，默认 127.0.0.1
+	Port   int    // 监听端口，默认 8317
+	APIKey string // 为空表示不校验 Bearer
+	// AdminKey 是**管理面板专用**的密钥。为空时面板沿用 APIKey（向后兼容：
+	// 老部署与桌面壳零改动）。配了它，就能把模型 Key 分发给别人而不连带管理面。
+	AdminKey     string
 	AuthFile     string // 显式指定的凭据文件（可逗号分隔多个）
 	AuthDir      string // 凭据目录：加载目录下所有凭据文件
 	AuthExplicit bool   // 用户是否显式指定了 -auth

@@ -62,15 +62,34 @@ func TestVerifyCredentialUsable(t *testing.T) {
 	}
 }
 
-// 401 / 403 → **明确拒绝**（凭据确实不可用）。
+// 401 → **明确拒绝**（凭据确实不可用）。
 func TestVerifyCredentialRejected(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		_, prof := stubQuotaServer(t, status)
-		p := newVerifyPool(t, prof, 3*time.Second)
-		v, _ := p.verifyCredential(context.Background(), view("tok"), prof)
-		if v != verdictRejected {
-			t.Fatalf("HTTP %d 应判「明确拒绝」，实际 %v", status, v)
-		}
+	_, prof := stubQuotaServer(t, http.StatusUnauthorized)
+	p := newVerifyPool(t, prof, 3*time.Second)
+	v, _ := p.verifyCredential(context.Background(), view("tok"), prof)
+	if v != verdictRejected {
+		t.Fatalf("HTTP 401 应判「明确拒绝」，实际 %v", v)
+	}
+}
+
+// 403 → **无法判定**，不是「明确拒绝」。
+//
+// 这条以前断言的是相反的行为（403 也算明确拒绝），2026-10-08 按上游
+// workbuddy-gateway@d5f7858 的口径收紧了，理由是：
+//
+//	普通 403 可能只是权限不足或风控拒绝，不能据此确认 Token 失效。
+//
+// 代价对比很不对称：判成 rejected 会**销毁凭据**，把一个其实还能用的号因为
+// 一次风控 403 就删掉；判成 unknown 只是多留一个坏号。所以宁可保守。
+func TestVerifyCredentialForbiddenIsUnknownNotRejected(t *testing.T) {
+	_, prof := stubQuotaServer(t, http.StatusForbidden)
+	p := newVerifyPool(t, prof, 3*time.Second)
+	v, err := p.verifyCredential(context.Background(), view("tok"), prof)
+	if v == verdictRejected {
+		t.Fatal("HTTP 403 不该判「明确拒绝」—— 那会导致凭据被销毁")
+	}
+	if v != verdictUnknown {
+		t.Fatalf("HTTP 403 应判「无法判定」，实际 %v（err=%v）", v, err)
 	}
 }
 
@@ -199,14 +218,28 @@ func TestDeleteKeepWhenStillUsable(t *testing.T) {
 	}
 }
 
-// 删除前校验：明确不可用 → 可以删。
+// 删除前校验：401 明确不可用 → 可以删。
 func TestDeleteAllowsWhenRejected(t *testing.T) {
-	_, prof := stubQuotaServer(t, http.StatusForbidden)
+	_, prof := stubQuotaServer(t, http.StatusUnauthorized)
 	p := newVerifyPool(t, prof, 3*time.Second)
 	acc := p.newAccount(&auth.Credential{Path: "x.json", AccessToken: "tok", Edition: "cn"})
 	keep, note := p.CredentialStillUsableForDelete(context.Background(), acc, prof)
 	if keep {
-		t.Fatalf("上游明确拒绝时可以删除，实际 keep=true（%s）", note)
+		t.Fatalf("上游明确拒绝（401）时可以删除，实际 keep=true（%s）", note)
+	}
+}
+
+// 删除前校验：403 **不构成删除理由**，必须保守保留。
+//
+// 这是上一条收紧后的直接后果，也是它真正的意义所在 —— 用户点「删除账号」时
+// 遇到一次风控 403，不该把凭据删掉。
+func TestDeleteKeepsOnForbidden(t *testing.T) {
+	_, prof := stubQuotaServer(t, http.StatusForbidden)
+	p := newVerifyPool(t, prof, 3*time.Second)
+	acc := p.newAccount(&auth.Credential{Path: "x.json", AccessToken: "tok", Edition: "cn"})
+	keep, note := p.CredentialStillUsableForDelete(context.Background(), acc, prof)
+	if !keep {
+		t.Fatalf("403 只说明权限或风控，不能据此删除凭据，实际 keep=false（%s）", note)
 	}
 }
 

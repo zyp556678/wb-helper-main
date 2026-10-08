@@ -33,7 +33,9 @@ type credentialVerdict int
 const (
 	// verdictUsable 凭据可用（上游正常返回了账号数据）。
 	verdictUsable credentialVerdict = iota
-	// verdictRejected 上游**明确拒绝**（401/403）：凭据确实不可用。
+	// verdictRejected 上游**明确拒绝**（401，或正文明确说登录失效）：凭据确实不可用。
+	//
+	// 403 刻意**不算**在内，理由见 verifyCredential。
 	verdictRejected
 	// verdictUnknown 无法判定（超时 / 网络 / 5xx）。
 	// **处置上必须与 rejected 区分开**：不能据此销毁凭据。
@@ -46,9 +48,19 @@ func (p *Pool) verifyCredential(ctx context.Context, view *upstream.CredentialVi
 	switch {
 	case err == nil:
 		return verdictUsable, nil
-	case status == 401 || status == 403:
+	case status == 401:
 		return verdictRejected, nil
 	default:
+		// 403 落到这里（verdictUnknown），**不销毁凭据**。
+		//
+		// 上游 workbuddy-gateway 在 d5f7858 里做过同样的收紧，理由是：
+		// 「普通 403 可能只是权限不足或风控拒绝，不能据此确认 Token 失效」。
+		// 我们这边更该谨慎 —— rejected 的处置是销毁凭据，把一个其实还能用的号
+		// 因为一次风控 403 就删掉，代价远大于多留一个坏号。
+		//
+		// 只收紧"只读凭据校验"这一条路径，不改变其它调用方的 403 停用规则。
+		// （上游还会看正文里有没有"明确登录失效"的字样；我们这里只拿得到状态码，
+		// 所以只认 401。）
 		return verdictUnknown, err
 	}
 }

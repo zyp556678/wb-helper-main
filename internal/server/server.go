@@ -493,9 +493,23 @@ func isPanelAsset(p string) bool {
 }
 
 // withPanelAuth 面板 API 与 /v1 同口径鉴权（api_key 为空则放行）。
+// panelKey 返回管理面要求的密钥。
+//
+// 未配置 admin_key 时**沿用 API Key** —— 这样老部署与桌面壳（它只知道 API Key，
+// 走 URL fragment 注入）零改动；配了才生效。
+//
+// 为什么值得拆：模型 Key 往往要分发给多个客户端甚至别人，而管理面能改配置、
+// 看凭据、开关自启。共用一把钥匙意味着"给了模型访问权就等于给了管理权"。
+func (s *Server) panelKey() string {
+	if k := strings.TrimSpace(s.config().AdminKey); k != "" {
+		return k
+	}
+	return s.config().APIKey
+}
+
 func (s *Server) withPanelAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.config().APIKey != "" && bearer(r) != s.config().APIKey {
+		if key := s.panelKey(); key != "" && bearer(r) != key {
 			debuglog.Event(r, "warn", "panel_authentication_rejected", map[string]any{
 				"status_code": http.StatusUnauthorized,
 			})
