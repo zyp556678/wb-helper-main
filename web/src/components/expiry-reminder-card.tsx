@@ -75,6 +75,25 @@ export function expiryDaysLeft(batchDayStart: number, todayStart: number): numbe
   return Math.round((batchDayStart - todayStart) / 86_400_000);
 }
 
+/**
+ * 该账号「最近一批到期」的本地零点；没有可比较的到期时间时返回 null。
+ *
+ * 抽出来是为了让**排序**与**行渲染**用同一个判据。两处各写一遍，早晚会在
+ * 「哪些批次算数」上分叉 —— 行里过滤掉了已过期批次（days >= 0），排序也必须过滤，
+ * 否则一个只有过期批次的账号会被排到最前面，而它那一行显示的却是「无到期积分」。
+ */
+function firstExpiryDayStart(
+  entry: PanelCreditAccount | undefined,
+  todayStart: number,
+): number | null {
+  if (!entry || entry.ok === false) return null;
+  const packages = toCreditPackageViews(entry.resources, creditResourceName);
+  const batches = aggregateExpiryBatches(packages).filter(
+    (batch) => expiryDaysLeft(batch.dayStart, todayStart) >= 0,
+  );
+  return batches.length > 0 ? batches[0].dayStart : null;
+}
+
 /** 色点：≤3 天红（不抓紧就真没了）、≤7 天琥珀、更远绿；灰 = 查询失败。 */
 const DOT_CLASS = {
   danger: "bg-destructive",
@@ -136,6 +155,26 @@ export function ExpiryReminderCard({
         ? `查询失败：${creditsError}`
         : `${accounts.length} 个账号 · 实时查询上游`;
 
+  // 按「最快到期」升序排账号行。
+  //
+  // 为什么客户端还要再排一次：上游逐包明细是按**余额降序**返回的，于是余额高的账号
+  // 永远排在最前面，而这张卡片唯一要回答的问题是「哪个号快到期了」。
+  // 查询失败、以及没有未到期批次的账号没有可比较的键，统一排在最后并保持原有相对
+  // 顺序（Array#sort 自 ES2019 起稳定，这里再用原下标兜一层底）。
+  const ordered = accounts
+    .map((account, index) => ({
+      account,
+      index,
+      key: firstExpiryDayStart(credits.get(account.id), todayStart),
+    }))
+    .sort((a, b) => {
+      if (a.key === null && b.key === null) return a.index - b.index;
+      if (a.key === null) return 1;
+      if (b.key === null) return -1;
+      return a.key - b.key || a.index - b.index;
+    })
+    .map((item) => item.account);
+
   return (
     <Card className="mb-5 gap-0 overflow-hidden rounded-2xl py-0 shadow-none">
       <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-border/60 px-5 py-4">
@@ -168,7 +207,7 @@ export function ExpiryReminderCard({
             查询中…（逐账号向上游实时查询）
           </p>
         ) : (
-          accounts.map((account) => (
+          ordered.map((account) => (
             <ExpiryReminderRow
               key={account.id || account.file || account.uid}
               account={account}
