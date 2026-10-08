@@ -31,6 +31,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { MetricRow, PillGroup, Section, StatMetric } from "@/components/section";
 import { describeError, fetchRequestLogs, fetchRequestMetrics, isAbortError, isUnauthorized } from "@/lib/api";
 import { formatCount, formatCredits, formatTokens } from "@/lib/format";
+
+/**
+ * 速率显示：≥100 取整（小数位没有信息量），否则留一位。
+ *
+ * 缺失或 0 都显示 "—" 而不是 "0.0 tok/s"：那两种情况的含义是"这次没算出来"
+ * （上游没报输出 token、或请求失败），写成 0 会被读成"生成得极慢"。
+ */
+function formatTokensPerSec(v: number | undefined): string {
+  if (!v || v <= 0) return "—";
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} tok/s`;
+}
 import type { RequestEvent, RequestMetricsResponse } from "@/lib/types";
 import { useVisibleInterval } from "@/lib/use-visible-interval";
 import { cn } from "@/lib/utils";
@@ -387,6 +398,7 @@ export function RequestsPage() {
                     <th className="px-3 py-2.5 text-right font-medium">耗时</th>
                     <th className="px-3 py-2.5 text-right font-medium">TTFB</th>
                     <th className="px-3 py-2.5 text-right font-medium">Token</th>
+                    <th className="px-3 py-2.5 text-right font-medium">速率</th>
                     <th className="px-3 py-2.5 font-medium">请求 ID</th>
                   </tr>
                 </thead>
@@ -422,6 +434,9 @@ export function RequestsPage() {
                           {row.credit_known && row.credit ? (
                             <span className="ml-1 text-muted-foreground">({formatCredits(row.credit)})</span>
                           ) : null}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-muted-foreground">
+                          {formatTokensPerSec(row.tokens_per_sec)}
                         </td>
                         <td
                           className="max-w-[170px] truncate px-3 py-3 font-mono text-xs text-muted-foreground"

@@ -1860,6 +1860,12 @@ export interface RequestEvent {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /**
+   * 生成速率（token/秒）。分母扣除 TTFB，窗口小于 200ms 时退回端到端 ——
+   * 上游攒批下发时首末帧几乎同时到，拿那个窗口当分母会除出上万 tok/s 的幻数。
+   * 后端拿不到输出 token 时该字段缺省。
+   */
+  tokens_per_sec?: number;
   credit?: number;
   credit_known: boolean;
 }

@@ -336,7 +336,7 @@ func (s *Server) dispatchRouted(w http.ResponseWriter, r *http.Request, modelNam
 	s.stats.Record(stats.RecordInput{Model: modelName, OK: false})
 	// 这里不填耗时：全池都不可用时的耗时主要由「逐个换号重试」构成，
 	// 把它当请求耗时会误导（看起来像是上游慢），真正的失败原因在 lastErr 里。
-	s.logRequest(r, modelName, "", "chat", 0, 0, 0, true)
+	s.logRequest(r, modelName, "", "chat", 0, 0, 0, 0, true)
 	s.writeAPIError(w, r, http.StatusServiceUnavailable, "no_available_account",
 		"全部账号均不可用 | 最近一次失败: "+lastErr)
 	return nil, nil, nil, false
@@ -621,7 +621,7 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 		TTFTMs:       ttft.Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "chat/stream",
-		ttft, time.Since(started), total, interrupted)
+		ttft, time.Since(started), total, outputTokens, interrupted)
 
 	// 三个数都要报，且标签必须与实参一致。
 	//
@@ -650,7 +650,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 			OK:      false,
 		})
 		s.logRequest(r, modelName, accountLogLabel(acc), "chat/aggregate",
-			0, time.Since(started), 0, true)
+			0, time.Since(started), 0, 0, true)
 		s.sticky.Unbind(sessionKey)
 		writeOpenAIError(w, http.StatusInternalServerError, "aggregate_error", "聚合上游流式响应失败: "+err.Error())
 		return
@@ -679,7 +679,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 		TotalTokens:  total,
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "chat/aggregate",
-		0, time.Since(started), total, false)
+		0, time.Since(started), total, outputTokens, false)
 
 	// 非流式没有首字时刻，TTFB 记 0 → 分母自然落到端到端，与上游同口径。
 	s.logf("[请求完成] 模型=%s 账号=%s 非流式 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",

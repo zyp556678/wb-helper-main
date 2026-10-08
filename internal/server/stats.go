@@ -494,9 +494,13 @@ func accountLogLabel(acc *pool.Account) string {
 // 同时把同样的统计喂给 reqlog（请求级明细 + 脱敏归档）。挂在这里而不是各返回分支
 // 各写一遍：本项目**每一个**请求完成分支都会走到这里，新增分支时不会漏记 ——
 // 漏记的表现是「成功率偏高」，且没人会发现。
-func (s *Server) logRequest(r *http.Request, model, account, mode string, ttft, total time.Duration, tokens int64, failed bool) {
+// logRequest 记一条请求归档（面板的请求日志）。
+//
+// outputTokens 单独传：速率的分子必须是**输出** token，用 tokens（总量）会把
+// prompt 也算进"每秒生成多少"。调用方拿不到输出量时传 0，速率字段留空。
+func (s *Server) logRequest(r *http.Request, model, account, mode string, ttft, total time.Duration, tokens, outputTokens int64, failed bool) {
 	if tr := traceFrom(r); tr != nil {
-		tr.noteStats(model, account, mode, ttft, tokens, failed)
+		tr.noteStats(model, account, mode, ttft, tokens, outputTokens, failed)
 	}
 	if s.events == nil {
 		return

@@ -86,8 +86,12 @@ type Event struct {
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64     `json:"completion_tokens,omitempty"`
 	TotalTokens      int64     `json:"total_tokens,omitempty"`
-	Credit           float64   `json:"credit,omitempty"`
-	HasCredit        bool      `json:"credit_known"`
+	// TokensPerSec 是生成速率。分母扣除 TTFB，但窗口小于 200ms 时退回端到端
+	// （见 server.tokensPerSecond）：上游攒批下发时首末帧几乎同时到，
+	// 拿那个窗口当分母会除出上万 tok/s 的幻数。
+	TokensPerSec float64 `json:"tokens_per_sec,omitempty"`
+	Credit       float64 `json:"credit,omitempty"`
+	HasCredit    bool    `json:"credit_known"`
 }
 
 // Filter 用于从归档中筛选最近记录。

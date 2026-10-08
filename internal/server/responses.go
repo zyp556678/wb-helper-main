@@ -472,7 +472,7 @@ func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp
 		TotalTokens:  total,
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "responses/aggregate",
-		0, time.Since(started), total, false)
+		0, time.Since(started), total, outputTokens, false)
 
 	// 三个数都要报，标签与实参一致（这里曾把 total 标成「输出token」，理由见 chat.go 同处的说明）。
 	s.logf("[Responses] 模型=%s 账号=%s 非流式 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",
@@ -843,7 +843,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 		TTFTMs:       ttft.Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "responses/stream",
-		ttft, time.Since(started), total, interrupt)
+		ttft, time.Since(started), total, outputTokens, interrupt)
 
 	s.logf("[Responses] 模型=%s 账号=%s 流式 首字=%v 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",
 		modelName, acc.Cred.AccountID(), ttft, time.Since(started), inputTokens, outputTokens, total,

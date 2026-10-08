@@ -37,12 +37,15 @@ type requestTrace struct {
 	ID      string
 	Started time.Time
 
-	mu       sync.Mutex
-	model    string
-	account  string
-	mode     string
-	ttfb     time.Duration
-	tokens   int64
+	mu      sync.Mutex
+	model   string
+	account string
+	mode    string
+	ttfb    time.Duration
+	tokens  int64
+	// output 是**输出** token。速率必须用它做分子：用总量会把 prompt 也算进
+	// "每秒生成多少"，长上下文请求会显得快得离谱。
+	output   int64
 	credit   float64
 	hasCred  bool
 	attempts int
@@ -60,7 +63,7 @@ func traceFrom(r *http.Request) *requestTrace {
 }
 
 // noteStats 由 logRequest 调用，把这一次请求的统计记进追踪对象。
-func (t *requestTrace) noteStats(model, account, mode string, ttft time.Duration, tokens int64, failed bool) {
+func (t *requestTrace) noteStats(model, account, mode string, ttft time.Duration, tokens, output int64, failed bool) {
 	if t == nil {
 		return
 	}
@@ -71,6 +74,7 @@ func (t *requestTrace) noteStats(model, account, mode string, ttft time.Duration
 	t.mode = mode
 	t.ttfb = ttft
 	t.tokens = tokens
+	t.output = output
 	t.failed = failed
 	t.noted = true
 }
@@ -100,6 +104,9 @@ func (t *requestTrace) event(path string, status int) reqlog.Event {
 	if t.tokens > 0 {
 		// 上游只给总数时也记一条，别让 total 为空 —— 面板按它排序。
 		e.TotalTokens = t.tokens
+	}
+	if t.output > 0 {
+		e.TokensPerSec = tokensPerSecond(t.output, d, t.ttfb)
 	}
 	switch {
 	case t.failed:
