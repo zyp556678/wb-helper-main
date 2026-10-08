@@ -189,11 +189,22 @@ func convertResponsesInputItem(item map[string]any) []any {
 		}}
 	case "function_call_output":
 		callID, _ := item["call_id"].(string)
-		return []any{map[string]any{
+		text, images := convertResponsesToolOutput(item["output"])
+		messages := []any{map[string]any{
 			"role":         "tool",
 			"tool_call_id": callID,
-			"content":      stringifyToolOutput(item["output"]),
+			"content":      text,
 		}}
+		if len(images) > 0 {
+			// 与 Anthropic tool_result 的图片处理一致：tool 保留文本，图片提升成
+			// user 多模态内容 —— **不能把 Base64 当普通文本回放**，那样模型看不到图，
+			// token 还按 Base64 的长度照算。
+			//
+			// handleResponses 随后的工具序列修复会把并行批次里的图片消息移到全部
+			// tool 结果之后，避免打断「调用 / 结果」配对（上游 11148）。
+			messages = append(messages, map[string]any{"role": "user", "content": images})
+		}
+		return messages
 	case "reasoning", "web_search_call":
 		// 上游无法接收这些 Responses 历史项，直接丢弃。
 		// 特别不能把 web_search_call 转成空 user 消息——那会插在并行 function_call
@@ -247,6 +258,91 @@ func convertResponsesContent(content any) any {
 	default:
 		return fmt.Sprintf("%v", c)
 	}
+}
+
+// convertResponsesToolOutput 处理 Responses 的字符串或多模态工具结果。
+//
+// 返回值是「文本 + 图片块」：文本进 tool 消息的 content，图片作为多模态内容
+// 由调用方提升成一条 user 消息。
+//
+// # 为什么必须区分
+//
+// `function_call_output` 的 `output` 可以是**多模态块数组**
+// （`input_text` / `input_image` / `image_url`）。老实现一律走 stringifyToolOutput，
+// 于是图片的 Base64 被当成普通文本塞进 tool 消息 —— 模型看不到图，token 却按
+// Base64 的长度照算。上游 14e7f8b 修的就是这条。
+//
+// 保守边界（照搬上游的判断）：
+//   - 不是数组 → 老行为；
+//   - 数组里**没有任何已知块类型** → 老行为（普通 JSON 对象/数组照旧序列化）；
+//   - 已知块之外的块 → 仍按 JSON 文本保留，**不静默丢弃**工具数据。
+func convertResponsesToolOutput(output any) (string, []any) {
+	blocks, ok := output.([]any)
+	if !ok {
+		return stringifyToolOutput(output), nil
+	}
+
+	blockType := func(block map[string]any) string {
+		t, _ := block["type"].(string)
+		return t
+	}
+
+	// 先扫一遍确认「这确实是一组带类型标签的多模态块」。没有任何已知类型时
+	// 退回老行为 —— 普通对象数组（例如 [{a:1},{b:2}]）不该被当成多模态处理。
+	typed := false
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch blockType(block) {
+		case "input_text", "output_text", "text", "input_image", "image_url":
+			typed = true
+		}
+	}
+	if !typed {
+		return stringifyToolOutput(output), nil
+	}
+
+	var texts []string
+	var images []any
+	for _, raw := range blocks {
+		if block, ok := raw.(map[string]any); ok {
+			switch blockType(block) {
+			case "input_text", "output_text", "text":
+				if text, ok := block["text"].(string); ok {
+					texts = append(texts, text)
+					continue
+				}
+			case "input_image", "image_url":
+				// image_url 有两种写法：直接给字符串，或给 {url, detail} 对象。
+				url, _ := block["image_url"].(string)
+				detail, _ := block["detail"].(string)
+				if nested, ok := block["image_url"].(map[string]any); ok {
+					url, _ = nested["url"].(string)
+					detail, _ = nested["detail"].(string)
+				}
+				if url != "" {
+					image := map[string]any{"url": url}
+					if detail != "" {
+						image["detail"] = detail
+					}
+					images = append(images, map[string]any{"type": "image_url", "image_url": image})
+					continue
+				}
+			}
+		}
+		// 未知块或取不到内容的块：保留成 JSON 文本，不丢数据。
+		texts = append(texts, stringifyToolOutput(raw))
+	}
+
+	text := strings.Join(texts, "\n")
+	// 只有图片、没有文本时给个占位：tool 消息的 content 为空串，
+	// 部分上游会直接判成非法请求。
+	if text == "" && len(images) > 0 {
+		text = "[图片]"
+	}
+	return text, images
 }
 
 func stringifyToolOutput(output any) string {
