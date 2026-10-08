@@ -124,16 +124,22 @@ func TestPanelStaticAssetsMIMEAndCache(t *testing.T) {
 	}
 }
 
-// index.html 必须 no-cache：否则升级后浏览器会拿旧壳去请求已被替换的产物哈希，
-// 表现是「升级完页面白屏，强刷才好」。
+// index.html 必须 no-store，两个理由：
+//
+//  1. 否则升级后浏览器会拿旧壳去请求已被替换的产物哈希，表现是「升级完页面白屏，
+//     强刷才好」；
+//  2. 面板页面会把接入密钥显示给用户，no-cache 只要求「用前校验」，磁盘上仍然
+//     留得下这份带密钥的 HTML；no-store 才是不落盘。
+//
+// 带内容哈希的 assets/ 不受影响，仍可长缓存（见上一个用例）。
 func TestPanelStaticIndexIsNotCached(t *testing.T) {
 	srv := newPanelServer(t, true)
 
-	// 直接命中 index.html 与回退两条路径都要 no-cache。
+	// 直接命中 index.html 与回退两条路径都要 no-store。
 	for _, path := range []string{"/panel/", "/panel/index.html", "/panel/deep/route"} {
 		rec := servePanel(t, srv, path)
-		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
-			t.Fatalf("%q 的 Cache-Control 应为 no-cache，实际 %q", path, cc)
+		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Fatalf("%q 的 Cache-Control 应为 no-store，实际 %q", path, cc)
 		}
 	}
 }
