@@ -708,6 +708,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // -----------------------------------------------------------------------------
 
 func (s *Server) handlePanelOverview(w http.ResponseWriter, r *http.Request) {
+	// 加载失败 + 零账号 → 503，**不伪装成"零账号"**（对齐上游 gateway@6565407 的
+	// webSnapshotUnavailable）。两种情况的账号数都是 0，但含义完全相反：
+	// 一种是"确实没配账号"，另一种是"凭据目录读不到/读坏了"。
+	// 后者若照常返回 200 与全零统计，前端会把它画成一次正常刷新 ——
+	// 用户看到"0 个账号"，第一反应是账号被删了。
+	//
+	// 只在这两个条件**同时**成立时才 503：账号数不为 0 说明加载出了东西，
+	// 个别文件读失败不该把整个面板打成不可用（那种情况在账号列表里逐个可见）。
+	if sum := s.pool.Summary(); sum.Total == 0 {
+		if msg := s.pool.LoadError(); msg != "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": map[string]any{
+					"code":    http.StatusServiceUnavailable,
+					"message": "状态快照暂不可用，请稍后重试；已有页面数据不是新的零账号结果",
+					"detail":  msg,
+				},
+			})
+			return
+		}
+	}
 	source, _ := s.cat.Source()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":        Version,

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,8 +162,11 @@ type AccountState struct {
 
 // Pool 是账号池。
 type Pool struct {
-	cfg    *config.Config
-	client *upstream.Client
+	// loadErr 记录最近一次凭据加载的错误（空串表示正常）。
+	// 用原子指针而不是 p.mu：Load 在返回前已释放锁，避免与它的锁序纠缠。
+	loadErr atomic.Pointer[string]
+	cfg     *config.Config
+	client  *upstream.Client
 	// Logf 是日志输出函数，由 main 注入（默认空 = 不输出）。
 	Logf func(format string, args ...any)
 
@@ -276,6 +280,31 @@ func (p *Pool) Len() int {
 
 // Load 从配置的来源加载全部凭据，构建账号池。返回成功加载的数量。
 // 单个文件解析失败只跳过该文件，不影响其余账号（与 wb-gateway 一致）。
+// setLoadError 记录本次加载的错误（空切片表示加载正常）。
+func (p *Pool) setLoadError(errs []error) {
+	s := ""
+	if len(errs) > 0 {
+		parts := make([]string, 0, len(errs))
+		for _, e := range errs {
+			parts = append(parts, e.Error())
+		}
+		s = strings.Join(parts, "；")
+	}
+	p.loadErr.Store(&s)
+}
+
+// LoadError 返回最近一次凭据加载的错误描述；空串表示正常。
+//
+// 存在的理由只有一个：让上层能区分「确实一个账号都没有」与「加载失败了」。
+// 两者在账号数上都是 0，但前者是正常状态，后者必须报错 ——
+// 把加载失败显示成"0 个账号"，用户会以为账号被删了（本次会话真踩过这个坑）。
+func (p *Pool) LoadError() string {
+	if s := p.loadErr.Load(); s != nil {
+		return *s
+	}
+	return ""
+}
+
 func (p *Pool) Load() (int, []error) {
 	paths := auth.Discover(p.cfg.WorkDir, p.cfg.AuthFile, p.cfg.AuthDir, p.cfg.AuthExplicit)
 
@@ -303,6 +332,7 @@ func (p *Pool) Load() (int, []error) {
 		accs = append(accs, acc)
 	}
 
+	p.setLoadError(errs)
 	p.mu.Lock()
 	p.accounts = accs
 	p.rrIndex = 0
