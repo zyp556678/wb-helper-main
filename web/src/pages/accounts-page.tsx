@@ -45,6 +45,7 @@ import {
   removeAccount,
   reviveAccount,
   setAccountDisabled,
+  setAccountPaused,
 } from "@/lib/api";
 import { nowSeconds, sortAccounts, toCreditPackageViews, type AccountSort } from "@/lib/format";
 import { creditResourceName } from "@/lib/credit-package-names";
@@ -283,6 +284,19 @@ export function AccountsPage({
       }
     },
     [reload, loadCredits],
+  );
+
+  const handleSetPaused = useCallback(
+    async (id: string, paused: boolean) => {
+      try {
+        await setAccountPaused(id, paused);
+        notifySuccess(paused ? "已暂停选号（维护任务照常）" : "已恢复选号");
+        reload();
+      } catch (err) {
+        notifyError(describeError(err));
+      }
+    },
+    [reload],
   );
 
   const handleSetDisabled = useCallback(
@@ -611,6 +625,7 @@ export function AccountsPage({
         total={stats?.total ?? 0}
         active={stats?.active ?? 0}
         disabled={stats?.disabled ?? 0}
+        paused={stats?.paused ?? 0}
         cooldown={stats?.cooldown ?? 0}
         creditsRemaining={stats?.credits_remaining ?? 0}
         quotaKnown={stats?.quota_known ?? 0}
@@ -720,6 +735,7 @@ export function AccountsPage({
                 compact={compact}
                 onRefreshQuota={handleRefreshQuota}
                 onSetDisabled={handleSetDisabled}
+                onSetPaused={handleSetPaused}
                 onRevive={handleRevive}
                 onRemove={handleRemove}
                 onRefreshToken={handleRefreshToken}

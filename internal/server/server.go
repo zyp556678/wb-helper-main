@@ -184,6 +184,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/panel/api/accounts/{id}/plan", s.withPanelAuth(s.handleAccountPlan))
 	mux.HandleFunc("/panel/api/accounts/{id}/disable", s.withPanelAuth(s.handleAccountDisable))
 	mux.HandleFunc("/panel/api/accounts/{id}/enable", s.withPanelAuth(s.handleAccountEnable))
+	// 暂停选号：与禁用分开的中间态 —— 不派发，但维护任务照常（见 pool.SetPaused）。
+	mux.HandleFunc("/panel/api/accounts/{id}/pause", s.withPanelAuth(s.handleAccountPause))
+	mux.HandleFunc("/panel/api/accounts/{id}/resume", s.withPanelAuth(s.handleAccountResume))
 	mux.HandleFunc("/panel/api/accounts/{id}/revive", s.withPanelAuth(s.handleAccountRevive))
 	mux.HandleFunc("/panel/api/accounts/{id}/remove", s.withPanelAuth(s.handleAccountRemove))
 	mux.HandleFunc("/panel/api/accounts/{id}/refresh-token", s.withPanelAuth(s.handleAccountRefreshToken))

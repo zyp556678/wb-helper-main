@@ -312,6 +312,22 @@ export async function setAccountDisabled(id: string, disabled: boolean) {
 }
 
 /**
+ * 暂停 / 恢复「选号」。
+ *
+ * 与 setAccountDisabled 的区别是语义而不是实现：暂停只把账号从**派发**里摘出来，
+ * 签到 / 保活 / 旅行 / 成长任务照常跑。用于"这个号最近容易被风控，先让它歇一阵，
+ * 但别让它掉队"。
+ */
+export async function setAccountPaused(id: string, paused: boolean) {
+  const action = paused ? "pause" : "resume";
+  const { account } = await request<{ account: Account }>(
+    `/accounts/${encodeURIComponent(id)}/${action}`,
+    { method: "POST" },
+  );
+  return account;
+}
+
+/**
  * 人工复活账号：清除禁用 + 冷却 + 熔断 + 连败降权。
  *
  * 与 `setAccountDisabled(id, false)` 的区别是**刻意保留的**：那一项只改「禁用」位

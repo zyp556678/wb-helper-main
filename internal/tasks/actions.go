@@ -184,6 +184,13 @@ func runModelChat(ctx context.Context, m *Manager, tg target, code, modelID, mod
 //
 // 窗口外不做（行为不计分），返回提示由排程在 23 点后自动补足。
 func runBlackCat(ctx context.Context, m *Manager, tg target, _ *upstream.GrowthTask) (string, error) {
+	// 暂停选号的账号不出对话流量 —— 而夜猫子是全部任务里**唯一**"整任务都是真实
+	// 模型对话"的（RunNightChats 逐条发 glm-5.2 短对话），与"让位防风控"正面冲突。
+	// 其余 RPC 类任务（签到 / 活跃上报 / 旅行 / 成长）对暂停号照常执行，
+	// 所以门控只加在这里，不加在 targets() 上。
+	if tg.Paused {
+		return "该账号已暂停选号，夜猫子任务跳过（它会产生真实对话流量）；其余维护任务照常", nil
+	}
 	if !upstream.InNightWindow(time.Now()) {
 		return "当前不在 23:00-08:00 计数窗口，行为不计分；网关会在每日 23 点后自动补足", nil
 	}

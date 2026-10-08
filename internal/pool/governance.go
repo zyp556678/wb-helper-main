@@ -117,6 +117,16 @@ func (a *Account) HealthyForModel(now time.Time, model string) bool {
 func (a *Account) healthyForModel(now time.Time, model string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// 暂停选号放在这里，而不是各选号路径各判一次。
+	//
+	// 选号有三条路径（pickWeightedAccount 内联、eligible 供粘性/轮询、
+	// pickEarliestExpiryLocked 兜底），healthyForModel 是它们**共用**的那道闸。
+	// 本项目在 creditFloorBlocks 的注释里已经记过这个教训：
+	// 「把条件写两处的结果是改一处漏一处，而症状极难看出」——
+	// 只改一条路径时，表现为「普通选号跳过了暂停号、粘性命中的却照发」。
+	if a.paused {
+		return false
+	}
 	if !a.healthyLocked(now) {
 		return false
 	}

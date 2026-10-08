@@ -32,9 +32,12 @@ type Account struct {
 	mu             sync.Mutex // 串行化「同账号的上游请求」与「令牌刷新」，防并发双发触发风控
 	disabled       bool
 	disabledReason string
-	lastError      string
-	successCount   int64
-	failureCount   int64
+	// paused 是「暂停选号」：只把它从派发里摘出来，维护任务照常跑。
+	// 语义与落盘见 ops.go 的 pausedMarkerSuffix。
+	paused       bool
+	lastError    string
+	successCount int64
+	failureCount int64
 
 	// ---- 治理状态（切片 2）----
 	govPtr           *atomic.Pointer[GovParams] // 共享治理参数（面板热改后立即生效）
@@ -133,6 +136,9 @@ type AccountState struct {
 	IsEnterprise   bool   `json:"is_enterprise"`
 	Disabled       bool   `json:"disabled"`
 	DisabledReason string `json:"disabled_reason"`
+	// Paused 是「暂停选号」：只不派发，签到 / 保活 / 旅行 / 成长任务照常跑。
+	// 与 Disabled 是两种状态，面板要分开显示 —— 混在一起用户会以为号被停用了。
+	Paused         bool   `json:"paused"`
 	CooldownUntil  int64  `json:"cooldown_until"`
 	CooldownReason string `json:"cooldown_reason"`
 	TokenExpiresAt int64  `json:"token_expires_at"`
@@ -278,6 +284,7 @@ func (p *Pool) Load() (int, []error) {
 		errs []error
 	)
 	markers := p.loadMarkers(paths)
+	pausedMarkers := p.loadPausedMarkers(paths)
 	for _, path := range paths {
 		cred, err := auth.LoadFile(path)
 		if err != nil {
@@ -289,6 +296,9 @@ func (p *Pool) Load() (int, []error) {
 		if reason, ok := markers[path]; ok {
 			acc.disabled = true
 			acc.disabledReason = reason
+		}
+		if pausedMarkers[path] {
+			acc.paused = true
 		}
 		accs = append(accs, acc)
 	}
@@ -320,6 +330,7 @@ func (p *Pool) Reload() bool {
 	}
 
 	markers := p.loadMarkers(paths)
+	pausedMarkers := p.loadPausedMarkers(paths)
 	next := make([]*Account, 0, len(paths))
 	for _, path := range paths {
 		fp := fileFingerprint(path)
@@ -329,6 +340,10 @@ func (p *Pool) Reload() bool {
 			if _, marked := markers[path]; marked {
 				old.setDisabled(true, markers[path])
 			}
+			// 暂停状态以标记文件为准（用户可能在面板上改过）
+			old.mu.Lock()
+			old.paused = pausedMarkers[path]
+			old.mu.Unlock()
 			next = append(next, old)
 			continue
 		}
@@ -346,6 +361,9 @@ func (p *Pool) Reload() bool {
 		acc.fingerprint = fp
 		if old := existing[path]; old != nil {
 			old.migrateRuntimeTo(acc)
+		}
+		if pausedMarkers[path] {
+			acc.paused = true
 		}
 		if reason, ok := markers[path]; ok {
 			acc.disabled = true
@@ -452,6 +470,13 @@ func (a *Account) IsDisabled() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.disabled
+}
+
+// IsPaused 报告账号是否被暂停选号（只不派发，维护任务照常）。
+func (a *Account) IsPaused() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.paused
 }
 
 // TokenRefreshedAt 返回本进程内最近一次成功刷新令牌的时间；零值表示尚未刷过。
@@ -623,6 +648,7 @@ func (p *Pool) StateOf(a *Account) AccountState {
 		IsEnterprise:   a.Cred.IsEnterprise(),
 		Disabled:       a.disabled,
 		DisabledReason: a.disabledReason,
+		Paused:         a.paused,
 		CooldownReason: a.cooldownReason,
 		TokenExpiresAt: a.Cred.ExpiresAt,
 		TokenValid:     a.Cred.ExpiresAt == 0 || a.Cred.ExpiresAt > now.Unix(),
@@ -663,6 +689,10 @@ type Summary struct {
 	Total    int `json:"total"`
 	Active   int `json:"active"`
 	Disabled int `json:"disabled"`
+	// Paused 是「暂停选号」的账号数：它只不派发，维护任务照常跑。
+	// **必须与 Disabled 分列** —— 上游 panel@1b90f7f（issue #125）修的就是这个：
+	// 两者混成一列时，"我把号暂停了"和"我把号停用了"在界面上看不出区别。
+	Paused   int `json:"paused"`
 	Cooldown int `json:"cooldown"`
 	// CreditsRemaining 是**已查到额度**的账号的剩余积分合计。
 	CreditsRemaining float64 `json:"credits_remaining"`
@@ -678,9 +708,12 @@ func (p *Pool) Summary() Summary {
 	var s Summary
 	for _, a := range p.Snapshot() {
 		s.Total++
+		// 顺序即优先级：禁用 > 暂停 > 冷却 > 可用。四类互斥，和恒等于 Total。
 		switch {
 		case a.Disabled:
 			s.Disabled++
+		case a.Paused:
+			s.Paused++
 		case a.CooldownUntil > now.Unix():
 			s.Cooldown++
 		default:

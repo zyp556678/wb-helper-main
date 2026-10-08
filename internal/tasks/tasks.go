@@ -683,6 +683,9 @@ type target struct {
 	SiteName string
 	Cred     *upstream.CredentialView
 	Prof     *upstream.Profile
+	// Paused 是「暂停选号」。维护任务照常跑它，只有会发真实对话流量的任务
+	// （夜猫子）需要看这一位 —— 那正是"暂停"要避免的东西。
+	Paused bool
 }
 
 // targets 返回当前可用（未禁用）的账号快照，可按 ID 过滤。
@@ -714,6 +717,7 @@ func (m *Manager) targetsIncluding(ids []string, includeDisabled bool) []target 
 			continue
 		}
 		view := a.View()
+		paused := a.IsPaused()
 		if view == nil || view.AccessToken == "" {
 			continue
 		}
@@ -722,6 +726,7 @@ func (m *Manager) targetsIncluding(ids []string, includeDisabled bool) []target 
 			ID: id, UID: view.UID, Nick: a.Cred.Nickname,
 			Site: site, SiteName: auth.SiteLabel(site),
 			Cred: view, Prof: a.Profile(),
+			Paused: paused,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

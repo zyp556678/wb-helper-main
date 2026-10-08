@@ -1,4 +1,4 @@
-import { Clock, Coins, Layers, ShieldCheck, Users, type LucideIcon } from "lucide-react";
+import { Clock, Coins, Layers, PauseCircle, ShieldCheck, Users, type LucideIcon } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
 import { MetricRow, StatMetric } from "@/components/section";
@@ -47,6 +47,8 @@ export interface StatsBarProps {
   total: number;
   active: number;
   disabled: number;
+  /** 暂停选号：只不派发，维护任务照常 —— 与 disabled 是两种状态，必须分列。 */
+  paused: number;
   cooldown: number;
   creditsRemaining: number;
   quotaKnown: number;
@@ -57,6 +59,7 @@ export function StatsBar({
   total,
   active,
   disabled,
+  paused,
   cooldown,
   creditsRemaining,
   quotaKnown,
@@ -65,8 +68,8 @@ export function StatsBar({
   if (loading) {
     return (
       <Card className="gap-0 overflow-hidden rounded-xl py-0 shadow-none">
-        <MetricRow cols={5}>
-          {[0, 1, 2, 3, 4].map((index) => (
+        <MetricRow cols={6}>
+          {[0, 1, 2, 3, 4, 5].map((index) => (
             <div key={index} className="px-4 py-5 sm:py-3">
               <Skeleton className="mx-auto h-4 w-20" />
               <Skeleton className="mx-auto mt-3 h-8 w-24" />
@@ -80,7 +83,7 @@ export function StatsBar({
 
   return (
     <Card className="gap-0 overflow-hidden rounded-xl py-0 shadow-none">
-      <MetricRow cols={5}>
+      <MetricRow cols={6}>
         <StatTile label="总数" value={String(total)} hint="凭据文件总数" icon={Layers} tone="default" />
         <StatTile
           label="可用"
@@ -91,6 +94,14 @@ export function StatsBar({
           divided
         />
         <StatTile label="失效" value={String(disabled)} hint="已禁用" icon={Users} tone="danger" divided />
+        <StatTile
+          label="暂停选号"
+          value={String(paused)}
+          hint="不派发，维护任务照常"
+          icon={PauseCircle}
+          tone="warning"
+          divided
+        />
         <StatTile
           label="冷却"
           value={String(cooldown)}

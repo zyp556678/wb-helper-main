@@ -4,6 +4,11 @@ export interface OverviewAccounts {
   total: number;
   active: number;
   disabled: number;
+  /**
+   * 暂停选号的账号数。与 disabled **必须分列**（上游 panel@1b90f7f / issue #125）：
+   * 暂停只关派发、维护任务照常，混进"失效"里用户会以为号被停用了。
+   */
+  paused: number;
   cooldown: number;
   /** 已查到额度的账号的剩余积分合计。 */
   credits_remaining: number;
@@ -83,6 +88,11 @@ export interface Account {
   note?: string;
   /** 卡片显示字段（批次 4）；空/缺省 = 按昵称显示。 */
   display_field?: DisplayField | "";
+  /**
+   * 是否被暂停选号：只不派发，签到 / 保活 / 旅行 / 成长任务照常跑。
+   * 与 disabled 是两种状态 —— 暂停的号仍然"活着"，只是不出对话流量。
+   */
+  paused?: boolean;
   /**
    * 是否参与自动签到（批次 4）；false = 在排除名单里（手动签到不受影响）。
    * 旧后端/登录回执可能不带，缺失按 true 处理。

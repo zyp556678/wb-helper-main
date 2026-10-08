@@ -66,6 +66,44 @@ func (s *Server) handleAccountEnable(w http.ResponseWriter, r *http.Request) {
 	s.setAccountDisabled(w, r, false)
 }
 
+// handleAccountPause 暂停选号：只把它从派发里摘出来，维护任务照常跑。
+func (s *Server) handleAccountPause(w http.ResponseWriter, r *http.Request) {
+	s.setAccountPaused(w, r, true)
+}
+
+// handleAccountResume 恢复选号。
+func (s *Server) handleAccountResume(w http.ResponseWriter, r *http.Request) {
+	s.setAccountPaused(w, r, false)
+}
+
+// setAccountPaused 切换「暂停选号」并返回最新账号状态。
+//
+// 为什么不复用 /disable：两者只关掉不同的东西 —— 禁用是完全不用，暂停只是不派发。
+// 用同一个端点会逼着用户二选一，而"这个号先别发请求、但签到保活别停"恰恰是
+// 让位防风控时最需要的那个中间态。
+func (s *Server) setAccountPaused(w http.ResponseWriter, r *http.Request, paused bool) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errBody("仅支持 POST"))
+		return
+	}
+	acc, ok := s.accountFromPath(w, r)
+	if !ok {
+		return
+	}
+	if err := s.pool.SetPaused(acc, paused); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]any{"code": 500, "message": err.Error()},
+		})
+		return
+	}
+	action := "暂停选号"
+	if !paused {
+		action = "恢复选号"
+	}
+	s.logf("[账号] %s：账号 %s（%s）", action, acc.Cred.AccountID(), acc.SiteLabel())
+	writeJSON(w, http.StatusOK, map[string]any{"account": s.pool.StateOf(acc)})
+}
+
 // handleAccountRevive 人工复活：清禁用 + 清全部失败状态（冷却 / 熔断 / 连败降权）。
 //
 // 与 `/enable` 分开是刻意的：`/enable` 只改「禁用」这一个位（用户上次禁用错了），

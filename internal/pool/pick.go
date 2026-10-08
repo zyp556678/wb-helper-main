@@ -197,6 +197,13 @@ func (p *Pool) eligible(a *Account, opts PickOptions, now time.Time) bool {
 	if opts.Site != "" && a.Site() != opts.Site {
 		return false
 	}
+	// 暂停选号：不出对话流量。**必须在这里也判一次** —— 选号有两条独立路径
+	// （pickEarliestExpiryLocked 内联判断、eligible 供粘性/轮询用），
+	// 只改一处的结果是「普通选号跳过了、粘性命中的却照发」，
+	// 而那正好绕过"暂停"要避免的东西。与 creditFloorBlocks 同样的理由。
+	if a.IsPaused() {
+		return false
+	}
 	// 粘性命中也要过账号名单：规则是硬约束，不因为会话粘性而豁免。
 	if ok, _ := p.modelAccountAllowedLocked(opts.Model, a); !ok {
 		return false
@@ -310,10 +317,14 @@ func (p *Pool) pickEarliestExpiryLocked(opts PickOptions, now time.Time) (*Accou
 		}
 		a.mu.Lock()
 		disabled := a.disabled
+		// 暂停选号：只把它从派发里摘出来。这是 paused 的全部语义 ——
+		// 维护任务（签到 / 保活 / 旅行 / 成长）走的是 tasks.targets，不经过这里，
+		// 所以暂停号该做的维护一样不会落下。
+		paused := a.paused
 		hardActive := a.coolKind == CoolHard && now.Before(a.cooldownUntil)
 		exp := a.expiryLocked(now)
 		a.mu.Unlock()
-		if disabled || hardActive || exp.IsZero() {
+		if disabled || paused || hardActive || exp.IsZero() {
 			continue
 		}
 		if !a.AcquireInFlight(p.inFlightLimit(a)) {

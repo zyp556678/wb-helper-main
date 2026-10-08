@@ -20,6 +20,17 @@ import (
 // 同时因为凭据文件仍然保留，用户重新登录即可自动恢复。
 const markerSuffix = ".disabled"
 
+// pausedMarkerSuffix 是「暂停选号」标记文件后缀。
+//
+// 与 .disabled **刻意分成两个标记**：它们只关掉不同的东西 ——
+//
+//	.disabled  完全不参与：不选号、也不做维护任务（除非 schedule.include_disabled_in_tasks）
+//	.paused    **只不选号**（不出对话流量），维护任务照常跑
+//
+// 「暂停选号」的用途是让位防风控：某个号最近容易被风控，就把它从派发里摘出来，
+// 但它该签到、该保活、该领奖励一样不能落下 —— 否则一暂停就掉队，暂停期满反而更难用。
+const pausedMarkerSuffix = ".paused"
+
 // ErrAccountNotFound 表示按 ID 找不到账号。
 var ErrAccountNotFound = errors.New("账号不存在")
 
@@ -280,6 +291,47 @@ func (p *Pool) SetDisabled(acc *Account, disabled bool, reason string) error {
 	}
 	acc.mu.Unlock()
 	return p.writeMarker(acc.Cred.Path, disabled)
+}
+
+// SetPaused 手工暂停 / 恢复「选号」。
+//
+// 与 SetDisabled 的关键差别：暂停**不清冷却**。禁用是"这个号先别用了"，
+// 恢复时把旧冷却一并清掉才合理；暂停是"这个号暂时别派发"，它身上已有的冷却
+// 是真实的上游状态，清掉等于伪造了一个"它现在很好"的信号。
+func (p *Pool) SetPaused(acc *Account, paused bool) error {
+	if acc == nil {
+		return errors.New("账号为空")
+	}
+	acc.mu.Lock()
+	acc.paused = paused
+	acc.mu.Unlock()
+	return p.writePausedMarker(acc.Cred.Path, paused)
+}
+
+// writePausedMarker 写 / 删暂停标记文件。
+func (p *Pool) writePausedMarker(path string, paused bool) error {
+	marker := path + pausedMarkerSuffix
+	if !paused {
+		if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("清除暂停标记失败: %w", err)
+		}
+		return nil
+	}
+	if err := os.WriteFile(marker, []byte("paused\r\n"), 0o600); err != nil {
+		return fmt.Errorf("写入暂停标记失败: %w", err)
+	}
+	return nil
+}
+
+// loadPausedMarkers 读取目录下全部 .paused 标记，供 Load / Reload 恢复暂停状态。
+func (p *Pool) loadPausedMarkers(paths []string) map[string]bool {
+	out := map[string]bool{}
+	for _, path := range paths {
+		if _, err := os.Stat(path + pausedMarkerSuffix); err == nil {
+			out[path] = true
+		}
+	}
+	return out
 }
 
 // writeMarker 写 / 删禁用标记文件。

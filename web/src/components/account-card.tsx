@@ -22,6 +22,7 @@ import {
   Layers,
   MonitorSmartphone,
   Package,
+  PauseCircle,
   Power,
   PowerOff,
   RefreshCw,
@@ -88,7 +89,7 @@ import type { Account, CheckinStatusView, LocalAppTarget, PanelCreditAccount } f
 import { cn } from "@/lib/utils";
 
 /** 卡片内某次写操作的 pending 标识。 */
-type PendingAction = "quota" | "toggle" | "revive" | "remove" | "token" | "checkin" | "intl" | "plan";
+type PendingAction = "quota" | "toggle" | "pause" | "revive" | "remove" | "token" | "checkin" | "intl" | "plan";
 
 /** 卡片上「近期到期」最多展示几行 —— 再多就该去积分统计页看完整列表了。 */
 const EXPIRING_ROWS = 2;
@@ -209,6 +210,7 @@ function MoreMenu({
   busy,
   pending,
   onToggleDisabled,
+  onTogglePaused,
   onRevive,
   onRemoveRequest,
   onRefreshQuota,
@@ -223,6 +225,8 @@ function MoreMenu({
   busy: boolean;
   pending: PendingAction | null;
   onToggleDisabled: () => void;
+  /** 暂停 / 恢复「选号」：只不派发，维护任务照常（与禁用是两种状态）。 */
+  onTogglePaused: () => void;
   /** 人工复活：清除禁用 + 冷却 + 熔断 + 连败降权（余额类冷却不清）。 */
   onRevive: () => void;
   onRemoveRequest: () => void;
@@ -402,6 +406,25 @@ function MoreMenu({
             )}
             {account.disabled ? "启用账号" : "禁用账号"}
           </button>
+          {/*
+            暂停选号：与"禁用账号"刻意并列而不是合并 —— 暂停只把号从派发里摘出来，
+            签到 / 保活 / 旅行 / 成长任务照常跑。用在"这个号最近容易被风控，先让它
+            歇一阵，但别让它掉队"。禁用的号连维护都停（除非开了 include_disabled_in_tasks），
+            两者混成一个按钮，用户就没法表达"只想让它别发请求"这个意思了。
+          */}
+          <button
+            type="button"
+            role="menuitem"
+            className={itemClass}
+            disabled={busy}
+            onClick={() => {
+              setOpen(false);
+              onTogglePaused();
+            }}
+          >
+            <PauseCircle className="size-3.5" aria-hidden="true" />
+            {account.paused ? "恢复选号" : "暂停选号"}
+          </button>
           {/* 「复活」只在账号确实处于非正常状态时出现（禁用 / 冷却中）。
               恒显示的代价是每张卡都多一条用不到的菜单项，而它的语义
               （清熔断与降权）只对「被治理层挡住」的账号有意义。 */}
@@ -525,6 +548,8 @@ export interface AccountCardProps {
   onRefreshQuota: (id: string) => Promise<void>;
   /** 设置禁用 / 启用状态。 */
   onSetDisabled: (id: string, disabled: boolean) => Promise<void>;
+  /** 暂停 / 恢复「选号」：只不派发，维护任务照常（见 pool.SetPaused）。 */
+  onSetPaused: (id: string, paused: boolean) => Promise<void>;
   /**
    * 人工复活：清除禁用 + 冷却 + 熔断 + 连败降权。
    *
@@ -574,6 +599,7 @@ export function AccountCard({
   currentIn,
   onRefreshQuota,
   onSetDisabled,
+  onSetPaused,
   onRevive,
   onRemove,
   onRefreshToken,
@@ -832,17 +858,6 @@ export function AccountCard({
                 : "bg-primary/12 text-primary-ink"
             }
           />
-          {/*
-            企业版：没有个人成长体系。这里只做一个说明性标签 —— 真正做不了的那些
-            入口（手动签到等）已经直接隐藏，标签是给「为什么没有那些按钮」一个答案。
-          */}
-          {account.is_enterprise ? (
-            <StatusIcon
-              icon={Building2}
-              label="企业版账号：上游没有个人成长体系，签到与成长任务不可用"
-              className="bg-violet-500/15 text-violet-600 dark:text-violet-300"
-            />
-          ) : null}
           {/* 套餐 / 付费 */}
           {quota.known && quota.plan ? (
             <StatusIcon
@@ -857,11 +872,16 @@ export function AccountCard({
           ) : null}
           {/* 运行状态：可用 / 冷却 / 禁用 */}
           <StateIcon account={account} view={view} />
-          {/* 企业账号 */}
-          {account.enterprise_id ? (
+          {/*
+            企业账号：上游没有个人成长体系，签到 / 成长任务 / 连登 / 旅行 / 夜猫子
+            这些入口**已经直接隐藏**（见上面的手动签到分支与 tasks 侧的门控）。
+            标签的作用是给「为什么少了那些按钮」一个答案。
+            判据用后端下发的 is_enterprise（= enterprise_id 非空），前端不再自己判一遍。
+          */}
+          {account.is_enterprise ? (
             <StatusIcon
               icon={Building2}
-              label={`企业账号 · ${account.enterprise_id}`}
+              label={`企业版账号 · ${account.enterprise_id}｜上游没有个人成长体系，签到与成长任务不可用`}
               className="bg-violet-500/15 text-violet-600 dark:text-violet-300"
             />
           ) : null}
@@ -887,6 +907,9 @@ export function AccountCard({
             view={view}
             busy={busy}
             pending={pending}
+            onTogglePaused={() =>
+              void run("pause", () => onSetPaused(account.id, !account.paused))
+            }
             onToggleDisabled={() =>
               void run("toggle", () => onSetDisabled(account.id, !account.disabled))
             }
