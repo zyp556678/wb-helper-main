@@ -51,6 +51,28 @@ xattr -d com.apple.quarantine workbuddy-gateway_<版本>_arm64.pkg
 自启项指向的是**宿主**（桌面壳 / `launch-hidden.vbs`），**不是网关自己** ——
 直接自启 `workbuddy-gateway.exe serve` 会得到一个没有界面、用户无处关闭的后台进程。
 
+**自启项带 `--silent`**：桌面壳被自启项拉起时不显示面板窗口，只驻留托盘（命令行形态的宿主
+`launch-hidden.vbs` 本身就是隐藏启动）。旧版本写入的自启项没有这个参数，面板会显示
+「但开机时会弹出面板窗口」，关掉再打开一次即可重写成静默形态。
+
+### 检查更新要能出网
+
+网关默认每 6 小时向 `https://api.github.com` 查一次最新 Release（间隔与源可在
+`config.json` 的 `update` 段改，见 README）。它走的是与上游同一个出口代理（`-proxy`），
+所以：
+
+- **完全离线**的部署：把 `update.enabled` 设为 `false`，面板上的「检查更新」会如实
+  显示未启用，而不是假装「已是最新」。
+- **私有仓库**：未认证访问 Release 接口返回 404，需要在 `update.token` 里配一个只读令牌
+  （细粒度 PAT、`contents:read`），或用环境变量 `WB_UPDATE_TOKEN` 注入（容器推荐后者，
+  免得令牌进镜像/配置管理）。
+- 只有一个 Go 二进制、没有桌面壳的部署同样能查到更新；「下载安装包」会把包落到数据目录的
+  `updates/` 下，装不装由你决定（网关不会自行替换正在运行的二进制）。
+- **代理**：配了 `-proxy` 就用它；没配则认环境变量（`HTTPS_PROXY` / `HTTP_PROXY` /
+  `ALL_PROXY`）。注意这与**上游对话流量**的口径不同 —— 后者只认 `-proxy`，
+  不读环境变量（出口 IP 影响风控）。所以容器里要给更新检查配代理，
+  要么设环境变量，要么用 `-proxy` 让两者一起走。
+
 **二、npm 全局安装**（给习惯 npm 的人，也是三条里唯一能一行搞定的）
 
 ```bash

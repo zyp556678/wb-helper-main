@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-gateway",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "WorkBuddy / CodeBuddy 账号池网关：本地反代 + Web 管理面板（npm i -g 后一条命令起服务）",
   "bin": {
     "workbuddy-gateway": "bin/workbuddy-gateway.js"
@@ -10,11 +10,11 @@
     "scripts"
   ],
   "optionalDependencies": {
-    "workbuddy-gateway-darwin-arm64": "0.9.2",
-    "workbuddy-gateway-darwin-x64": "0.9.2",
-    "workbuddy-gateway-win32-x64": "0.9.2",
-    "workbuddy-gateway-linux-x64": "0.9.2",
-    "workbuddy-gateway-linux-arm64": "0.9.2"
+    "workbuddy-gateway-darwin-arm64": "0.9.3",
+    "workbuddy-gateway-darwin-x64": "0.9.3",
+    "workbuddy-gateway-win32-x64": "0.9.3",
+    "workbuddy-gateway-linux-x64": "0.9.3",
+    "workbuddy-gateway-linux-arm64": "0.9.3"
   },
   "scripts": {
     "postinstall": "node scripts/install.js"

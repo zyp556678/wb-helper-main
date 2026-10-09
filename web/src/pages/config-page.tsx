@@ -22,6 +22,7 @@ import { HourPicker } from "@/components/hour-picker";
 import { PromptConfigCard, type PromptFormValue } from "@/components/prompt-config-card";
 import { RuntimeInfoCard } from "@/components/runtime-info-card";
 import { AutostartCard } from "@/components/autostart-card";
+import { UpdateCard } from "@/components/update-card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -1714,6 +1715,11 @@ export function ConfigPage() {
           {/* 自启自成一块：它不在 config.json 里（是系统注册表 / plist / .desktop），
               点开关即刻生效，不跟随底部的「保存配置」。 */}
           <AutostartCard />
+
+          {/* 检查更新同样自成一块：状态是网关的运行期状态（不是配置字段），
+              只有里面的「自动检查」开关会写 config.json，而且它写的是自己的端点，
+              不跟随底部的「保存配置」—— 免得用户以为不点保存就不会去查。 */}
+          <UpdateCard />
 
           <div className="sticky bottom-0 z-10 -mx-6 border-t border-border bg-background/95 px-6 py-3 backdrop-blur sm:-mx-8 sm:px-8">
             <div className="flex flex-wrap items-center justify-between gap-3">

@@ -103,6 +103,7 @@ type runtimeFile struct {
 	Prompt        PromptSection   `json:"prompt"`
 	Local         LocalSection    `json:"local"`
 	Tasks         TasksSection    `json:"tasks"`
+	Update        UpdateSection   `json:"update"`
 
 	// Server 是入站 HTTP 服务参数（目前只有读取上限）。
 	Server ServerSection `json:"server"`
@@ -230,6 +231,9 @@ type Config struct {
 	Prompt   PromptSection
 	Local    LocalSection
 	Tasks    TasksSection
+	// Update 是「检查更新」的参数：默认开，可在 config.json 里关掉，
+	// 也可以指向自己的仓库。
+	Update UpdateSection
 	// Server 是入站 HTTP 服务参数：**装配期字段**，改动需重启进程
 	// （http.Server 只在启动时构造一次）。
 	Server ServerSection
@@ -345,6 +349,7 @@ func Load(opt *Config) (*Config, error) {
 		cfg.Prompt = f.Prompt
 		cfg.Tasks = f.Tasks
 		cfg.Local = f.Local
+		cfg.Update = f.Update
 		cfg.ModelsNPM = f.ModelsNPM
 		cfg.ModelsProbe = f.ModelsProbe
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -387,6 +392,39 @@ func (c *Config) buildClients() error {
 	// 对话流没有总时长上限：长思考/长输出不会被掐断，改由空闲读超时兜底。
 	c.Chat = &http.Client{Transport: transport, Timeout: 0}
 	return nil
+}
+
+// UpdateClient 返回「检查更新」用的 HTTP 客户端。
+//
+// 与 Control 只差一件事：没显式配 `-proxy` 时**回落到环境变量代理**
+// （HTTPS_PROXY / HTTP_PROXY / ALL_PROXY）。
+//
+// 为什么对话流量不读环境代理、而这里读：上游对话走的是账号凭据，出口 IP 与代理
+// 规则会影响风控，本项目刻意只认 `-proxy`（见 buildClients）；而「问一句 GitHub
+// 有没有新版本、把安装包下下来」是标准的公共服务访问，用户机器上开着系统代理
+// （Clash / v2ray 之类）时它本就该走代理。不读环境变量的实际后果是「检查更新一直
+// 超时或极慢」，而用户完全看不出原因 —— 本机实测直连 objects.githubusercontent.com
+// 下 15MB 会中途断流，走本机代理（127.0.0.1:7897）则秒级完成。
+//
+// 不动 Control 那份 Transport：`Transport.Proxy` 是共享状态，原地改会同时改掉
+// 对话流量的出站策略。这里 Clone 一份，只改自己这份的 Proxy。
+func (c *Config) UpdateClient() *http.Client {
+	if strings.TrimSpace(c.ProxyURL) != "" {
+		// 显式配了代理就以它为准 —— 与对话流量同一出口，行为可预期。
+		return c.Control
+	}
+	base, ok := c.Control.Transport.(*http.Transport)
+	if !ok || base == nil {
+		base, ok = http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return c.Control
+		}
+	}
+	tr := base.Clone()
+	// ProxyFromEnvironment 只在首次调用时读一次环境变量（Go 内部有 sync.Once），
+	// 进程起来之后再改环境变量不会生效 —— 这与「配置读一次」的直觉一致，不额外处理。
+	tr.Proxy = http.ProxyFromEnvironment
+	return &http.Client{Transport: tr, Timeout: DefaultControlTimeout}
 }
 
 // ListenAddr 返回 host:port。

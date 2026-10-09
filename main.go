@@ -40,12 +40,13 @@ import (
 	"workbuddy-gateway/internal/session"
 	"workbuddy-gateway/internal/stats"
 	"workbuddy-gateway/internal/tasks"
+	"workbuddy-gateway/internal/update"
 	"workbuddy-gateway/internal/upstream"
 	"workbuddy-gateway/web"
 )
 
 // version 是网关版本号。
-const version = "0.9.2"
+const version = "0.9.3"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -287,6 +288,21 @@ func runServe(args []string) {
 	events.Info(eventlog.ChannelSystem, "startup", "网关启动",
 		map[string]any{"version": version, "accounts": p.Len(), "model_count": len(cat.Merged())})
 
+	// 检查更新：默认每 6 小时问一次 GitHub Release，发现新版本时
+	// 记一条事件、面板上显示提示，并可按需把安装包下到数据目录的 updates/。
+	//
+	// 用 cfg.UpdateClient()：显式配了 `-proxy` 就用它，否则回落到环境变量代理。
+	// 上游对话流量刻意不读环境代理（出口 IP 影响风控），但查 GitHub 是公共服务访问，
+	// 用户开着系统代理时就该走 —— 否则表现是「检查更新一直超时」，看不出原因。
+	updater := update.New(cfg, update.Options{
+		Current:     version,
+		Client:      cfg.UpdateClient(),
+		DownloadDir: filepath.Join(cfg.WorkDir, "updates"),
+		Logf:        log.Printf,
+		Events:      events,
+	})
+	updater.Start(ctx)
+
 	// 任务中心（切片 5）：成长任务扫描 / 自动完成 / 报名领奖 + 旅行、连登、抽奖
 	taskMgr := tasks.New(p, client, cfg, events)
 	taskMgr.Logf = log.Printf
@@ -310,6 +326,7 @@ func runServe(args []string) {
 	// 账号备注 / 显示字段（批次 4）：本机展示偏好，单独落一个文件，
 	// 不写进凭据、也不进账号池治理状态。
 	srv.SetAccountMeta(accountmeta.New(filepath.Join(cfg.WorkDir, "wb-account-meta.json")))
+	srv.SetUpdateChecker(updater)
 	// 客户端日志限流扫描（切片 19 追加）：WorkBuddy 桌面客户端直连官方，
 	// 它的模型限流不经过网关，只能从客户端日志还原（对齐 wb-switch 的扫日志兜底通路）。
 	if home, err := os.UserHomeDir(); err == nil {

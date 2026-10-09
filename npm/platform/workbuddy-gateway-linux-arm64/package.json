@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-gateway-linux-arm64",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "workbuddy-gateway platform binaries (linux-arm64)",
   "os": [
     "linux"

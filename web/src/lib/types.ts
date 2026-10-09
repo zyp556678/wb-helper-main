@@ -682,6 +682,19 @@ export interface PanelConfig {
   prompt: ConfigPrompt;
   /** 任务中心策略（切片 18）。 */
   tasks: ConfigTasks;
+  /** 检查更新的**配置**（运行期状态与结果走 /panel/api/update）。 */
+  update?: ConfigUpdate;
+}
+
+/** 更新检查的配置（config.json 的 update 段）。 */
+export interface ConfigUpdate {
+  enabled: boolean;
+  /** 自动检查间隔（小时）；0 表示未配置，实际用后端默认值。 */
+  check_hours: number;
+  repo: string;
+  include_prerelease: boolean;
+  /** 只回「配没配」：令牌原文不下发（面板没有任何需要看到它的场景）。 */
+  token_set: boolean;
 }
 
 export interface ConfigTasks {
@@ -1828,6 +1841,14 @@ export interface AutostartConflict {
 export interface AutostartStatus {
   supported: boolean;
   enabled: boolean;
+  /**
+   * 开机时**不弹窗**（只驻留托盘）。
+   *
+   * 桌面壳形态看自启项的启动参数；命令行形态的宿主是 launch-hidden.vbs，
+   * 它本身就是隐藏启动，因此恒为 true。老版本写下的自启项没有这个参数，
+   * 这里会是 false —— 面板要如实显示，用户重新开一次即可升级成静默。
+   */
+  silent: boolean;
   kind: AutostartKind;
   /** 自启项指向的可执行文件（便于用户核对）。 */
   host?: string;
@@ -2375,4 +2396,63 @@ export interface ExtSessionUnifyResult {
   notes?: string[];
   /** applied=true 的项数（后端算好）。 */
   synced: number;
+}
+
+// -----------------------------------------------------------------------------
+// 检查更新
+// -----------------------------------------------------------------------------
+
+/**
+ * 更新检查的状态快照（GET /panel/api/update）。
+ *
+ * 请求由**网关代发**：面板的 CSP 是 `connect-src 'self'`，浏览器里发不出跨域请求，
+ * 私有仓库的令牌也只该由网关持有。
+ */
+export interface UpdateStatus {
+  /** 当前运行的网关版本。 */
+  current: string;
+  /** 更新源上最新的版本号（已去掉 tag 的 v 前缀）。 */
+  latest?: string;
+  update_available: boolean;
+  /** 本次检查用的仓库（owner/name），便于用户核对。 */
+  repo?: string;
+  release_name?: string;
+  /** Release 页面地址，本机可直接用系统浏览器打开。 */
+  release_url?: string;
+  /** 发布时间（unix 秒）。 */
+  published_at?: number;
+  /** Release 正文（后端已截断）。 */
+  notes?: string;
+  /** 匹配**本机平台**的安装包；没有对应产物时是空串。 */
+  asset_name?: string;
+  asset_size?: number;
+  download_url?: string;
+  /** 上次**成功**检查的时间（unix 秒）；0 表示还没查过。 */
+  checked_at?: number;
+  /** 此刻是否有一次检查在飞（面板据此轮询）。 */
+  checking: boolean;
+  /** 是否开着自动检查（来自 config.json 的 update.enabled）。 */
+  auto_check: boolean;
+  /** 生效中的自动检查间隔（小时）。 */
+  interval_hours: number;
+  /** 是否配了私有仓库令牌（不回令牌原文）。 */
+  token_set: boolean;
+  /** 检查失败的原因；非空时面板显示红色提示条。 */
+  error?: string;
+  /** 中性补充说明（例如「当前版本不是发行版本号，无法比较」）。 */
+  detail?: string;
+}
+
+/** POST /panel/api/update/download 的响应。 */
+export interface UpdateDownloadResult {
+  ok: boolean;
+  detail?: string;
+  /** 安装包在本地的绝对路径。 */
+  path: string;
+  name: string;
+  dir: string;
+  bytes: number;
+  version: string;
+  /** 本地已有同大小文件，这次没有重复下载。 */
+  skipped: boolean;
 }

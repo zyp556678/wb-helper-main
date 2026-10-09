@@ -43,6 +43,13 @@ const RUN_VALUE: &str = "WorkBuddyGatewayDesktop";
 #[cfg(windows)]
 const CLI_TASK: &str = "WorkBuddyGateway";
 
+/// 自启项里带的「静默启动」参数。
+///
+/// 与 Go 侧 `internal/autostart` 的 `SilentArg` 以及 `main.rs` 的 `SILENT_ARG`
+/// **必须逐字一致**：自启项由两侧共同写入（面板开关走 Go，托盘开关走这里），
+/// 不一致就会出现「从面板开是静默、从托盘开是弹窗」这种解释不清的差异。
+const SILENT_ARG: &str = "--silent";
+
 #[cfg(windows)]
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -170,8 +177,9 @@ fn write_autostart_entry() -> bool {
         return false;
     };
     // 用 reg add 而不是直接写注册表：与卸载脚本（uninstall.ps1 里的 reg delete）
-    // 走同一套工具，行为可对照。`/d` 的值加引号，路径含空格时才能被正确解析。
-    let value = format!("\"{}\"", exe.display());
+    // 走同一套工具，行为可对照。`/d` 的值加引号，路径含空格时才能被正确解析；
+    // 静默参数跟在引号之后（引号内的部分才被当成路径）。
+    let value = format!("\"{}\" {}", exe.display(), SILENT_ARG);
     hidden_output(
         "reg",
         &[
@@ -218,6 +226,11 @@ fn write_autostart_entry() -> bool {
     }
     // RunAtLoad 让登录时自动拉起。不加 KeepAlive：壳本身已经管着网关子进程，
     // 让 launchd 再去守护「壳」会导致用户从托盘点「退出」后又被立刻拉起来。
+    //
+    // 静默参数写成**独立的 <string>**：plist 的参数是数组，拼成一行会让 launchd
+    // 把 `"/Applications/X.app" --silent` 当成一个路径。
+    // 路径要转义：含 `&` 的路径不转义会让 plist 变成非法 XML，launchd 直接拒绝加载，
+    // 而自启是延迟生效的，写坏了当场没有任何反馈。
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -228,13 +241,14 @@ fn write_autostart_entry() -> bool {
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
+        <string>{SILENT_ARG}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
 </dict>
 </plist>
 "#,
-        exe = exe.display()
+        exe = xml_escape(&exe.display().to_string())
     );
     if std::fs::write(&path, plist).is_err() {
         return false;
@@ -302,12 +316,13 @@ fn write_autostart_entry() -> bool {
             return false;
         }
     }
+    // Exec 里含空格的路径必须加引号（桌面条目规范），静默参数跟在引号之后。
     let body = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=WorkBuddy 网关\n\
-         Comment=开机自动启动 WorkBuddy 网关桌面版\n\
-         Exec={}\n\
+         Comment=开机自动启动 WorkBuddy 网关桌面版（静默驻留托盘）\n\
+         Exec=\"{}\" {SILENT_ARG}\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n",
         exe.display()
@@ -328,6 +343,21 @@ fn remove_autostart_entry() -> bool {
 // 共用工具
 // ---------------------------------------------------------------------------
 
+/// XML 文本节点转义（与 Go 侧 `internal/autostart` 的 `xmlEscape` 同一口径）。
+///
+/// 只用于写 plist：路径里出现 `&` / `<` 时，未转义的 plist 是**非法 XML**，
+/// launchd 会拒绝加载 —— 而自启是「下次登录才生效」的延迟执行，写坏了当场没有
+/// 任何反馈，只表现为「开了自启却什么都没发生」。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn xml_escape(s: &str) -> String {
+    // 顺序有意义：先替换 & 才不会把后面生成的实体再转义一次。
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// 当前可执行文件路径。
 ///
 /// 用 `current_exe()` 而不是 `argv[0]`：后者可能是相对路径或经 PATH 解析的名字，
@@ -340,10 +370,14 @@ fn current_exe_path() -> Option<PathBuf> {
 ///
 /// 返回 `None` 表示命令压根没起来（找不到可执行文件等）。
 ///
-/// 只有 Windows 分支（`reg` / `schtasks`）与单元测试会用到它；macOS / Linux 的
-/// 自启落点是直接写文件，不需要起子进程。不加这个属性的话，Linux 上构建会得到
-/// 一条 `function is never used` 警告 —— 那会掩盖真正需要注意的警告。
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+/// 只有 Windows 分支（`reg` / `schtasks`）会用到它；macOS / Linux 的自启落点是
+/// 直接写文件，不需要起子进程。不加这个属性的话，Linux 上构建会得到一条
+/// `function is never used` 警告 —— 那会掩盖真正需要注意的警告。
+///
+/// 判据用 `not(windows)` 而不是 `not(any(windows, test))`：后者在 **test target**
+/// 上会失效（cfg(test) 为真 → 属性不施加），于是 `cargo check --all-targets`
+/// 照样报这条警告 —— 而消掉这条警告正是它的目的。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn hidden_output(program: &str, args: &[&str]) -> Option<(bool, String)> {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
@@ -364,17 +398,74 @@ fn hidden_output(program: &str, args: &[&str]) -> Option<(bool, String)> {
 mod tests {
     use super::*;
 
+    /// 临时改一个环境变量，出作用域时还原（panic 时也会还原）。
+    ///
+    /// 用它而不是裸 `set_var`：用例失败会 unwind，不还原就会污染同进程里后续的用例。
+    #[cfg(all(unix, not(target_os = "macos")))]
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl EnvGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     /// 状态查询在**未开启**时不应报 Enabled。
     ///
     /// 自动化环境里通常没开过自启，这条能挡住「查询逻辑写反」这类低级错误。
-    /// 如果开发机恰好开着自启，这条会失败 —— 那时请先关掉再跑测试。
+    ///
+    /// Linux 上先把 `XDG_CONFIG_HOME` 指到一个空目录再断言：开发机往往**真的开着**
+    /// 自启（作者自己就在用这个应用，这台机器上就有一条 0.9.2 桌面版写下的记录），
+    /// 不隔离的话本地 `cargo test` 会一直红着 —— 而一条永远红的用例等于没有用例。
+    /// 查询路径本身就认这个变量（见 `linux_desktop_path`），所以隔离是真实的。
     #[test]
     fn state_is_disabled_by_default_in_test_env() {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let _isolated = {
+            let dir = std::env::temp_dir().join(format!(
+                "wb-autostart-test-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            EnvGuard::set("XDG_CONFIG_HOME", &dir)
+        };
+
         let state = is_enabled();
         assert!(
             matches!(state, State::Disabled | State::Unsupported),
             "未配置自启时不应报 Enabled，实际 {state:?}"
         );
+    }
+
+    /// 静默参数必须是个命令行开关（前面两个减号），否则会被宿主当成别的意思。
+    #[test]
+    fn silent_arg_is_a_flag() {
+        assert!(SILENT_ARG.starts_with("--"), "实际 {SILENT_ARG:?}");
+    }
+
+    /// 含 & 的路径不转义会让 plist 变成非法 XML —— launchd 直接拒绝加载。
+    #[test]
+    fn xml_escape_protects_plist() {
+        assert_eq!(xml_escape("a & b"), "a &amp; b");
+        assert_eq!(xml_escape("<x>"), "&lt;x&gt;");
+        assert_eq!(xml_escape("plain/path"), "plain/path");
     }
 
     /// 可执行文件路径必须能取到，否则自启项会写成空路径。

@@ -64,6 +64,18 @@ const (
 // macAgentLabel 是桌面版 LaunchAgent 的标签。
 const macAgentLabel = "com.workbuddy.gateway.desktop"
 
+// SilentArg 是自启项里传给**桌面壳**的「静默启动」参数。
+//
+// 为什么要有它：不带参数地拉起桌面壳，它会走「正常启动」路径把面板窗口显示出来
+// —— 用户关机时并没有开着这个窗口，开机却要面对一个自己没点开的面板，还必须在
+// 托盘或窗口里手动关掉。开机自启动的合理形态是「悄悄地驻进托盘」，要看的用户
+// 自己点托盘图标。桌面壳对它的处理见 desktop/src-tauri/src/main.rs。
+//
+// **不能给命令行形态加这个参数**：那条路径的宿主是 launch-hidden.vbs，
+// 它本身就是隐藏启动（窗口样式 0），而它的第一个参数是**端口**——塞一个
+// `--silent` 进去会被当成端口解析。见 entryArgs。
+const SilentArg = "--silent"
+
 // Status 是一次自启状态查询的结果。
 type Status struct {
 	// Supported 表示当前平台已实现自启管理。
@@ -74,6 +86,13 @@ type Status struct {
 	Kind Kind `json:"kind"`
 	// Host 是自启项里记录的可执行文件路径（便于用户核对）。
 	Host string `json:"host,omitempty"`
+	// Silent 表示这个自启项**开机时不会弹窗**：
+	//   - 桌面壳形态：命令行里带了 SilentArg；
+	//   - 命令行形态：宿主是 launch-hidden.vbs，它本来就是隐藏启动。
+	//
+	// 之所以要回读而不是「我们写的时候带了就算」：老版本写的自启项没有这个参数，
+	// 用户也可能手动改过注册表/plist。面板上写「静默启动」就必须真的是静默的。
+	Silent bool `json:"silent"`
 	// Location 是自启项所在的系统位置（注册表键 / plist 路径 / .desktop 路径）。
 	// 面板把它显示出来，用户想手动改时知道该去哪。
 	Location string `json:"location,omitempty"`
@@ -124,14 +143,15 @@ func Enable() (Status, error) {
 		return st, fmt.Errorf("%s", c.Message)
 	}
 
+	args := entryArgs(kind)
 	var err error
 	switch runtime.GOOS {
 	case "windows":
-		err = winWrite(winValue, host)
+		err = winWrite(winValue, host, args)
 	case "darwin":
-		err = macWrite(host)
+		err = macWrite(host, args)
 	default:
-		err = linuxWrite(host)
+		err = linuxWrite(host, args)
 	}
 	if err != nil {
 		return Query(), err
@@ -271,6 +291,62 @@ func isFile(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// entryArgs 返回要写进自启项的参数。
+//
+// 只有桌面壳需要参数（见 SilentArg 的说明）：命令行形态的宿主是
+// launch-hidden.vbs，它自己就是隐藏启动，而且第一个参数是端口 ——
+// 多写一个参数会把端口顶掉。
+func entryArgs(kind Kind) []string {
+	if kind == KindDesktop {
+		return []string{SilentArg}
+	}
+	return nil
+}
+
+// quoteCommand 拼出注册表值里的「程序 + 参数」形态。
+//
+// 路径一律加引号：含空格的路径不加引号会被登录时的命令行解析拆成「程序 + 参数」，
+// 而这类错误在写入时没有任何反馈，只在下次开机表现为「开了自启却什么都没发生」。
+func quoteCommand(host string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, `"`+host+`"`)
+	parts = append(parts, args...)
+	return strings.Join(parts, " ")
+}
+
+// splitCommand 把「程序 + 参数」拆开（quoteCommand 的逆操作）。
+//
+// 只处理我们写出去的形态：路径可能带引号，参数用空格分隔。解析失败时
+// 宁可把整串当成路径（少报一个参数），也不要猜出半个路径 —— Host 是给用户
+// 核对用的，显示得不准比不显示更糟。
+func splitCommand(raw string) (string, []string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if s[0] == '"' {
+		if i := strings.IndexByte(s[1:], '"'); i >= 0 {
+			return s[1 : 1+i], strings.Fields(s[1+i+1:])
+		}
+		return s, nil
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], fields[1:]
+}
+
+// hasSilent 判断参数里是否包含静默启动开关。
+func hasSilent(args []string) bool {
+	for _, a := range args {
+		if a == SilentArg {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
@@ -296,8 +372,12 @@ func winQuery() Status {
 		return st
 	}
 	st.Enabled = true
-	st.Host = path
-	st.Kind = kindOfHost(path)
+	// 值里可能带参数（`"C:\...\app.exe" --silent`），拆开才能分别回答
+	//「指向谁」与「是不是静默启动」。
+	host, args := splitCommand(path)
+	st.Host = host
+	st.Kind = kindOfHost(host)
+	st.Silent = st.Kind == KindCLI || hasSilent(args)
 	if c := detectConflict(st.Kind); c != nil {
 		st.Conflict = c
 	}
@@ -334,14 +414,20 @@ func parseRegValue(out, name string) string {
 		if idx < 0 {
 			continue
 		}
-		return strings.Trim(strings.TrimSpace(rest[idx+len("REG_SZ"):]), `"`)
+		raw := strings.TrimSpace(rest[idx+len("REG_SZ"):])
+		// 整串是一个带引号的路径时剥掉引号（老版本写出去的形态）；
+		// 形如 `"C:\app.exe" --silent` 的带参数形态原样返回，交给 splitCommand 拆 ——
+		// 这里若照旧用 Trim 去掉首尾引号，路径与参数就粘成一团了。
+		if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+			return raw[1 : len(raw)-1]
+		}
+		return raw
 	}
 	return ""
 }
 
-func winWrite(name, host string) error {
-	// 含空格的路径必须带引号，否则登录时会被拆成「程序 + 参数」。
-	value := `"` + host + `"`
+func winWrite(name, host string, args []string) error {
+	value := quoteCommand(host, args)
 	_, err := runHidden("reg", "add", winRunKey, "/v", name, "/t", "REG_SZ", "/d", value, "/f")
 	return err
 }
@@ -417,12 +503,61 @@ func macQuery() Status {
 	}
 	st.Enabled = true
 	st.Kind = KindDesktop
-	// plist 里没有单独的 Host 字段可读时留空 —— 面板会退化成只显示「已开启」。
-	st.Host = p
+	// 从 plist 的 ProgramArguments 里读回真实的程序路径与参数。
+	//
+	// 之前这里直接把 plist 路径当 Host：面板上「自启指向 /Users/x/Library/...plist」
+	// 对用户没有任何核对价值（那不是可执行文件），也无从判断是不是静默启动。
+	if data, err := os.ReadFile(p); err == nil {
+		if argv := macProgramArguments(string(data)); len(argv) > 0 {
+			st.Host = xmlUnescape(argv[0])
+			st.Silent = hasSilent(argv[1:])
+		}
+	}
+	if st.Host == "" {
+		// 解析不出来时退回文件路径：面板会退化成只显示「已开启」，而不是假装读到了。
+		st.Host = p
+	}
 	return st
 }
 
-func macWrite(host string) error {
+// macProgramArguments 从 plist 正文里取出 ProgramArguments 数组。
+//
+// 用字符串扫描而不是引入 plist 解析库：go.mod 只有 sqlite 一个直接依赖，
+// 而这里要读的是**我们自己写出去的那一份模板**，形状是确定的。
+// 注意第一个 <string> 是 Label（com.workbuddy.gateway.desktop），不是程序路径 ——
+// 所以必须先定位到 ProgramArguments，再在它后面找。
+func macProgramArguments(body string) []string {
+	i := strings.Index(body, "<key>ProgramArguments</key>")
+	if i < 0 {
+		return nil
+	}
+	rest := body[i:]
+	if j := strings.Index(rest, "<array>"); j >= 0 {
+		rest = rest[j+len("<array>"):]
+	} else {
+		return nil
+	}
+	if j := strings.Index(rest, "</array>"); j >= 0 {
+		rest = rest[:j]
+	}
+	var out []string
+	for {
+		a := strings.Index(rest, "<string>")
+		if a < 0 {
+			break
+		}
+		rest = rest[a+len("<string>"):]
+		b := strings.Index(rest, "</string>")
+		if b < 0 {
+			break
+		}
+		out = append(out, strings.TrimSpace(rest[:b]))
+		rest = rest[b+len("</string>"):]
+	}
+	return out
+}
+
+func macWrite(host string, args []string) error {
 	p := macPlistPath()
 	if p == "" {
 		return errors.New("无法定位 ~/Library/LaunchAgents")
@@ -432,6 +567,13 @@ func macWrite(host string) error {
 	}
 	// RunAtLoad 让登录时自动拉起。**不加** KeepAlive：壳自己管着网关子进程，
 	// 若让 launchd 守护「壳」，用户从托盘点「退出」后会被立刻拉起来。
+	//
+	// 参数逐个写成独立 <string>，而不是拼进一行：plist 的参数是数组，
+	// 拼成一行会让 launchd 把 `"/Applications/X.app" --silent` 当成**一个**路径。
+	argv := "<string>" + xmlEscape(host) + "</string>"
+	for _, a := range args {
+		argv += "\n        <string>" + xmlEscape(a) + "</string>"
+	}
 	body := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -440,7 +582,7 @@ func macWrite(host string) error {
     <string>` + macAgentLabel + `</string>
     <key>ProgramArguments</key>
     <array>
-        <string>` + host + `</string>
+        ` + argv + `
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -493,15 +635,45 @@ func linuxDesktopPath() string {
 func linuxQuery() Status {
 	p := linuxDesktopPath()
 	st := Status{Supported: true, Location: p}
-	if isFile(p) {
-		st.Enabled = true
-		st.Kind = KindDesktop
+	if !isFile(p) {
+		return st
+	}
+	st.Enabled = true
+	st.Kind = KindDesktop
+	// 与 macOS 同理：回读 Exec 行，面板才能回答「指向谁」与「是不是静默启动」。
+	if data, err := os.ReadFile(p); err == nil {
+		if exec, ok := desktopExec(string(data)); ok {
+			host, args := splitCommand(exec)
+			st.Host = host
+			st.Silent = hasSilent(args)
+		}
+	}
+	if st.Host == "" {
 		st.Host = p
 	}
 	return st
 }
 
-func linuxWrite(host string) error {
+// desktopExec 从 .desktop 正文里取 Exec= 的值。
+//
+// 只认裸的 `Exec=`：带 locale 后缀的写法（Exec[zh_CN]=）本项目自己不产生，
+// 而按规范它是**覆盖**默认值的，解析它反而要把「哪个 locale 生效」也算进来。
+func desktopExec(body string) (string, bool) {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if !strings.HasPrefix(line, "Exec=") {
+			continue
+		}
+		v := strings.TrimSpace(line[len("Exec="):])
+		if v == "" {
+			continue
+		}
+		return v, true
+	}
+	return "", false
+}
+
+func linuxWrite(host string, args []string) error {
 	p := linuxDesktopPath()
 	if p == "" {
 		return errors.New("无法定位 XDG autostart 目录")
@@ -509,11 +681,13 @@ func linuxWrite(host string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
+	// 桌面条目规范里 Exec 的参数同样按空格分隔，含空格的路径要用引号包住。
+	exec := quoteCommand(host, args)
 	body := "[Desktop Entry]\n" +
 		"Type=Application\n" +
 		"Name=WorkBuddy 网关\n" +
-		"Comment=开机自动启动 WorkBuddy 网关\n" +
-		"Exec=" + host + "\n" +
+		"Comment=开机自动启动 WorkBuddy 网关（静默驻留托盘）\n" +
+		"Exec=" + exec + "\n" +
 		"Terminal=false\n" +
 		"X-GNOME-Autostart-enabled=true\n"
 	return os.WriteFile(p, []byte(body), 0o644)
@@ -528,6 +702,36 @@ func linuxDelete() error {
 		return err
 	}
 	return nil
+}
+
+// xmlEscape 转义 XML 文本节点里的敏感字符。
+//
+// 为什么必须做：路径里出现 `&` 或 `<` 时，plist 会变成**不合法的 XML**，
+// launchd 直接拒绝加载 —— 而自启是「下次登录才生效」的延迟执行，写坏了当场没有
+// 任何反馈，只表现为「开了自启却什么都没发生」。
+func xmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return r.Replace(s)
+}
+
+// xmlUnescape 是 xmlEscape 的逆操作，用于把回读到的路径还原成用户能认的形式。
+//
+// 先替换 &amp; 之外的要按顺序来：否则 `&amp;lt;` 会被二次还原成 `<`。
+func xmlUnescape(s string) string {
+	r := strings.NewReplacer(
+		"&lt;", "<",
+		"&gt;", ">",
+		"&quot;", `"`,
+		"&apos;", "'",
+		"&amp;", "&",
+	)
+	return r.Replace(s)
 }
 
 // ---------------------------------------------------------------------------

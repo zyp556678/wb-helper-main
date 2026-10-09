@@ -104,6 +104,18 @@ func (s *Server) configView() map[string]any {
 			"data_dir": c.Local.DataDir,
 		},
 
+		// ---- 检查更新 ----
+		// token **不下发**，只给「配没配」这个事实：它是能读私有仓库的凭据，
+		// 而面板没有任何需要看到它原文的场景（请求一律由网关代发）。
+		// 检查结果与生效中的间隔走 /panel/api/update（那里是运行期状态，这里是配置）。
+		"update": map[string]any{
+			"enabled":            c.UpdateEnabled(),
+			"check_hours":        c.Update.CheckHours,
+			"repo":               c.Update.Repo,
+			"include_prerelease": c.UpdatePrerelease(),
+			"token_set":          c.UpdateToken() != "",
+		},
+
 		// ---- 提示词与出站改写（切片 4）----
 		"prompt": map[string]any{
 			"mode":                c.Prompt.Mode,
@@ -178,6 +190,11 @@ func (s *Server) applyRuntimeConfig() {
 	// 都来自配置，不换入一样会「设置页改了、任务照旧」。
 	if s.tasks != nil {
 		s.tasks.SetConfig(c)
+	}
+	// 更新检查器同样持有配置快照：检查间隔、是否自动检查、私有仓库令牌都来自配置，
+	// 不换入新快照就会出现「面板改了开关、后台照旧」。
+	if s.updates != nil {
+		s.updates.SetConfig(c)
 	}
 }
 

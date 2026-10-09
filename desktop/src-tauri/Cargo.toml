@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-gateway-desktop"
-version = "0.9.2"
+version = "0.9.3"
 description = "WorkBuddy 网关桌面壳 —— 代管 Go 网关并以原生窗口承载面板"
 authors = ["workbuddy-gateway"]
 edition = "2021"

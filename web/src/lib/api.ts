@@ -72,6 +72,8 @@ import type {
   TaskScanResponse,
   TaskVouchersResponse,
   TokenStatistics,
+  UpdateDownloadResult,
+  UpdateStatus,
 } from "@/lib/types";
 
 /** 所有请求走相对路径，前缀与 Go 侧路由一致。 */
@@ -1221,6 +1223,51 @@ export function setAutostart(enabled: boolean) {
     method: "POST",
     body: { enabled },
   });
+}
+
+// -----------------------------------------------------------------------------
+// 检查更新
+// -----------------------------------------------------------------------------
+
+/**
+ * 读取更新检查状态（GET /panel/api/update）。
+ *
+ * 没查过时后端会在后台补一次，此时 `checking=true`，调用方据此轮询。
+ * 这里**不传 force**：刷新面板不该反复打 GitHub（后端有 5 分钟的最小间隔）。
+ */
+export function fetchUpdateStatus(signal?: AbortSignal) {
+  return request<UpdateStatus>("/update", { signal });
+}
+
+/**
+ * 立即检查一次（POST /panel/api/update）。
+ *
+ * 用户显式点击 → 后端会绕开最小间隔真的去查，因此这个请求可能耗时数秒；
+ * 调用方要显示忙碌态。
+ */
+export function checkUpdateNow() {
+  return request<UpdateStatus>("/update", { method: "POST" });
+}
+
+/**
+ * 开关「自动检查」（POST /panel/api/update/auto）。
+ *
+ * 写的是 config.json 的 `update.enabled`（复用配置层的补丁链路），返回最新状态。
+ */
+export function setUpdateAutoCheck(enabled: boolean) {
+  return request<UpdateStatus>("/update/auto", { method: "POST", body: { enabled } });
+}
+
+/**
+ * 下载匹配本机平台的安装包（POST /panel/api/update/download）。
+ *
+ * 动作型端点：<500 不抛异常，`{ok:false,detail}` 由调用方原样展示 ——
+ * 「没有匹配的安装包」是确定性结果，不是故障。
+ *
+ * 安装包几十 MB，请求可能持续较久；端点不接受传 URL（只下载检查结果里的地址）。
+ */
+export function downloadUpdate() {
+  return actionRequest<UpdateDownloadResult>("/update/download", {});
 }
 
 // -----------------------------------------------------------------------------

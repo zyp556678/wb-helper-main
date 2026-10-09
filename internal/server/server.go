@@ -30,6 +30,7 @@ import (
 	"workbuddy-gateway/internal/session"
 	"workbuddy-gateway/internal/stats"
 	"workbuddy-gateway/internal/tasks"
+	"workbuddy-gateway/internal/update"
 	"workbuddy-gateway/internal/upstream"
 )
 
@@ -72,7 +73,10 @@ type Server struct {
 	// groupLocks 串行化同一会话组的写操作（组同步 / 复制并关联）。
 	// 组同步会连续写多份正文，前端在批量期间重复点击必须被挡住；不同组互不影响。
 	groupLocks keyedLocks
-	start      time.Time
+	// updates 是更新检查器（internal/update）。
+	// 可选增强：nil 时面板的「检查更新」返回 503，其余功能不受影响。
+	updates *update.Checker
+	start   time.Time
 
 	// panelFS 是面板静态资源（前端构建产物），由 main 注入。
 	panelFS fs.FS
@@ -135,6 +139,9 @@ func (s *Server) SetClientLimits(scanner *clientlimits.Scanner) { s.clientLimits
 
 // SetAccountMeta 注入账号备注 / 显示字段存储（可选增强，nil 安全）。
 func (s *Server) SetAccountMeta(store *accountmeta.Store) { s.accountMeta = store }
+
+// SetUpdateChecker 注入更新检查器（可选增强，nil 安全）。
+func (s *Server) SetUpdateChecker(checker *update.Checker) { s.updates = checker }
 
 // StartBackground 启动后台任务。
 func (s *Server) StartBackground(ctx context.Context) {
@@ -285,6 +292,12 @@ func (s *Server) Handler() http.Handler {
 	// 自启项是系统级事实（注册表 / plist / .desktop），网关直接读写，
 	// 因此桌面版与命令行版的面板看到的是同一份真实状态。
 	mux.HandleFunc("/panel/api/autostart", s.withPanelAuth(s.handleAutostartRoute))
+
+	// ---- 面板：检查更新 ----
+	// 检测只能由网关代发：面板的 CSP 是 connect-src 'self'，浏览器里发不出跨域请求。
+	mux.HandleFunc("/panel/api/update", s.withPanelAuth(s.handlePanelUpdateRoute))
+	mux.HandleFunc("/panel/api/update/auto", s.withPanelAuth(s.setUpdateAutoCheck))
+	mux.HandleFunc("/panel/api/update/download", s.withPanelAuth(s.downloadUpdate))
 
 	// ---- 面板：用量统计（切片 6）----
 	mux.HandleFunc("/panel/api/stats", s.withPanelAuth(s.handlePanelStats))

@@ -206,6 +206,47 @@ type LocalSection struct {
 	DataDir string `json:"data_dir"`
 }
 
+// UpdateSection 是「检查更新」的参数。
+//
+// # 为什么这里的开关默认**开**，而开机自启默认**关**
+//
+// 两者的代价不在一个量级上。自启会常驻一个进程、占住 8317 端口，是必须有意识
+// 做出的决定；而这里只是每 6 小时发一次只读 GET（GitHub 未认证限流是每小时 60 次），
+// 代价低到可以默认开。反过来，默认关的后果是「装了旧版的人永远不知道有新版本」——
+// 那恰好是这个功能要解决的问题本身。
+//
+// # 为什么更新源可配
+//
+// 这个项目有源码仓与快照仓两个远端，fork 出去自己发版的用户更要指向自己的仓库。
+// 写死一个 owner/name 会让「改一行配置就能用」变成「改代码重新编译」。
+type UpdateSection struct {
+	// Enabled 用指针：默认 true，用指针才能区分「没提交」与「显式关掉」，
+	// 否则前端只改一个间隔就会把总开关静默重置成 false。
+	Enabled *bool `json:"enabled"`
+	// CheckHours 是自动检查间隔（小时）。<=0 用默认值（见 internal/update）。
+	//
+	// 与 schedule 各段口径一致：间隔一律用整数的小时/分钟/秒表达，不用
+	// duration 字符串 —— 面板表单要能直接编辑，而 "6h30m" 这种串是把解析
+	// 错误留给用户的写法。
+	CheckHours int `json:"check_hours"`
+	// Repo 是 owner/name 形式的更新源仓库；留空用 internal/update 的默认值。
+	Repo string `json:"repo"`
+	// IncludePrerelease 决定预发布版本是否参与比较，默认 false。
+	//
+	// 判据有两个：GitHub Release 上的 prerelease 标记，以及 tag 里带后缀
+	//（例如 v0.9.0-slice8）。默认不参与，是因为预发布版对使用者的默认预期
+	// 是「我不该被它推着升级」，而想抢先试的人会自己打开。
+	IncludePrerelease *bool `json:"include_prerelease"`
+	// Token 是读取**私有**仓库 Release 用的只读令牌。
+	//
+	// 为什么必须有这条通路：未认证访问私有仓库的 Release 接口一律返回 404
+	//（GitHub 连「这个仓库存在」都不告诉未认证方），而本项目的发布仓库默认私有。
+	// 留空时回落到环境变量 WB_UPDATE_TOKEN；两处都空就**如实报「缺令牌」**，
+	// 而不是报「已是最新」—— 把「查不到」说成「没有新版本」会让用户永远等不到更新，
+	// 而且没有任何迹象表明哪里配错了。
+	Token string `json:"token"`
+}
+
 // ApplyDefaults 填充未配置字段的默认值（口径与 wb2api-panel 一致）。
 func (c *Config) ApplyDefaults() {
 	if c.Cooldown.SoftRateSeconds <= 0 {
@@ -621,6 +662,29 @@ func (c *Config) ActivityEnabled() bool {
 	return c.Schedule.ActivityEnabled == nil || *c.Schedule.ActivityEnabled
 }
 
+// UpdateEnabled 报告是否自动检查更新（默认 true）。
+func (c *Config) UpdateEnabled() bool {
+	return c.Update.Enabled == nil || *c.Update.Enabled
+}
+
+// UpdatePrerelease 报告预发布版本是否参与比较（默认 false）。
+func (c *Config) UpdatePrerelease() bool {
+	return c.Update.IncludePrerelease != nil && *c.Update.IncludePrerelease
+}
+
+// UpdateToken 取更新源令牌：config.json 里的优先，其次环境变量 WB_UPDATE_TOKEN。
+//
+// 为什么要留环境变量这条通路：容器化部署里 config.json 常常整份进镜像或进配置
+// 管理系统，token 写在里面等于把它复制到每一份副本；而环境变量可以只在运行时注入。
+// 反过来，桌面版用户没有配环境变量的习惯，所以两处都要认，且以配置文件为准
+// （显式写下的东西优先于环境里的残留）。
+func (c *Config) UpdateToken() string {
+	if t := strings.TrimSpace(c.Update.Token); t != "" {
+		return t
+	}
+	return strings.TrimSpace(os.Getenv("WB_UPDATE_TOKEN"))
+}
+
 // CheckinWindow 返回签到允许的时间段（当日分钟数，**左闭右开**）。
 // ok=false 表示不限制（两个字段都为空，或配置非法 —— 非法情形在启动时已拒绝）。
 func (c *Config) CheckinWindow() (start, end int, ok bool) {
@@ -702,6 +766,7 @@ type Patch struct {
 	Schedule *ScheduleSection `json:"schedule"`
 	Prompt   *PromptSection   `json:"prompt"`
 	Local    *LocalSection    `json:"local"`
+	Update   *UpdateSection   `json:"update"`
 	Server   *ServerSection   `json:"server"`
 	Upstream *struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
@@ -874,6 +939,11 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 	if p.Tasks != nil {
 		applyPresent(&c.Tasks, p.Tasks, "tasks", present)
 	}
+	if p.Update != nil {
+		// 逐字段覆盖（靠 present 判断是否提交）：整段覆盖会把未提交的 token
+		// 清成空串，等于「打开一次自动检查开关就把私有仓库的令牌弄丢了」。
+		applyPresent(&c.Update, p.Update, "update", present)
+	}
 	if p.Server != nil {
 		applyPresent(&c.Server, p.Server, "server", present)
 	}
@@ -882,7 +952,7 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 // hotFields 是需要重启才能生效的配置前缀。
 // 治理与调度参数都可热生效；上游超时属于装配期字段（Transport 在启动时建好），
 // 因此列在这里，保存后提示用户重启。
-var hotFields = []string{"cooldown", "pool", "session_sticky", "schedule", "models", "prompt", "local", "tasks"}
+var hotFields = []string{"cooldown", "pool", "session_sticky", "schedule", "models", "prompt", "local", "tasks", "update"}
 
 // SavePatch 把补丁写入 config.json 并返回 (已热生效字段, 需重启字段)。
 //

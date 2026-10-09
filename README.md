@@ -322,6 +322,15 @@ systemd 服务、只有浏览器访问、**没有窗口**；两者 dpkg 包名�
 「配置 → 开机自启动」的开关（桌面版、命令行版、容器版的面板里都有这一项，读的是
 系统里的真实自启状态）。
 
+**自启一律静默**：自启项里带着 `--silent`，桌面壳被它拉起时**不显示面板窗口**，
+只把图标放进托盘（想用面板时点托盘图标，或从开始菜单 / 应用菜单再启动一次 ——
+第二次启动会把已在运行的实例的窗口拉到前面）。理由很直接：用户关机时并没有开着这个
+窗口，开机却弹出一个面板，属于每次开机都要手动关掉的骚扰。
+
+> 旧版本写入的自启项没有这个参数（面板会显示「但开机时会弹出面板窗口」并给出提示）：
+> 把开关关掉再打开一次即可重写成静默形态。各平台落点与上面列的一致，
+> 命令行形态的宿主是 `launch-hidden.vbs`，它本身就是隐藏启动。
+
 > ⚠️ 桌面版与命令行安装包**共用 8317 端口**，因此只能有一个设置自启。若系统里已存在
 > 命令行版的计划任务 `WorkBuddyGateway`，开启时会被拦下并提示二选一，不会让两个进程
 > 在登录时抢端口（那会表现为「有时能连上、有时连不上」）。
@@ -436,7 +445,8 @@ print(resp.choices[0].message.content)
   "models":   { "blocklist": [], "allowlist": [], "accounts": {} },
   "logging":  { "request_archive_enabled": true, "request_retention_days": 7, "request_archive_max_mb": 100 },
   "server":   { "read_timeout": "300s" },
-  "schedule": { "include_disabled_in_tasks": false }
+  "schedule": { "include_disabled_in_tasks": false },
+  "update":   { "enabled": true, "check_hours": 6, "repo": "zyp556678/wb-helper-main", "include_prerelease": false, "token": "" }
 }
 ```
 
@@ -489,6 +499,73 @@ print(resp.choices[0].message.content)
 - 查看：面板 `GET /panel/api/request-metrics`（进程内指标 + 最近 100 条 + 归档状态）、
   `GET /panel/api/request-logs?limit=&outcome=&account=&model=`（从归档读，limit 默认 200、最大 1000）。
   响应头 `X-Request-Id` 与记录里的 `request_id` 一致，便于和上游日志对齐。
+- `update.enabled`：是否在后台周期检查新版本，默认 `true`。热生效（面板「配置 → 检查更新」
+  的「自动检查」开关写的就是它）。默认开是因为代价极低（每 6 小时一次只读 GET），
+  而默认关的后果是装了旧版的人永远不会知道有新版本。
+- `update.check_hours`：自动检查间隔（小时），默认 `6`，最小 `1`。
+- `update.repo`：更新源仓库（`owner/name`），默认 `zyp556678/wb-helper-main`（Release 只发在这里）。
+  fork 出去自己发版的用户改成自己的仓库即可。
+- `update.include_prerelease`：预发布版本是否参与比较，默认 `false`
+  （GitHub 的 prerelease 标记，以及 `v0.9.0-slice8` 这类带后缀的 tag 都算预发布）。
+- `update.token`：读取**私有**仓库 Release 的只读令牌（细粒度 PAT，`contents:read` 即可）。
+  留空时回落到环境变量 `WB_UPDATE_TOKEN`（容器部署不必把令牌写进 `config.json`）。
+  未认证访问私有仓库的 Release 接口一律返回 404，因此**没配令牌时会如实报「需要令牌」**，
+  而不是报「已是最新」—— 把「查不到」说成「没有新版本」会让人永远等不到更新。
+
+## 检查更新
+
+面板「配置 → 检查更新」一张卡片说清三件事：现在跑的是哪个版本、更新源上最新是哪个版本、
+要不要升级。后台默认每 6 小时查一次，发现新版本会往事件日志的 `system` 频道记一条
+（面板「日志」页可见），卡片上也会出现「有新版本」标记。
+
+| 动作 | 落点 |
+| --- | --- |
+| 读状态 | `GET /panel/api/update`（没查过时后端会在后台补一次，`checking=true` 期间面板轮询） |
+| 立即检查 | `POST /panel/api/update`（用户显式点击，绕开后端 5 分钟的最小间隔） |
+| 开关自动检查 | `POST /panel/api/update/auto` `{"enabled":true\|false}` → 写 `config.json` 的 `update.enabled` |
+| 下载安装包 | `POST /panel/api/update/download` → 落到 `<数据目录>/updates/` |
+| 打开 Release 页 | `POST /panel/api/open-url`（复用既有的「在本机开浏览器」通路） |
+
+几个刻意的设计：
+
+- **检测只能由网关代发**。面板的 CSP 是 `connect-src 'self'`，浏览器里发不出跨域请求；
+  私有仓库的只读令牌也只该由网关持有。所以前端只是同源地问网关。
+- **只做「检测 + 下载」，不做自更新**。安装包是 deb / dmg / setup.exe 三种平台专用格式：
+  Windows 上正在运行的 exe 被锁，必须另起一个提权的 updater 等父进程退出后再替换；
+  Linux 直接覆盖 `/usr` 下的文件会让 dpkg 的包数据库与磁盘内容不一致；macOS 是 bundle，
+  要整包替换并处理 Gatekeeper 隔离属性。失败代价还特别高 —— 会留下一个「既起不来、
+  也没有安装包可回退」的现场，而用户的 CLI / IDE 全都指着这个端口。所以停在
+  「下好安装包 + 告诉用户装哪个文件」，最后一步交给用户点。
+- **版本比较自己实现**（不引 semver 库）：`go.mod` 只有 sqlite 一个直接依赖，而这里需要的
+  规则只有几十行，且必须容忍本项目的 tag 形态（`v0.9.0-slice8` 低于 `v0.9.0`）。
+- **当前版本不是发行版本号时（例如开发期直接跑源码）不声称有更新**：比较结果不可信，
+  说成有更新会误导用户去装一个可能比手上还旧的包，只显示更新源上的最新版本并说明原因。
+- **比较的是 `main.go` 的 `version` 与 Release 的 tag**，而 tag（以及安装包文件名里的版本号）
+  来自 `desktop/src-tauri/tauri.conf.json`。发版流程里两者一直同号，但**改版本号时要一起改** ——
+  只改一个会出现「装完新包，面板还说不是最新」这种自相矛盾的提示。
+- **下载会重试瞬时中断**（连接被重置、响应体提前结束）：安装包几十 MB，慢网络下断在 90%
+  是常事；HTTP 404/403 这类确定性失败不重试。落盘先写 `.part` 再改名，
+  避免留下一个「大小不对但看起来像安装包」的文件。
+- **下载地址不接受客户端传入**：只下载检查结果里记着的那个网址，并把重定向限定在
+  `github.com` / `*.githubusercontent.com`，跨主机时不带令牌 —— 面板因此无法让网关
+  去下载任意地址。
+- **出站走哪条路**：显式配了 `-proxy` 就用它，否则**回落到环境变量代理**
+  （`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`）。上游对话流量刻意不读环境代理
+  （出口 IP 与代理规则会影响风控，见 `internal/config` 的 `buildClients`），
+  但「问一句 GitHub 有没有新版本、把安装包下下来」是标准的公共服务访问，用户机器上
+  开着系统代理时它本就该走。实测差别很大：直连 `objects.githubusercontent.com`
+  下 15 MB 会中途断流，走本机代理（`127.0.0.1:7897`）一次下完。
+- **同一个安装包不会被并发下两遍**：下载在网关内串行化，第二个请求直接拿到
+  「已存在」的结果。这不只是省流量 —— 两个请求同时写同一个临时文件时，先结束的那个
+  会把临时文件删掉，后一个的改名就会失败（实测踩到过），面板上表现为莫名其妙的
+  「下载安装包失败：rename ... .part ... no such file」。
+
+> 更新源默认是有 Release 的**私有**快照仓。未认证访问私有仓库的 Release 接口返回 404，
+> 所以要在 `config.json` 里配 `update.token`（或环境变量 `WB_UPDATE_TOKEN`）才能查到；
+> 没配时卡片会明说「需要令牌」，而不是显示成「已是最新」。
+
+npm 形态的正确升级方式仍是 `npm i -g workbuddy-gateway@latest`（而不是覆盖文件）：
+二进制随平台包进 npm registry，校验交给 npm 自身（见 `npm/scripts/install.js` 顶部说明）。
 
 ## 安全提示
 
@@ -514,6 +591,7 @@ internal/stats               用量统计（按小时聚合持久化）
 internal/metrics             滚动窗口指标
 internal/eventlog            事件日志环形缓冲
 internal/localagent          本机代理代管器（发现 / 拉起 / 探活 / 反代）
+internal/update              检查更新（GitHub Release 探测、版本比较、安装包下载）
 internal/server              HTTP 层（OpenAI 兼容端点 + 面板 API + 静态资源）
 web/                         React 前端（构建产物 web/dist 由 web/embed.go 嵌入）
 scripts/build.sh             日常构建

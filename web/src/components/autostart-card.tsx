@@ -76,7 +76,7 @@ export function AutostartCard() {
     <Section
       id="config-autostart"
       title="开机自启动"
-      description="登录系统后自动在后台启动，供 CLI / IDE 持续调用。"
+      description="登录系统后在后台静默启动（只驻留托盘，不弹面板窗口），供 CLI / IDE 持续调用。"
     >
       <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3 py-1">
@@ -89,7 +89,8 @@ export function AutostartCard() {
               {loading
                 ? "正在读取系统自启状态…"
                 : status?.enabled
-                  ? `已开启${status.kind ? `（由${KIND_LABEL[status.kind] ?? status.kind}托管）` : ""}`
+                  ? `已开启${status.kind ? `（由${KIND_LABEL[status.kind] ?? status.kind}托管）` : ""}` +
+                    (status.silent ? "，开机不弹窗" : "，但开机时会弹出面板窗口")
                   : "未开启，重启电脑后需要手动启动"}
             </div>
           </div>
@@ -116,6 +117,17 @@ export function AutostartCard() {
           <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
             <span className="break-all">{error}</span>
+          </div>
+        ) : null}
+
+        {/* 老版本写下的自启项没有静默参数：如实提示，并给出唯一的修法
+            （关掉再打开一次，自启项会被重写成带参数的新形态）。 */}
+        {status?.enabled && !status.silent ? (
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <span>
+              这个自启项是旧版本写入的，开机时会弹出面板窗口。关掉再打开一次上面的开关即可改成静默启动。
+            </span>
           </div>
         ) : null}
 

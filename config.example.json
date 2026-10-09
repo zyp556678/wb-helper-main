@@ -33,6 +33,13 @@
   "server": {
     "read_timeout": "300s"
   },
+  "update": {
+    "enabled": true,
+    "check_hours": 6,
+    "repo": "zyp556678/wb-helper-main",
+    "include_prerelease": false,
+    "token": ""
+  },
   "schedule": {
     "include_disabled_in_tasks": false
   }
