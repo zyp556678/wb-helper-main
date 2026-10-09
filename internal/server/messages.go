@@ -36,6 +36,7 @@ import (
 	"workbuddy-gateway/internal/debuglog"
 	"workbuddy-gateway/internal/pool"
 	"workbuddy-gateway/internal/session"
+	"workbuddy-gateway/internal/stats"
 	"workbuddy-gateway/internal/upstream"
 )
 
@@ -560,6 +561,11 @@ type anthropicStreamState struct {
 	toolOrder    []int
 	finish       string
 	usage        map[string]any
+	// firstChunk 是**上游第一个内容 chunk** 到达的时刻，用来算首字延迟（TTFB）。
+	//
+	// 为什么记在这里而不是调用方：聚合与流式两条路都走 feed，记在 state 上就只有
+	// 一处实现；而 TTFB 是面板「请求流水」里判断"上游慢还是生成慢"的唯一依据。
+	firstChunk time.Time
 }
 
 func newAnthropicStreamState(modelName string, wantThinking bool) *anthropicStreamState {
@@ -583,6 +589,9 @@ func (st *anthropicStreamState) emit(eventType string, data map[string]any) []by
 
 // feed 消费一个上游 chunk，返回 0..n 个 Anthropic 事件。
 func (st *anthropicStreamState) feed(chunk map[string]any) []byte {
+	if st.firstChunk.IsZero() {
+		st.firstChunk = time.Now()
+	}
 	var out []byte
 	// 上游可能改写 model（别名解析等），message_start 用回显值。
 	if m := strOfAny(chunk["model"]); m != "" {
@@ -896,6 +905,7 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		s.recordMessagesRequest(r, "messages/stream", modelName, acc, nil, started, true)
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "服务器不支持流式响应 Flush")
 		return
 	}
@@ -921,6 +931,7 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 			"error": map[string]any{"type": "api_error", "message": reason},
 		}))
 		s.logf("[异常] /v1/messages 上游流式读取中断（%s）：%v", modelName, scanErr)
+		s.recordMessagesRequest(r, "messages/stream", modelName, acc, state, started, true)
 		return
 	}
 	if errorFrame != "" {
@@ -941,6 +952,7 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 		}))
 		s.logf("[异常] /v1/messages 上游以 error 帧报错（%s，分类=%s）：%s",
 			modelName, class.Kind, truncateForLog(errorFrame, 200))
+		s.recordMessagesRequest(r, "messages/stream", modelName, acc, state, started, true)
 		return
 	}
 	if state.finish == "" {
@@ -950,16 +962,62 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 			"error": map[string]any{"type": "api_error", "message": "上游流结束但没有 finish_reason，本次回复不完整"},
 		}))
 		s.logf("[异常] /v1/messages 上游流结束但无 finish_reason（%s）", modelName)
+		s.recordMessagesRequest(r, "messages/stream", modelName, acc, state, started, true)
 		return
 	}
 	writeEvent(state.finishEvents())
 	// Anthropic 协议这条路径也要计入模型级统计：否则 Claude Code 的流量
 	// 在面板上完全不可见（请求数记了，token/耗时/最近状态全空）。
 	s.recordMessagesMetrics(modelName, state.usage, started)
+	s.recordMessagesRequest(r, "messages/stream", modelName, acc, state, started, false)
 	s.markHopSuccess(acc)
 	debuglog.Event(r, "info", "stream_response_completed", map[string]any{
 		"status_code": http.StatusOK, "model": modelName,
 		"elapsed_ms": time.Since(started).Milliseconds(),
+	})
+}
+
+// recordMessagesRequest 把一次 /v1/messages 请求记进请求归档、事件日志与用量统计。
+//
+// 为什么要收成一个函数：这条协议有**两条响应路径 × 各四个完成分支**
+// （成功 / 读流失败 / 上游 error 帧 / 没有 finish_reason），每个分支都要记同一套账。
+// 之前只在成功分支记了 metrics，于是面板「请求流水」里 Claude Code 的记录
+// 只有时间、状态、耗时，账号 / 模型 / TTFB / token / 速率全是「—」——
+// 而这些恰好是排查问题时唯一想看的东西。手写八遍必然漏掉某一支，
+// 而漏记的表现是「成功率偏高」，没有人会发现，所以收成一个入口。
+//
+// 与 chat / responses 同一口径：
+//   - tokens 取上游 usage 的**总量**，速率用**输出** token 做分子（见 reqlog.event）；
+//   - 失败分支也记已经拿到的部分用量（上游开了流才报错时，前面的 token 是真花掉的）；
+//   - stats 记的是**用量**（账号维度、按小时聚合），metrics 记的是模型级指标。
+func (s *Server) recordMessagesRequest(r *http.Request, mode, modelName string, acc *pool.Account,
+	state *anthropicStreamState, started time.Time, failed bool) {
+	ttft := time.Duration(0)
+	var usage map[string]any
+	if state != nil {
+		if !state.firstChunk.IsZero() {
+			ttft = state.firstChunk.Sub(started)
+		}
+		usage = state.usage
+	}
+	total := tokensFromUsage(usage)
+	inputTokens, outputTokens := splitTokensFromUsage(usage)
+
+	accountLabel, accountID := "", ""
+	if acc != nil {
+		accountLabel = accountLogLabel(acc)
+		accountID = acc.Cred.AccountID()
+	}
+
+	s.logRequest(r, modelName, accountLabel, mode, ttft, time.Since(started), total, outputTokens, failed)
+	s.stats.Record(stats.RecordInput{
+		Model:        modelName,
+		Account:      accountID,
+		OK:           !failed,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  total,
+		TTFTMs:       ttft.Milliseconds(),
 	})
 }
 
@@ -978,6 +1036,7 @@ func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, 
 	if scanErr != nil {
 		debuglog.Event(r, "error", "aggregate_response_failed", map[string]any{"error": scanErr.Error()})
 		s.logf("[异常] /v1/messages 聚合上游流式响应失败（%s）：%v", modelName, scanErr)
+		s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, true)
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "聚合上游流式响应失败: "+scanErr.Error())
 		return
 	}
@@ -991,16 +1050,19 @@ func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, 
 		})
 		s.logf("[异常] /v1/messages 聚合遇到上游 error 帧（%s，分类=%s）：%s",
 			modelName, class.Kind, truncateForLog(errorFrame, 200))
+		s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, true)
 		writeAnthropicError(w, http.StatusBadGateway, "api_error",
 			"上游以错误帧结束了本次响应: "+truncateForLog(errorFrame, 300))
 		return
 	}
 	if state.finish == "" {
+		s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, true)
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "上游流结束但没有 finish_reason，本次回复不完整")
 		return
 	}
 	out, err := json.Marshal(state.aggregate())
 	if err != nil {
+		s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, true)
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "序列化响应失败")
 		return
 	}
@@ -1008,6 +1070,7 @@ func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 	s.recordMessagesMetrics(modelName, state.usage, started)
+	s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, false)
 	s.markHopSuccess(acc)
 	debuglog.Event(r, "info", "aggregate_response_completed", map[string]any{
 		"status_code": http.StatusOK, "model": modelName, "response_bytes": len(out),
@@ -1021,6 +1084,7 @@ func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, 
 // 估算只覆盖客户端输入，不含网关注入的提示词 —— 这一点在日志里说明，
 // 免得有人拿它对账上游的计费。
 func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	if r.Method != http.MethodPost {
 		writeAnthropicError(w, http.StatusMethodNotAllowed, "api_error", "仅支持 POST 请求")
 		return
@@ -1037,6 +1101,10 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens := estimateAnthropicInputTokens(msgReq)
+	// 记进请求归档，但**不记用量统计**：这个数是本地估算的，不是上游口径，
+	// 混进用量统计会与真实计费对不上账。归档里带上模型名，
+	// 至少让「谁在什么时候估过一次」有据可查（面板上 token 列为 0 是准确的）。
+	s.logRequest(r, strOfAny(msgReq["model"]), "", "messages/count_tokens", 0, time.Since(started), 0, 0, false)
 	debuglog.Event(r, "info", "tokens_estimated_locally", map[string]any{
 		"input_tokens": tokens, "request_bytes": len(bodyBytes),
 	})
