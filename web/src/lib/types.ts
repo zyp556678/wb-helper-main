@@ -632,6 +632,10 @@ export interface ConfigPrompt {
   strict_first_system: boolean;
   /** 客户端未声明输出预算时，按模型目录的输出上限补 max_tokens。 */
   catalog_max_tokens: boolean;
+  /** 把正文里的模型原生工具调用标记还原为结构化 tool_calls。 */
+  dsml_repair: boolean;
+  /** 工具名单为空时启用弱判定（仅在 dsml_repair 开启时有效）。 */
+  dsml_weak_match: boolean;
   /** 只读：当前实际生效的提示词前 200 字，用于确认到底在用什么。 */
   effective_text_preview: string;
 }

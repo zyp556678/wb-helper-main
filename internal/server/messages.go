@@ -30,10 +30,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"workbuddy-gateway/internal/debuglog"
+	"workbuddy-gateway/internal/dsml"
 	"workbuddy-gateway/internal/pool"
 	"workbuddy-gateway/internal/session"
 	"workbuddy-gateway/internal/stats"
@@ -179,11 +181,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	if isStream {
-		s.streamMessagesResponse(w, r, resp, modelName, acc, started, wantThinking)
+		s.streamMessagesResponse(w, r, resp, modelName, acc, started, wantThinking, s.messageMarkupRepair(upstreamBytes))
 	} else {
-		s.writeMessagesAggregate(w, r, resp, modelName, acc, started, wantThinking)
+		s.writeMessagesAggregate(w, r, resp, modelName, acc, started, wantThinking, s.messageMarkupRepair(upstreamBytes))
 	}
 	_ = sessionKey
+}
+
+// messageMarkupRepair 按出站请求体构造标记修复器（/v1/messages 端点用）。
+// 开关关闭时返回 nil——state 侧的判空即「零改写」。
+func (s *Server) messageMarkupRepair(upstreamBytes []byte) *dsml.MarkupRepair {
+	if !s.config().PromptDSMLRepair() {
+		return nil
+	}
+	return dsml.NewMarkupRepair(dsml.ToolNameAllowlist(upstreamBytes), s.config().PromptDSMLWeakMatch())
 }
 
 // -----------------------------------------------------------------------------
@@ -561,6 +572,11 @@ type anthropicStreamState struct {
 	toolOrder    []int
 	finish       string
 	usage        map[string]any
+	// repair 把正文里的模型原生工具调用标记还原成 tool_use 块（见 internal/dsml）。
+	// 未启用（Enabled 为 false）时所有正文逐字节透传，与改动前一致。
+	repair *dsml.MarkupRepair
+	// synthIdx 是已合成工具块的续接下标（换算成上游 delta.tool_calls 的 index）。
+	synthIdx int
 	// firstChunk 是**上游第一个内容 chunk** 到达的时刻，用来算首字延迟（TTFB）。
 	//
 	// 为什么记在这里而不是调用方：聚合与流式两条路都走 feed，记在 state 上就只有
@@ -568,12 +584,13 @@ type anthropicStreamState struct {
 	firstChunk time.Time
 }
 
-func newAnthropicStreamState(modelName string, wantThinking bool) *anthropicStreamState {
+func newAnthropicStreamState(modelName string, wantThinking bool, repair *dsml.MarkupRepair) *anthropicStreamState {
 	return &anthropicStreamState{
 		msgID:        "msg_" + strings.ReplaceAll(randomID(), "-", "")[:24],
 		model:        modelName,
 		wantThinking: wantThinking,
 		tools:        map[int]*anthropicToolSlot{},
+		repair:       repair,
 	}
 }
 
@@ -625,7 +642,19 @@ func (st *anthropicStreamState) feed(chunk map[string]any) []byte {
 				out = append(out, st.appendThinking(rc)...)
 			}
 			if ct, ok := delta["content"].(string); ok && ct != "" {
-				out = append(out, st.appendText(ct)...)
+				// 标记还原：先过状态机。返回的正文才是真正该透出的文本，
+				// 还原出的调用转成 tool_use 块（结构与上游原生 tool_calls 同形）。
+				if st.repair != nil && st.repair.Enabled() {
+					emit, calls := st.repair.Feed(ct)
+					if emit != "" {
+						out = append(out, st.appendText(emit)...)
+					}
+					for _, call := range calls {
+						out = append(out, st.appendMarkupCall(call)...)
+					}
+				} else {
+					out = append(out, st.appendText(ct)...)
+				}
 			}
 			if tcs, ok := delta["tool_calls"].([]any); ok {
 				for _, tcAny := range tcs {
@@ -746,6 +775,39 @@ func (st *anthropicStreamState) appendToolCall(tc map[string]any) []byte {
 				"delta": map[string]any{"type": "input_json_delta", "partial_json": a},
 			})...)
 		}
+	}
+	return out
+}
+
+// appendMarkupCall 把一个从正文标记里还原出的调用转成 tool_use 块。
+//
+// 走与上游原生 tool_calls 同一条 appendToolCall 路径（构造等价 delta），保证两种
+// 来源产出的 Anthropic 事件序列完全一致——客户端不需要区分调用是从哪来的。
+func (st *anthropicStreamState) appendMarkupCall(call dsml.MarkupCall) []byte {
+	st.synthIdx++
+	return st.appendToolCall(map[string]any{
+		"index": float64(st.synthIdx - 1),
+		"id":    "toolu_dsml_" + strconv.Itoa(st.synthIdx-1),
+		"type":  "function",
+		"function": map[string]any{
+			"name":      call.Name,
+			"arguments": call.Arguments,
+		},
+	})
+}
+
+// flushMarkup 在流结尾把状态机里未判定的缓冲交还，必要时把 stop 收尾改成 tool_use。
+// 返回应写出的事件与「收尾是否已被改写为工具调用」。
+func (st *anthropicStreamState) flushMarkup() []byte {
+	if st.repair == nil || !st.repair.Enabled() {
+		return nil
+	}
+	var out []byte
+	if tail := st.repair.Flush(); tail != "" {
+		out = append(out, st.appendText(tail)...)
+	}
+	if st.synthIdx > 0 && st.finish == "stop" {
+		st.finish = "tool_calls"
 	}
 	return out
 }
@@ -896,7 +958,7 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 }
 
 // streamMessagesResponse 把上游流式响应实时回译成 Anthropic SSE。
-func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, started time.Time, wantThinking bool) {
+func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, started time.Time, wantThinking bool, repair *dsml.MarkupRepair) {
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -917,7 +979,7 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 		flusher.Flush()
 	}
 
-	state := newAnthropicStreamState(modelName, wantThinking)
+	state := newAnthropicStreamState(modelName, wantThinking, repair)
 	errorFrame, scanErr := scanUpstreamSSE(resp.Body, state, writeEvent)
 	if scanErr != nil {
 		debuglog.Event(r, "error", "stream_response_failed", map[string]any{"error": scanErr.Error()})
@@ -965,6 +1027,9 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 		s.recordMessagesRequest(r, "messages/stream", modelName, acc, state, started, true)
 		return
 	}
+	// 流正常结束：把标记状态机里未判定的尾部缓冲交还，并在还原过调用时把
+	// stop 收尾改写成 tool_use —— 否则客户端认为「只说了话」，不执行已还原的工具。
+	writeEvent(state.flushMarkup())
 	writeEvent(state.finishEvents())
 	// Anthropic 协议这条路径也要计入模型级统计：否则 Claude Code 的流量
 	// 在面板上完全不可见（请求数记了，token/耗时/最近状态全空）。
@@ -1029,9 +1094,9 @@ func (s *Server) recordMessagesMetrics(modelName string, usage map[string]any, s
 }
 
 // writeMessagesAggregate 本地聚合上游流式数据，输出完整的 Anthropic Message。
-func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, started time.Time, wantThinking bool) {
+func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, started time.Time, wantThinking bool, repair *dsml.MarkupRepair) {
 	defer resp.Body.Close()
-	state := newAnthropicStreamState(modelName, wantThinking)
+	state := newAnthropicStreamState(modelName, wantThinking, repair)
 	errorFrame, scanErr := scanUpstreamSSE(resp.Body, state, nil)
 	if scanErr != nil {
 		debuglog.Event(r, "error", "aggregate_response_failed", map[string]any{"error": scanErr.Error()})
@@ -1060,6 +1125,9 @@ func (s *Server) writeMessagesAggregate(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "上游流结束但没有 finish_reason，本次回复不完整")
 		return
 	}
+	// 聚合路径也要收尾标记状态机：未判定的尾部缓冲要并回正文，
+	// 且还原过调用时要把 stop 收尾改成 tool_use（在 aggregate() 读 st.finish 之前）。
+	state.flushMarkup()
 	out, err := json.Marshal(state.aggregate())
 	if err != nil {
 		s.recordMessagesRequest(r, "messages/aggregate", modelName, acc, state, started, true)

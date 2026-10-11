@@ -125,6 +125,8 @@ func (s *Server) configView() map[string]any {
 			"degraded_retry":      c.PromptDegradedRetry(),
 			"strict_first_system": c.PromptStrictFirstSystem(),
 			"catalog_max_tokens":  c.PromptCatalogMaxTokens(),
+			"dsml_repair":         c.PromptDSMLRepair(),
+			"dsml_weak_match":     c.PromptDSMLWeakMatch(),
 			// effective_text_preview 是**当前实际生效**的提示词前 200 字，
 			// 让用户能确认自己到底在用什么（尤其 file 非空时 text 是无效的）。
 			"effective_text_preview": preview(s.EffectivePrompt(), 200),

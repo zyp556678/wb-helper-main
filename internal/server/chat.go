@@ -14,6 +14,7 @@ import (
 
 	"workbuddy-gateway/internal/auth"
 	"workbuddy-gateway/internal/debuglog"
+	"workbuddy-gateway/internal/dsml"
 	"workbuddy-gateway/internal/eventlog"
 	"workbuddy-gateway/internal/pool"
 	"workbuddy-gateway/internal/session"
@@ -121,10 +122,69 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	if wantStream {
-		s.streamChatResponse(w, r, resp, modelName, acc, sessionKey, started)
+		s.streamChatResponse(w, r, resp, modelName, acc, sessionKey, started, s.markupRepairFor(upstreamBytes))
 	} else {
-		s.aggregateChatResponse(w, r, resp, modelName, acc, sessionKey, started)
+		s.aggregateChatResponse(w, r, resp, modelName, acc, sessionKey, started, upstreamBytes)
 	}
+}
+
+// markupRepairFor 按出站请求体构造流式标记修复器。
+//
+// 用**管线后**的 body：工具名单要从真正发给上游的那份请求里取（改写可能增删 tools）。
+// 开关关闭或名单为空且未开弱判定时，返回的修复器 Enabled() 为 false，整条流零改写。
+func (s *Server) markupRepairFor(upstreamBytes []byte) *markupStreamRepair {
+	if !s.config().PromptDSMLRepair() {
+		return newMarkupStreamRepair(nil, false)
+	}
+	return newMarkupStreamRepair(dsml.ToolNameAllowlist(upstreamBytes), s.config().PromptDSMLWeakMatch())
+}
+
+// repairAggregatedMarkup 在非流式聚合结果上做标记还原（chat 端点）。
+//
+// 聚合结果就是一份 chat completion JSON。解析失败原样返回（转发关键路径不制造新错误）。
+// 正文里不含分隔符时直接跳过，避免对绝大多数正常响应做无谓的 JSON 往返。
+func (s *Server) repairAggregatedMarkup(out []byte, modelName string, upstreamBytes []byte) []byte {
+	if !s.config().PromptDSMLRepair() {
+		return out
+	}
+	var resp map[string]any
+	if json.Unmarshal(out, &resp) != nil {
+		return out
+	}
+	if !responseHasMarkupPipe(resp) {
+		return out
+	}
+	r := dsml.RepairAggregatedResponse(resp, dsml.ToolNameAllowlist(upstreamBytes), s.config().PromptDSMLWeakMatch())
+	if r.Converted() == 0 {
+		return out
+	}
+	fixed, err := json.Marshal(resp)
+	if err != nil {
+		return out
+	}
+	s.logf("[标记还原] 模型=%s 非流式 还原工具调用=%d 识别块=%d 拒绝块=%d",
+		modelName, r.Converted(), r.Seen(), r.Rejected())
+	return fixed
+}
+
+// responseHasMarkupPipe 报告任意 choice 的正文里是否含标记分隔符。
+// 不含就完全不需要走还原（正常响应占绝大多数）。
+func responseHasMarkupPipe(resp map[string]any) bool {
+	choices, _ := resp["choices"].([]any)
+	for _, ci := range choices {
+		c, ok := ci.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg, ok := c["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if text, _ := msg["content"].(string); strings.Contains(text, "｜｜") {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatch 完成「选号 → 令牌校验 → 转发 → 错误处置 → 换号重试」的调度循环。
@@ -475,7 +535,7 @@ func (s *Server) applyFrameClass(acc *pool.Account, modelName string, class upst
 //
 // 关键约定：流被中断时绝不补发 [DONE]（补发等于告诉下游「正常结束」，
 // 会让残缺的工具调用被当成完整结果执行），而是下发一条明确的错误事件。
-func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time) {
+func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time, repair *markupStreamRepair) {
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -528,7 +588,8 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 			first = false
 		}
 		var chunk map[string]any
-		if json.Unmarshal([]byte(clean), &chunk) == nil {
+		parsed := json.Unmarshal([]byte(clean), &chunk) == nil
+		if parsed {
 			if u, ok := chunk["usage"].(map[string]any); ok {
 				usage = u
 			}
@@ -537,9 +598,48 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 				errorFrame = clean
 			}
 		}
-		if out := cleaner.clean(clean); out != "" {
-			_, _ = io.WriteString(w, "data: "+out+"\n\n")
-			flusher.Flush()
+		// 标记还原必须在聚合元信息**之后**：rewrite 会把 finish_reason 从原分片上取走
+		// 挪到收尾帧，先记后改才不会漏掉上游宣布的结束原因。
+		// 解析失败的分片（非 JSON）原样透传，不参与还原。
+		if !parsed {
+			if out := cleaner.clean(clean); out != "" {
+				_, _ = io.WriteString(w, "data: "+out+"\n\n")
+				flusher.Flush()
+			}
+			continue
+		}
+		for _, frame := range repair.rewrite(chunk) {
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				continue
+			}
+			if out := cleaner.clean(string(raw)); out != "" {
+				_, _ = io.WriteString(w, "data: "+out+"\n\n")
+				flusher.Flush()
+			}
+		}
+	}
+
+	// 流结束：把状态机里未判定的尾部缓冲交还（未闭合块原文透出）。
+	// 若整条流还原过调用而收尾尚未发出，补一个 tool_calls 收尾帧——否则客户端会
+	// 认为「模型说了话就结束了」，不执行已还原的工具。
+	if tail, needFinish := repair.flush(); tail != "" || needFinish {
+		frames := []map[string]any{}
+		if tail != "" {
+			frames = append(frames, contentOnlyFrame(tail))
+		}
+		if needFinish {
+			frames = append(frames, finishOnlyFrame(map[string]any{"model": modelName}, "tool_calls"))
+		}
+		for _, frame := range frames {
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				continue
+			}
+			if out := cleaner.clean(string(raw)); out != "" {
+				_, _ = io.WriteString(w, "data: "+out+"\n\n")
+				flusher.Flush()
+			}
 		}
 	}
 
@@ -635,7 +735,7 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 }
 
 // aggregateChatResponse 把上游 SSE 聚合成一次完整的非流式响应。
-func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time) {
+func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time, upstreamBytes []byte) {
 	defer resp.Body.Close()
 
 	body := upstreamWatchdog(resp.Body, s.config().IdleTimeout)
@@ -655,6 +755,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 		writeOpenAIError(w, http.StatusInternalServerError, "aggregate_error", "聚合上游流式响应失败: "+err.Error())
 		return
 	}
+	out = s.repairAggregatedMarkup(out, modelName, upstreamBytes)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)

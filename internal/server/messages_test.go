@@ -129,7 +129,7 @@ func TestAnthropicToChatRequestRejectsEmpty(t *testing.T) {
 
 // 流式回译：事件顺序与内容必须严格符合 Anthropic 语义。
 func TestAnthropicStreamEventOrder(t *testing.T) {
-	state := newAnthropicStreamState("test-model", false)
+	state := newAnthropicStreamState("test-model", false, nil)
 	var all []string
 	feed := func(chunk map[string]any) {
 		out := state.feed(chunk)
@@ -200,7 +200,7 @@ func TestAnthropicStreamEventOrder(t *testing.T) {
 
 // 非流式聚合：正文 + 工具调用拼装成完整 Message，参数不是合法 JSON 时原样返回。
 func TestAnthropicAggregate(t *testing.T) {
-	state := newAnthropicStreamState("test-model", true)
+	state := newAnthropicStreamState("test-model", true, nil)
 	state.feed(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{
 		"reasoning_content": "先想一下",
 	}}}})
@@ -235,7 +235,7 @@ func TestAnthropicAggregate(t *testing.T) {
 
 // 未启用 thinking 时，上游的推理增量**不**回译（否则客户端会看到不认识的块）。
 func TestAnthropicThinkingNotEmittedWhenDisabled(t *testing.T) {
-	state := newAnthropicStreamState("m", false)
+	state := newAnthropicStreamState("m", false, nil)
 	out := string(state.feed(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{
 		"reasoning_content": "内部推理",
 	}}}}))

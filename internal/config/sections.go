@@ -196,6 +196,12 @@ type PromptSection struct {
 	// CatalogMaxTokens 客户端未声明输出预算时，按模型目录的输出上限补 max_tokens。
 	// 上游不带该字段时为输出默认预留 384000，长会话会提前撞 400 code=11133。
 	CatalogMaxTokens *bool `json:"catalog_max_tokens"`
+	// DSMLRepair 把正文里的模型原生工具调用标记（全角竖线 DSML）还原为结构化 tool_calls。
+	// tools 声明在中转环节丢失时，标记会以纯文本落进 content，客户端当成正文而工具不执行。
+	DSMLRepair *bool `json:"dsml_repair"`
+	// DSMLWeakMatch 工具名单为空时启用弱判定（只要求标记块结构完美 + 工具名形如标识符）。
+	// 关掉则名单为空时不还原，退回严格判定。仅在 DSMLRepair 开启时有效。
+	DSMLWeakMatch *bool `json:"dsml_weak_match"`
 }
 
 // LocalSection 是本机代理参数（切片 7）。
@@ -643,6 +649,14 @@ func (c *Config) PromptCatalogMaxTokens() bool {
 	return c.Prompt.CatalogMaxTokens == nil || *c.Prompt.CatalogMaxTokens
 }
 
+func (c *Config) PromptDSMLRepair() bool {
+	return c.Prompt.DSMLRepair == nil || *c.Prompt.DSMLRepair
+}
+
+func (c *Config) PromptDSMLWeakMatch() bool {
+	return c.Prompt.DSMLWeakMatch == nil || *c.Prompt.DSMLWeakMatch
+}
+
 func (c *Config) LocalAgentEnabled() bool {
 	return c.Local.Enabled == nil || *c.Local.Enabled
 }
@@ -915,6 +929,12 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 		}
 		if p.Prompt.CatalogMaxTokens != nil {
 			c.Prompt.CatalogMaxTokens = p.Prompt.CatalogMaxTokens
+		}
+		if p.Prompt.DSMLRepair != nil {
+			c.Prompt.DSMLRepair = p.Prompt.DSMLRepair
+		}
+		if p.Prompt.DSMLWeakMatch != nil {
+			c.Prompt.DSMLWeakMatch = p.Prompt.DSMLWeakMatch
 		}
 	}
 	if p.Local != nil {

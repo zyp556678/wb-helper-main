@@ -144,8 +144,41 @@ func TestPatchDoesNotPolluteFileWithNull(t *testing.T) {
 	}
 }
 
-func readConfigJSON(t *testing.T, c *Config) map[string]any {
-	t.Helper()
+// TestPromptOutboundSwitchesRoundTrip 守住三个出站改写开关的热改往返。
+//
+// 为什么值得单测：prompt 段在 applyTo 里是**显式手写**的（不走反射），新增字段
+// 若忘了接线，表现是「面板能改、config.json 写进去了、内存配置却不变」—— 不编译
+// 报错、不抛异常，只是静默失效。同类事故在本项目发生过（切片 5 的四个排程字段）。
+func TestPromptOutboundSwitchesRoundTrip(t *testing.T) {
+	c := newTestConfig(t)
+	// 三个开关默认开（未提交时）。
+	if !c.PromptCatalogMaxTokens() || !c.PromptDSMLRepair() || !c.PromptDSMLWeakMatch() {
+		t.Fatalf("三个开关默认应为开：catalog=%t dsml=%t weak=%t",
+			c.PromptCatalogMaxTokens(), c.PromptDSMLRepair(), c.PromptDSMLWeakMatch())
+	}
+
+	save(t, c, `{"prompt":{"catalog_max_tokens":false,"dsml_repair":false,"dsml_weak_match":false}}`)
+	if c.PromptCatalogMaxTokens() {
+		t.Fatal("catalog_max_tokens 显式关掉后仍为开 —— 补丁没接进内存配置")
+	}
+	if c.PromptDSMLRepair() {
+		t.Fatal("dsml_repair 显式关掉后仍为开 —— 补丁没接进内存配置")
+	}
+	if c.PromptDSMLWeakMatch() {
+		t.Fatal("dsml_weak_match 显式关掉后仍为开 —— 补丁没接进内存配置")
+	}
+
+	// 只提交其中一个：另外两个不能被重置（指针三态的意义）。
+	save(t, c, `{"prompt":{"dsml_repair":true}}`)
+	if !c.PromptDSMLRepair() {
+		t.Fatal("dsml_repair 应被重新打开")
+	}
+	if c.PromptCatalogMaxTokens() || c.PromptDSMLWeakMatch() {
+		t.Fatal("只提交 dsml_repair 时，另外两个开关不应被改动")
+	}
+}
+
+func readConfigJSON(t *testing.T, c *Config) map[string]any {	t.Helper()
 	data, err := os.ReadFile(c.ConfigFile)
 	if err != nil {
 		t.Fatalf("读取 config.json 失败: %v", err)

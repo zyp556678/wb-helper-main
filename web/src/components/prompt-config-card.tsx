@@ -16,6 +16,8 @@ export interface PromptFormValue {
   degraded_retry: boolean;
   strict_first_system: boolean;
   catalog_max_tokens: boolean;
+  dsml_repair: boolean;
+  dsml_weak_match: boolean;
 }
 
 interface ModeOption {
@@ -183,6 +185,28 @@ export function PromptConfigCard({
               disabled={saving}
               aria-label="补输出预算"
               onCheckedChange={(checked) => onChange({ catalog_max_tokens: checked })}
+            />
+          </ConfigRow>
+          <ConfigRow
+            label="还原工具调用标记"
+            hint="上游把工具调用写成正文里的标记文本时（tools 声明丢失），还原成结构化调用，否则客户端当成普通文字、工具不执行"
+          >
+            <Switch
+              checked={value.dsml_repair}
+              disabled={saving}
+              aria-label="还原工具调用标记"
+              onCheckedChange={(checked) => onChange({ dsml_repair: checked })}
+            />
+          </ConfigRow>
+          <ConfigRow
+            label="标记还原·宽松判定"
+            hint="请求里没有 tools 名单时也尝试还原（只要求标记结构完整 + 名字像工具名）。关掉则名单为空时一律不还原"
+          >
+            <Switch
+              checked={value.dsml_weak_match}
+              disabled={saving || !value.dsml_repair}
+              aria-label="标记还原·宽松判定"
+              onCheckedChange={(checked) => onChange({ dsml_weak_match: checked })}
             />
           </ConfigRow>
         </div>

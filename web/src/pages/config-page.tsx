@@ -247,6 +247,8 @@ const DEFAULT_PROMPT: PromptFormValue = {
   degraded_retry: true,
   strict_first_system: true,
   catalog_max_tokens: true,
+  dsml_repair: true,
+  dsml_weak_match: true,
 };
 
 function sortedHours(hours: number[]): number[] {
@@ -320,6 +322,8 @@ function toForm(config: PanelConfig): ConfigForm {
           strict_first_system: config.prompt.strict_first_system,
           // 后端未下发时按默认开（与 config 的 nil=true 口径一致）。
           catalog_max_tokens: config.prompt.catalog_max_tokens ?? true,
+          dsml_repair: config.prompt.dsml_repair ?? true,
+          dsml_weak_match: config.prompt.dsml_weak_match ?? true,
         }
       : DEFAULT_PROMPT,
   };
@@ -554,6 +558,12 @@ function buildPatch(form: ConfigForm, base: PanelConfig): ConfigPatch {
   }
   if (form.prompt.catalog_max_tokens !== basePrompt.catalog_max_tokens) {
     prompt.catalog_max_tokens = form.prompt.catalog_max_tokens;
+  }
+  if (form.prompt.dsml_repair !== basePrompt.dsml_repair) {
+    prompt.dsml_repair = form.prompt.dsml_repair;
+  }
+  if (form.prompt.dsml_weak_match !== basePrompt.dsml_weak_match) {
+    prompt.dsml_weak_match = form.prompt.dsml_weak_match;
   }
   if (Object.keys(prompt).length > 0) patch.prompt = prompt;
 

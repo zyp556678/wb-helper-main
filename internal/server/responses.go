@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy-gateway/internal/dsml"
 	"workbuddy-gateway/internal/pool"
 	"workbuddy-gateway/internal/session"
 	"workbuddy-gateway/internal/stats"
@@ -110,9 +111,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	createdAt := time.Now().Unix()
 
 	if wantStream {
-		s.streamResponses(w, r, resp, respID, modelName, createdAt, acc, sessionKey, started)
+		s.streamResponses(w, r, resp, respID, modelName, createdAt, acc, sessionKey, started, s.messageMarkupRepair(upstreamBytes))
 	} else {
-		s.aggregateResponses(w, r, resp, respID, modelName, createdAt, acc, sessionKey, started)
+		s.aggregateResponses(w, r, resp, respID, modelName, createdAt, acc, sessionKey, started, upstreamBytes)
 	}
 }
 
@@ -427,7 +428,7 @@ func convertResponsesToolChoice(tc any) any {
 // -----------------------------------------------------------------------------
 
 func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp *http.Response,
-	respID, modelName string, createdAt int64, acc *pool.Account, sessionKey string, started time.Time) {
+	respID, modelName string, createdAt int64, acc *pool.Account, sessionKey string, started time.Time, upstreamBytes []byte) {
 	defer resp.Body.Close()
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -443,6 +444,10 @@ func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp
 		writeOpenAIError(w, http.StatusInternalServerError, "aggregate_error", "聚合上游流式响应失败: "+err.Error())
 		return
 	}
+
+	// 标记还原：responses 端点的上游响应同样是 chat 聚合结果，
+	// 先把正文里的模型原生调用标记还原成结构化 tool_calls，再转 Responses 语义。
+	chatJSON = s.repairAggregatedMarkup(chatJSON, modelName, upstreamBytes)
 
 	out, err := chatCompletionToResponses(chatJSON, respID, modelName, createdAt)
 	if err != nil {
@@ -544,7 +549,7 @@ func chatCompletionToResponses(chatJSON []byte, respID, modelName string, create
 // 出错时**不发** response.completed（那等于告诉客户端「正常结束」，会让残缺的工具调用
 // 被当成完整结果执行），而是发 response.failed 带上具体原因。
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *http.Response,
-	respID, modelName string, createdAt int64, acc *pool.Account, sessionKey string, started time.Time) {
+	respID, modelName string, createdAt int64, acc *pool.Account, sessionKey string, started time.Time, repair *dsml.MarkupRepair) {
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -699,7 +704,18 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 			})
 		}
 
-		if text := extractText(delta["content"]); text != "" {
+		// 正文：先过标记状态机。还原出的调用并入 toolAcc（与上游原生 tool_calls
+		// 同一条收尾路径），只有还原后的正文才作为 output_text 增量下发 ——
+		// 否则标记原文会先以正文形式发给客户端，事后再补调用就晚了。
+		text := extractText(delta["content"])
+		if text != "" && repair != nil && repair.Enabled() {
+			emit, calls := repair.Feed(text)
+			text = emit
+			if len(calls) > 0 {
+				mergeToolCalls(toolAcc, &toolOrder, dsml.ToolCallDeltas(calls, len(toolOrder)))
+			}
+		}
+		if text != "" {
 			// 正文开始即思考结束。
 			closeReasoning()
 			if !itemAdded {
@@ -771,6 +787,36 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 
 	// 流结束（正常结束、或只思考没出正文）都要收尾思考段。
 	closeReasoning()
+
+	// 标记状态机的尾部缓冲交还：未判定的残留作为正文补发（不影响已完成段落），
+	// 还原出的调用同样并入 toolAcc，随下面的收尾循环一起下发。
+	if repair != nil && repair.Enabled() {
+		if tail := repair.Flush(); tail != "" {
+			if !itemAdded {
+				itemAdded = true
+				msgIndex = outputIndex
+				outputIndex++
+				send("response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": msgIndex,
+					"item": map[string]any{
+						"type": "message", "id": msgItemID, "status": "in_progress",
+						"role": "assistant", "content": []any{},
+					},
+				})
+			}
+			fullText.WriteString(tail)
+			seq++
+			send("response.output_text.delta", map[string]any{
+				"type":            "response.output_text.delta",
+				"item_id":         msgItemID,
+				"output_index":    msgIndex,
+				"content_index":   0,
+				"delta":           tail,
+				"sequence_number": seq,
+			})
+		}
+	}
 
 	if itemAdded {
 		text := fullText.String()
