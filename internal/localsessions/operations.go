@@ -117,6 +117,12 @@ type Operation struct {
 	ExpectedContentDigest string  `json:"expectedContentDigest"`
 	ExpectedRecordCount   int     `json:"expectedRecordCount"`
 	Phase                 OpPhase `json:"phase"`
+	// Mode 是本次同步的写入模式。恢复时据此分流：statusOnly 走状态路径
+	// （只改 status 列、不碰正文、不提交基线），其余走正文路径。
+	// 旧记录没有这个字段，空串按正文路径处理（与历史行为一致）。
+	Mode string `json:"mode,omitempty"`
+	// TargetStatusBefore 是 statusOnly 写入前的目标状态（条件 UPDATE 与恢复比对用）。
+	StatusBefore string `json:"statusBefore,omitempty"`
 	// Backup 是本次操作的备份标识（本项目为备份中心的条目 id）。
 	Backup string `json:"backup,omitempty"`
 	// LifecycleVersion 是生命周期标记版本（与 switch 同名字段，本版恒为 1）。
@@ -556,6 +562,10 @@ func (s *Store) recoverSyncOperation(op Operation) (string, *RecoveryIssue) {
 	needs := func(reason string, retryable bool) (string, *RecoveryIssue) {
 		return "needs", &RecoveryIssue{OperationID: op.OperationID, Reason: reason, Retryable: retryable}
 	}
+	// statusOnly 是独立路径：没有正文产物、不提交基线，恢复只需确认状态写入。
+	if op.Mode == ModeStatusOnly {
+		return s.recoverStatusOnly(&op, needs)
+	}
 	check, reason, normalized := s.checkTargetBody(&op)
 	if check == bodyNeedsRecovery {
 		return needs(reason, false)
@@ -603,6 +613,59 @@ func (s *Store) recoverSyncOperation(op Operation) (string, *RecoveryIssue) {
 		op.CleanupState = CleanupStateCleaned
 		_ = s.saveOperation(&op)
 	}
+	return "recovered", nil
+}
+
+// recoverStatusOnly 恢复一条中断的「只传导归档状态」操作。
+//
+// 与正文同步的恢复逻辑**完全不同**，不能复用：这里没有正文产物要核验、没有基线要提交，
+// 唯一的判据是「目标会话的 status 现在是不是想要的值」。
+//
+// 崩溃点与恢复动作（对照上游的 status-only 阶段推进）：
+//   - 还没写（phase 停在 prepared）：目标仍是写入前状态 → 直接补写一次（幂等）。
+//   - 已写（phase 已过 db_written）：确认 status 已是 desired → 直接置 completed；
+//     若又被改回终态原值 → 说明写入未持久化，补写一次。
+//   - 目标已变成 desired 之外的形态（例如被重新打开成 active）：不硬来，报需人工。
+func (s *Store) recoverStatusOnly(op *Operation, needs func(string, bool) (string, *RecoveryIssue)) (string, *RecoveryIssue) {
+	tgtLib := s.libByVariant(op.Variant)
+	if tgtLib == nil || !libExists(tgtLib) {
+		// 库不可用无法确认结果，留待下次再收（可重试）。
+		return needs("目标会话库暂不可用，无法确认归档状态是否已写入", true)
+	}
+	current := s.memberStatus(tgtLib, op.Target.SessionID)
+	if current == SessionStatusArchived {
+		// 已经是想要的形态：直接推进到完成（幂等）。
+		if phaseRank(op.Phase) < phaseRank(PhaseCompleted) {
+			if err := s.advanceOperation(op, PhaseDbWritten); err != nil {
+				return needs(err.Error(), true)
+			}
+			if err := s.advanceOperation(op, PhaseCompleted); err != nil {
+				return needs(err.Error(), true)
+			}
+			op.CleanupState = CleanupStateCleaned
+			_ = s.saveOperation(op)
+		}
+		return "recovered", nil
+	}
+	// 还没写成：目标得仍是终态白名单里的状态才有资格补写。
+	if !archiveTargetTerminal[current] {
+		s.abandonOperation(op, fmt.Sprintf("目标会话状态为 %s，已不再适合归档，放弃该操作", describeStatus(current)))
+		return "abandoned", nil
+	}
+	ok, _ := s.writeMemberStatus(tgtLib, op.Target.SessionID, op.Target.UID, SessionStatusArchived)
+	if !ok {
+		return needs("归档状态写入未生效，已停止恢复", true)
+	}
+	if phaseRank(op.Phase) < phaseRank(PhaseDbWritten) {
+		if err := s.advanceOperation(op, PhaseDbWritten); err != nil {
+			return needs(err.Error(), true)
+		}
+	}
+	if err := s.advanceOperation(op, PhaseCompleted); err != nil {
+		return needs(err.Error(), true)
+	}
+	op.CleanupState = CleanupStateCleaned
+	_ = s.saveOperation(op)
 	return "recovered", nil
 }
 

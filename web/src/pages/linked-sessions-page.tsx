@@ -148,11 +148,20 @@ interface UnifyPlanItem {
     source_only: number;
     target_only: number;
     available_modes: string[];
+    /** 非空表示这一对还能传导归档状态（正文已对齐时唯一可做的动作）。 */
+    archive_action?: string;
+    source_status?: string;
+    target_status?: string;
     /** 服务端签发的预览凭据 id（执行时原样带回，见 api.ts 的说明）。 */
     preview_token: string;
   } | null;
   /** 选定的写入模式；空串表示判定不允许写入（阻断项）。 */
   mode: string;
+  /**
+   * 是否勾选了「仅同步归档」。**默认 false** —— 它是可选动作，勾选即授权写目标会话。
+   * 只在 preview.archive_action 非空（正文已一致、且资格成立）时可用。
+   */
+  syncArchive?: boolean;
   error?: string;
 }
 
@@ -629,7 +638,9 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
               targetMemberId: m.member_id,
             });
             const mode = p.available_modes?.[0] ?? "";
-            return { member: m, preview: p, mode };
+            // 归档传导是**可选动作**，默认不勾（防误操作）。只在后端给出
+            // archive_action 时才可用 —— 那是「来源已归档 + 目标在终态」的资格结论。
+            return { member: m, preview: p, mode, syncArchive: false };
           } catch (err) {
             return { member: m, preview: null, mode: "", error: describeError(err) };
           }
@@ -700,14 +711,21 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
           : "border-border bg-muted/60 text-muted-foreground";
 
   // 预览计划派生量：会覆盖的目标数（overwrite / unifyOverwrite）与阻断项。
+  //
+  // 「可做归档传导」（archive_action 非空）的项即使没有正文模式，也不算阻断 ——
+  // 它正是「正文已一致、无可写正文动作」这一场景下唯一能做的事。
   const planItems = unifyPlan?.items ?? [];
-  const planBlocked = planItems.filter((it) => it.error || !it.mode);
+  const planArchivable = (it: UnifyPlanItem) => Boolean(it.preview?.archive_action);
+  const planBlocked = planItems.filter((it) => it.error || (!it.mode && !planArchivable(it)));
   const planWrites = planItems.filter((it) => it.mode);
   const planOverwrites = planWrites.filter((it) => it.mode !== "fastForward");
+  // 勾选了归档、但本身没有正文写入的项：执行时以 statusOnly 提交。
+  const planArchiveOnly = planItems.filter((it) => !it.mode && it.syncArchive && planArchivable(it));
   const confirmOverwrite = planOverwrites.reduce(
     (sum, it) => sum + (it.preview?.target_only ?? 0),
     0,
   );
+  const planActionable = planWrites.length + planArchiveOnly.length;
   const addTargets: SessionAddTarget[] = detail?.add_targets ?? [];
 
   return (
@@ -984,31 +1002,64 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
 
             {/* 逐目标预览：会怎么处理 / 为什么不能处理 */}
             <ul className="max-h-56 space-y-1.5 overflow-y-auto">
-              {planItems.map((it) => (
-                <li
-                  key={it.member.member_id}
-                  className="rounded-lg border border-border px-3 py-2 text-xs"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-medium">{it.member.label}</span>
-                    <span
-                      className={cn(
-                        "shrink-0",
-                        it.error || !it.mode ? "text-destructive" : "text-muted-foreground",
-                      )}
-                    >
-                      {it.error
-                        ? "无法检查内容"
-                        : !it.mode
-                          ? "无法安全更新此副本"
-                          : MODE_LABEL[it.mode] ?? it.mode}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 leading-4 text-muted-foreground">
-                    {it.error ?? it.preview?.reason}
-                  </p>
-                </li>
-              ))}
+              {planItems.map((it) => {
+                const archivable = planArchivable(it);
+                const actionable = Boolean(it.mode) || (archivable && it.syncArchive);
+                return (
+                  <li
+                    key={it.member.member_id}
+                    className="rounded-lg border border-border px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-medium">{it.member.label}</span>
+                      <span
+                        className={cn(
+                          "shrink-0",
+                          it.error || !actionable ? "text-muted-foreground" : "text-muted-foreground",
+                        )}
+                      >
+                        {it.error
+                          ? "无法检查内容"
+                          : it.mode
+                            ? (MODE_LABEL[it.mode] ?? it.mode)
+                            : archivable
+                              ? "内容一致 · 可同步归档状态"
+                              : "无法安全更新此副本"}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 leading-4 text-muted-foreground">
+                      {it.error ?? it.preview?.reason}
+                    </p>
+                    {/* 归档传导：可选动作，默认不勾。勾选才会写目标会话的归档状态。 */}
+                    {archivable && !it.error ? (
+                      <label className="mt-1.5 flex items-center gap-2 text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          className="size-3.5 accent-primary"
+                          checked={Boolean(it.syncArchive)}
+                          disabled={busy !== null}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setUnifyPlan((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    items: prev.items.map((x) =>
+                                      x.member.member_id === it.member.member_id
+                                        ? { ...x, syncArchive: checked }
+                                        : x,
+                                    ),
+                                  }
+                                : prev,
+                            );
+                          }}
+                        />
+                        仅同步归档状态，保留正文
+                      </label>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
 
             {planBlocked.length > 0 ? (
@@ -1020,9 +1071,13 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
                 其中 {planOverwrites.length} 个账号有独有内容（{confirmOverwrite} 条）；确认后，
                 它们现有的会话内容会被完整替换。
               </p>
-            ) : (
+            ) : planActionable > 0 ? (
               <p className="text-xs text-muted-foreground">
                 执行前会重新校验各副本内容；内容已变化的项会停止并报告结果。
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                没有可执行的改动。若来源账号的会话已归档，可勾选「仅同步归档状态」把它传导过去。
               </p>
             )}
 
@@ -1031,16 +1086,24 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
               <Button
                 type="button"
                 variant={confirmOverwrite > 0 ? "destructive" : "default"}
-                disabled={busy !== null || !unifyPlan || planWrites.length === 0}
+                disabled={busy !== null || !unifyPlan || planActionable === 0}
                 onClick={() =>
                   void runSync(
                     {
                       sourceMemberId: unifyPlan?.source.member_id ?? "",
-                      targets: planWrites.map((it) => ({
-                        memberId: it.member.member_id,
-                        mode: it.mode,
-                        previewToken: it.preview?.preview_token ?? "",
-                      })),
+                      // 正文项按各自模式提交；只勾了归档的项以 statusOnly 提交。
+                      targets: [
+                        ...planWrites.map((it) => ({
+                          memberId: it.member.member_id,
+                          mode: it.mode,
+                          previewToken: it.preview?.preview_token ?? "",
+                        })),
+                        ...planArchiveOnly.map((it) => ({
+                          memberId: it.member.member_id,
+                          mode: "statusOnly",
+                          previewToken: it.preview?.preview_token ?? "",
+                        })),
+                      ],
                     },
                     "unify",
                   )

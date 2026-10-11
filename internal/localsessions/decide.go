@@ -61,6 +61,10 @@ func availableModes(verdict string) []string {
 }
 
 // parseMode 解析前端传入的模式；未知值直接拒绝，不回落默认值。
+//
+// statusOnly 是「只传导归档状态」的独立模式：它**不**出现在 availableModes 里
+// （那是正文写入模式的列表），但必须在这里被解析器接受，否则执行侧根本收不到它。
+// 授权由 archiveQualifies 单独把关，不走 modeAllows。
 func parseMode(raw string) (string, error) {
 	switch raw {
 	case ModeFastForward:
@@ -69,6 +73,8 @@ func parseMode(raw string) (string, error) {
 		return ModeOverwrite, nil
 	case ModeUnifyOverwrite:
 		return ModeUnifyOverwrite, nil
+	case ModeStatusOnly:
+		return ModeStatusOnly, nil
 	}
 	return "", fmt.Errorf("未知的同步模式：%s", raw)
 }

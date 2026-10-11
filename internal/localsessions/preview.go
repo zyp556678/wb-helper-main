@@ -31,7 +31,11 @@ import (
 
 const (
 	// PreviewTokenVersion 是预览凭据格式版本；读到其它版本一律视为过期。
-	PreviewTokenVersion = 1
+	//
+	// 升到 2 的原因：绑定新增了成员 Status 与 ArchiveAction 两个字段。
+	// 旧凭据没有这两项，若继续接受，一个「来源已取消归档」的旧凭据会被当成仍可传导 ——
+	// 升版本让旧凭据一律重检，这是最省事的正确做法（凭据本就一次性、不长期保留）。
+	PreviewTokenVersion = 2
 	// KeepPreviewTokens 是每档位保留的历史预览凭据条数（凭据一次性，不做长期保留）。
 	KeepPreviewTokens = 200
 )
@@ -48,6 +52,9 @@ type PreviewMemberBinding struct {
 	NormalizedDigest string `json:"normalizedDigest"`
 	// RecordCount 是记录数（不称消息数）。
 	RecordCount int `json:"recordCount"`
+	// Status 是该成员的会话归档状态（预览时读出）。归档传导依赖它：
+	// 来源须为 archived、目标须在终态白名单，任一变化都要让凭据失效。
+	Status string `json:"status,omitempty"`
 }
 
 // PreviewBinding 是预览凭据绑定的全部版本信息。
@@ -62,6 +69,10 @@ type PreviewBinding struct {
 	BaselineTotalDigest string               `json:"baselineTotalDigest,omitempty"`
 	BaselineRecordCount int                  `json:"baselineRecordCount,omitempty"`
 	Verdict             string               `json:"verdict"`
+	// ArchiveAction 非空表示这一对具备归档传导资格（见 archiveQualifies）。
+	// 存进凭据是为了执行前能复核：预览之后来源被取消归档、目标变成活跃，
+	// 都会让这个动作失效。
+	ArchiveAction string `json:"archiveAction,omitempty"`
 }
 
 // PreviewToken 是服务端保存的预览凭据。
@@ -248,6 +259,12 @@ func verifyPreview(preview *PreviewToken, live *PreviewBinding) []string {
 	if expected.Verdict != live.Verdict {
 		stale = append(stale, "检查结果已变化，请重新检查")
 	}
+	// 归档传导资格必须仍成立：来源被取消归档、或目标离开终态（被重新打开），
+	// 都会让这个动作失效。Status 的逐项变化已由上面的 Source/Target 整体比较覆盖，
+	// 这里比较的是「资格结论」本身。
+	if expected.ArchiveAction != live.ArchiveAction {
+		stale = append(stale, "会话的归档状态已变化，请重新检查")
+	}
 	return stale
 }
 
@@ -292,6 +309,7 @@ func (s *Store) memberBinding(m LinkMember) PreviewMemberBinding {
 	return PreviewMemberBinding{
 		MemberID: m.MemberID, AccountID: m.AccountID, UID: m.UID, SessionID: m.SessionID,
 		RawDigest: raw, NormalizedDigest: normDigest, RecordCount: count,
+		Status: s.memberStatus(lib, m.SessionID),
 	}
 }
 
@@ -310,6 +328,13 @@ func (s *Store) livePreviewBinding(g *LinkGroupR, srcMember, tgtMember LinkMembe
 		binding.BaselineTotalDigest = record.TotalDigest
 		binding.BaselineRecordCount = record.RecordCount
 	}
+	// 归档传导资格：只在正文已对齐（无可写正文动作）时才有意义 ——
+	// 正文不一致时用户本来就该先同步正文，归档随正文动作一起过去。
+	if verdict == VerdictIdentical || verdict == VerdictAhead {
+		if archiveQualifies(binding.Source.Status, binding.Target.Status) {
+			binding.ArchiveAction = ModeStatusOnly
+		}
+	}
 	return binding
 }
 
@@ -321,8 +346,14 @@ type PairPreview struct {
 	Reason     string `json:"reason"`
 	SourceOnly int    `json:"source_only"`
 	TargetOnly int    `json:"target_only"`
-	// AvailableModes 是前端可勾选的写入模式（空表示不可写入）。
+	// AvailableModes 是前端可勾选的**正文写入**模式（空表示不可写入正文）。
 	AvailableModes []string `json:"available_modes"`
+	// ArchiveAction 非空表示这一对还能传导归档状态（正文已对齐时唯一可做的动作）。
+	// 它不是一种「写入模式」，前端应把它渲染成独立的勾选项（默认不勾，防误操作）。
+	ArchiveAction string `json:"archive_action,omitempty"`
+	// SourceStatus / TargetStatus 是双方的会话状态（供界面展示与排障）。
+	SourceStatus string `json:"source_status,omitempty"`
+	TargetStatus string `json:"target_status,omitempty"`
 	// PreviewToken 是服务端凭据 id（执行时必须原样带回）。
 	PreviewToken string `json:"preview_token"`
 }

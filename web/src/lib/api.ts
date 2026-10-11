@@ -603,6 +603,14 @@ export function previewSessionGroupPair(
     target_only: number;
     available_modes: string[];
     /**
+     * 非空表示这一对还能传导归档状态（正文已对齐时唯一可做的动作）。
+     * 它不是一种「写入模式」：前端应渲染成独立的勾选项，默认不勾（防误操作）。
+     */
+    archive_action?: string;
+    /** 双方的会话状态（供界面展示与排障）。 */
+    source_status?: string;
+    target_status?: string;
+    /**
      * 服务端签发的预览凭据 id：执行同步时必须原样带回。
      *
      * 服务端把判定所依赖的全部版本信息（组指纹、双方身份与正文摘要、基线、结论）

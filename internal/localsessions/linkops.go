@@ -1174,6 +1174,142 @@ type SyncPairInput struct {
 	PreviewToken string
 }
 
+// syncStatusOnly 把来源的归档状态传导到目标：**只改 status 列**，不碰正文。
+//
+// 前置校验与正文同步同源（凭据复核 + 重新读取实时状态），区别在执行：
+//   - 不备份正文、不写正文、不提交基线、不推进 lastSyncedAt（归档不是内容变更）；
+//   - 条件 UPDATE 把「只动终态行、不碰活跃会话」写进 SQL；
+//   - 阶段推进是 prepared → db_written → completed（跳过正文相关阶段）。
+func (s *Store) syncStatusOnly(in SyncPairInput) SyncPairOutcome {
+	out := SyncPairOutcome{MemberID: in.Target.MemberID}
+	if in.Target.State != MemberStateActive {
+		out.Reason = "该成员不是当前接力成员，不再参与同步"
+		return out
+	}
+	// 凭据必须是我们服务端保存过的（伪造的 id 读不到）。
+	preview := s.loadPreviewToken(in.PreviewToken)
+	if preview == nil {
+		out.Error = "检查结果不存在或已失效，请重新检查后再操作"
+		return out
+	}
+	if preview.Binding.GroupID != in.Group.ID {
+		out.Error = "检查结果与所选会话不匹配，已拒绝"
+		return out
+	}
+	if preview.Binding.Source.UID != in.Source.UID || preview.Binding.Target.UID != in.Target.UID {
+		out.Reason = "账号已变化，检查结果已失效"
+		out.ReasonCode = PreviewStaleReasonCode
+		return out
+	}
+	// 重新判定 + 逐项核对凭据：正文、归档资格任何一项变化都跳过（不沿用旧选择）。
+	decision := s.decideForPair(in.Group, in.Source, in.Target)
+	live := s.livePreviewBinding(in.Group, in.Source, in.Target, decision.Verdict)
+	if stale := verifyPreview(preview, &live); len(stale) > 0 {
+		out.Reason = "检查结果已失效：" + strings.Join(stale, "；")
+		out.ReasonCode = PreviewStaleReasonCode
+		return out
+	}
+	// 资格必须仍然成立：来源仍归档、目标仍在终态白名单。
+	if live.ArchiveAction != ModeStatusOnly {
+		out.Reason = "归档状态已变化，无需传导（或目标已不是可归档的终态）"
+		out.ReasonCode = PreviewStaleReasonCode
+		return out
+	}
+
+	tgtLib := s.libByVariant(in.Target.Variant)
+	if tgtLib == nil || !libExists(tgtLib) {
+		out.Error = "目标会话库不可用"
+		return out
+	}
+	targetStatusBefore := s.memberStatus(tgtLib, in.Target.SessionID)
+	if !archiveTargetTerminal[targetStatusBefore] {
+		out.Reason = fmt.Sprintf("目标会话当前状态为 %s，不是可归档的终态，未写入", describeStatus(targetStatusBefore))
+		return out
+	}
+
+	// 同一目标上仍有未完成写入：本轮不得再写（等恢复完成）。
+	if op := s.pendingOperationForTarget(in.Target.Variant, in.Target.SessionID); op != nil {
+		reason := op.LastError
+		if reason == "" {
+			reason = "等待恢复"
+		}
+		out.Error = fmt.Sprintf("上一次会话保存尚未完成（操作 %s）：%s，本次未保存", op.OperationID, reason)
+		return out
+	}
+
+	op := &Operation{
+		Version:     OperationVersion,
+		OperationID: mustNewUUID(),
+		Kind:        OperationKindSync,
+		Variant:     in.Target.Variant,
+		SourceVariant: func() string {
+			if in.Source.Variant != in.Target.Variant {
+				return in.Source.Variant
+			}
+			return ""
+		}(),
+		GroupID:      in.Group.ID,
+		Source:       OperationMember{AccountID: in.Source.AccountID, UID: in.Source.UID, SessionID: in.Source.SessionID},
+		Target:       OperationMember{AccountID: in.Target.AccountID, UID: in.Target.UID, SessionID: in.Target.SessionID},
+		Phase:        PhasePrepared,
+		Mode:         ModeStatusOnly,
+		StatusBefore: targetStatusBefore,
+		CreatedAt:    nowMillis(),
+		UpdatedAt:    nowMillis(),
+	}
+	if err := s.saveOperation(op); err != nil {
+		out.Error = "操作记录写入失败，已放弃同步：" + err.Error()
+		return out
+	}
+
+	ok, after := s.writeMemberStatus(tgtLib, in.Target.SessionID, in.Target.UID, SessionStatusArchived)
+	if !ok {
+		s.failOperation(op, "条件更新未命中（目标状态已变化或行不存在）")
+		out.Error = "归档状态写入失败：目标会话状态已变化，请重新检查"
+		return out
+	}
+	if err := s.advanceOperation(op, PhaseDbWritten); err != nil {
+		s.failOperation(op, err.Error())
+		out.Error = err.Error()
+		return out
+	}
+	if err := s.advanceOperation(op, PhaseCompleted); err != nil {
+		s.failOperation(op, err.Error())
+		out.Error = err.Error()
+		return out
+	}
+	op.CleanupState = CleanupStateCleaned
+	_ = s.saveOperation(op)
+	_ = s.pruneOperations(in.Target.Variant, KeepCompletedOperations)
+
+	out.Applied = true
+	out.OK = true
+	out.Notes = append(out.Notes, fmt.Sprintf("已同步归档状态（%s → %s），正文未改动", describeStatus(targetStatusBefore), after))
+	return out
+}
+
+// describeStatus 把状态值转成可读文案（空串表示未知 / 缺列）。
+func describeStatus(status string) string {
+	switch status {
+	case SessionStatusArchived:
+		return "已归档"
+	case "completed":
+		return "已完成"
+	case "error":
+		return "出错"
+	case "terminated":
+		return "已终止"
+	case "active":
+		return "活跃"
+	case "working":
+		return "进行中"
+	case "":
+		return "未知"
+	default:
+		return status
+	}
+}
+
 // decideForPair 重新加载双方内容与基线并判定（预览与执行共用同一条路径）。
 func (s *Store) decideForPair(g *LinkGroupR, srcMember, tgtMember LinkMember) SyncDecision2 {
 	srcLib := s.libByVariant(srcMember.Variant)
@@ -1204,6 +1340,11 @@ func (s *Store) SyncMemberPair(in SyncPairInput) SyncPairOutcome {
 	if _, err := parseMode(in.Mode); err != nil {
 		out.Error = err.Error()
 		return out
+	}
+	// statusOnly 是**独立路径**：不写正文、不提交基线、只改目标会话的归档状态。
+	// 它不被 modeAllows 认可（见 archive.go），因此必须在正文判定之前分流。
+	if in.Mode == ModeStatusOnly {
+		return s.syncStatusOnly(in)
 	}
 	if in.Target.State != MemberStateActive {
 		out.Reason = "该成员不是当前接力成员，不再参与同步"
@@ -1598,7 +1739,11 @@ func (s *Store) PreviewPair(groupID, sourceMemberID, targetMemberID string) (*Pa
 		Verdict: d.Verdict, Reason: d.Reason,
 		SourceOnly: d.SourceOnly, TargetOnly: d.TargetOnly,
 		AvailableModes: d.AvailableModes,
-		PreviewToken:   token,
+		// 归档传导资格随凭据一起下发：非空表示这一对可做「仅同步归档」。
+		ArchiveAction: binding.ArchiveAction,
+		SourceStatus:  binding.Source.Status,
+		TargetStatus:  binding.Target.Status,
+		PreviewToken:  token,
 	}, nil
 }
 
