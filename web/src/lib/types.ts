@@ -630,6 +630,8 @@ export interface ConfigPrompt {
   degraded_retry: boolean;
   /** 首条消息非 system 时补一条保底 system。 */
   strict_first_system: boolean;
+  /** 客户端未声明输出预算时，按模型目录的输出上限补 max_tokens。 */
+  catalog_max_tokens: boolean;
   /** 只读：当前实际生效的提示词前 200 字，用于确认到底在用什么。 */
   effective_text_preview: string;
 }

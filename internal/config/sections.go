@@ -193,6 +193,9 @@ type PromptSection struct {
 	DegradedRetry *bool `json:"degraded_retry"`
 	// StrictFirstSystem 首条消息非 system 时补一条保底 system。
 	StrictFirstSystem *bool `json:"strict_first_system"`
+	// CatalogMaxTokens 客户端未声明输出预算时，按模型目录的输出上限补 max_tokens。
+	// 上游不带该字段时为输出默认预留 384000，长会话会提前撞 400 code=11133。
+	CatalogMaxTokens *bool `json:"catalog_max_tokens"`
 }
 
 // LocalSection 是本机代理参数（切片 7）。
@@ -636,6 +639,10 @@ func (c *Config) PromptStrictFirstSystem() bool {
 	return c.Prompt.StrictFirstSystem == nil || *c.Prompt.StrictFirstSystem
 }
 
+func (c *Config) PromptCatalogMaxTokens() bool {
+	return c.Prompt.CatalogMaxTokens == nil || *c.Prompt.CatalogMaxTokens
+}
+
 func (c *Config) LocalAgentEnabled() bool {
 	return c.Local.Enabled == nil || *c.Local.Enabled
 }
@@ -905,6 +912,9 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 		}
 		if p.Prompt.StrictFirstSystem != nil {
 			c.Prompt.StrictFirstSystem = p.Prompt.StrictFirstSystem
+		}
+		if p.Prompt.CatalogMaxTokens != nil {
+			c.Prompt.CatalogMaxTokens = p.Prompt.CatalogMaxTokens
 		}
 	}
 	if p.Local != nil {

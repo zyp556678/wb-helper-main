@@ -15,6 +15,7 @@ export interface PromptFormValue {
   sanitize: boolean;
   degraded_retry: boolean;
   strict_first_system: boolean;
+  catalog_max_tokens: boolean;
 }
 
 interface ModeOption {
@@ -171,6 +172,17 @@ export function PromptConfigCard({
               disabled={saving}
               aria-label="首条消息保底 system"
               onCheckedChange={(checked) => onChange({ strict_first_system: checked })}
+            />
+          </ConfigRow>
+          <ConfigRow
+            label="补输出预算"
+            hint="客户端未声明 max_tokens 时按模型目录上限补一个。上游不带该字段会为输出默认预留 38 万，长会话因此提前报错 11133"
+          >
+            <Switch
+              checked={value.catalog_max_tokens}
+              disabled={saving}
+              aria-label="补输出预算"
+              onCheckedChange={(checked) => onChange({ catalog_max_tokens: checked })}
             />
           </ConfigRow>
         </div>

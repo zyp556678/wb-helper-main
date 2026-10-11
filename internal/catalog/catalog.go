@@ -292,6 +292,21 @@ func (c *Catalog) EffortTables() (map[string][]string, map[string]string) {
 	return efforts, defaults
 }
 
+// MaxOutputTokensTable 返回「模型 → 输出上限」表，供出站改写层在客户端未声明
+// 输出预算时补 max_tokens（见 internal/outbound/maxtokens.go）。
+//
+// 同一模型可能同时出现在两个站点且上限不同，取较大者：补的是「收回上游默认预留」，
+// 上限偏大只会少收一点，偏小则可能截断本来能产出的输出。
+func (c *Catalog) MaxOutputTokensTable() map[string]int {
+	table := map[string]int{}
+	for _, m := range c.Merged() {
+		if m.MaxOutputTokens > table[m.ID] {
+			table[m.ID] = m.MaxOutputTokens
+		}
+	}
+	return table
+}
+
 // ModelIDs 返回去重后的模型 ID 列表（排序，供 /v1/models 使用）。
 func (c *Catalog) ModelIDs() []string {
 	models := c.Merged()

@@ -27,6 +27,11 @@ func (s *Server) prepareOutboundBody(body []byte, degrade bool) ([]byte, outboun
 	}
 
 	efforts, defaults := s.cat.EffortTables()
+	// 关掉开关时不传表：管线里 len(opts.MaxOutputTokens)==0 即整步跳过。
+	var maxOut map[string]int
+	if s.config().PromptCatalogMaxTokens() {
+		maxOut = s.cat.MaxOutputTokensTable()
+	}
 	res := outbound.Prepare(body, outbound.Options{
 		PromptMode:        mode,
 		SystemPrompt:      prompt,
@@ -34,6 +39,7 @@ func (s *Server) prepareOutboundBody(body []byte, degrade bool) ([]byte, outboun
 		StrictFirstSystem: s.config().PromptStrictFirstSystem(),
 		SupportedEfforts:  efforts,
 		DefaultEfforts:    defaults,
+		MaxOutputTokens:   maxOut,
 		Degrade:           degrade,
 	})
 	return res.Body, res
@@ -58,7 +64,8 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 		return
 	}
 	changed := r.PromptApplied || r.SystemInjected || r.Sanitized ||
-		r.ToolRepair.Changed() || r.EffortFrom != "" || r.ThinkingInjected
+		r.ToolRepair.Changed() || r.EffortFrom != "" || r.ThinkingInjected ||
+		r.MaxTokensInjected > 0
 	if !changed {
 		return
 	}
@@ -78,6 +85,9 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 	}
 	if r.EffortFrom != "" {
 		parts = append(parts, "档位降级 "+r.EffortFrom+"→"+r.EffortTo)
+	}
+	if r.MaxTokensInjected > 0 {
+		parts = append(parts, "补输出预算 "+strconv.Itoa(r.MaxTokensInjected))
 	}
 	if r.Sanitized {
 		parts = append(parts, "指纹脱敏")
@@ -105,6 +115,9 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 	if r.EffortFrom != "" {
 		fields["effort_from"] = r.EffortFrom
 		fields["effort_to"] = r.EffortTo
+	}
+	if r.MaxTokensInjected > 0 {
+		fields["max_tokens_injected"] = r.MaxTokensInjected
 	}
 	s.events.Info(eventlog.ChannelOutbound, "outbound_rewrite",
 		"出站改写："+strings.Join(parts, "、"), fields)

@@ -246,6 +246,7 @@ const DEFAULT_PROMPT: PromptFormValue = {
   sanitize: true,
   degraded_retry: true,
   strict_first_system: true,
+  catalog_max_tokens: true,
 };
 
 function sortedHours(hours: number[]): number[] {
@@ -317,6 +318,8 @@ function toForm(config: PanelConfig): ConfigForm {
           sanitize: config.prompt.sanitize,
           degraded_retry: config.prompt.degraded_retry,
           strict_first_system: config.prompt.strict_first_system,
+          // 后端未下发时按默认开（与 config 的 nil=true 口径一致）。
+          catalog_max_tokens: config.prompt.catalog_max_tokens ?? true,
         }
       : DEFAULT_PROMPT,
   };
@@ -548,6 +551,9 @@ function buildPatch(form: ConfigForm, base: PanelConfig): ConfigPatch {
   }
   if (form.prompt.strict_first_system !== basePrompt.strict_first_system) {
     prompt.strict_first_system = form.prompt.strict_first_system;
+  }
+  if (form.prompt.catalog_max_tokens !== basePrompt.catalog_max_tokens) {
+    prompt.catalog_max_tokens = form.prompt.catalog_max_tokens;
   }
   if (Object.keys(prompt).length > 0) patch.prompt = prompt;
 

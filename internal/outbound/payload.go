@@ -17,6 +17,8 @@ import (
 //  3. 强制 stream:true —— 上游不接受非流式。
 //  4. stream_options 兜底 include_usage —— 不带它上游末帧不给 usage，指标就没数据。
 //  5. max_completion_tokens → max_tokens —— 上游只认后者，别名字段会被忽略后回落默认上限。
+//  5a. 未声明输出预算时按目录补 max_tokens —— 收回上游为输出默认预留的额度，
+//     避免长会话被 400 code=11133 拒绝（见 maxtokens.go）。
 //  6. tool_choice / role / image_url 归一 —— 都是上游参数校验的白名单/形态问题。
 //  7. 工具序列自愈 —— 必须在 role 归一之后：developer→system 会影响消息拓扑判定。
 //  8. 思维链开关与档位降级 —— 注入的默认档要经过降级管线，所以注入在降级之前。
@@ -34,6 +36,9 @@ type Options struct {
 	// SupportedEfforts / DefaultEfforts 来自模型目录，用于档位降级与补默认档。
 	SupportedEfforts map[string][]string
 	DefaultEfforts   map[string]string
+	// MaxOutputTokens 来自模型目录（模型名 → 输出上限），供未声明输出预算时补 max_tokens。
+	// 为空或未命中该模型时不补（见 ensureCatalogMaxTokens）。
+	MaxOutputTokens map[string]int
 	// Degrade 为真时强制使用降级中性提示词（拦截后重试用）。
 	Degrade bool
 }
@@ -68,6 +73,8 @@ type Result struct {
 	MaxTokensClamped bool  `json:"max_tokens_clamped"`
 	MaxTokensFrom    int64 `json:"max_tokens_from,omitempty"`
 	MaxTokensTo      int64 `json:"max_tokens_to,omitempty"`
+	// MaxTokensInjected 非零表示客户端未声明输出预算，网关按目录上限补入了该值。
+	MaxTokensInjected int `json:"max_tokens_injected,omitempty"`
 }
 
 // Prepare 执行完整出站改写。body 解析失败时原样返回（绝不失败）——
@@ -131,6 +138,17 @@ func Prepare(body []byte, opts Options) Result {
 
 	// 5. max_completion_tokens → max_tokens
 	translateMaxCompletionTokens(obj)
+	// 5a. 未声明输出预算时按目录上限补 max_tokens。
+	// 上游不带 max_tokens 会为输出默认预留 384000，长会话因此提前撞 400 code=11133；
+	// 补上目录声明的上限即可把预留额度收回来。客户端显式值不覆盖（见 maxtokens.go）。
+	// 放在 5 之后：别名已归并，只需认 max_tokens 一个键。
+	if len(opts.MaxOutputTokens) > 0 {
+		if m, _ := obj["model"].(string); m != "" {
+			if injected := ensureCatalogMaxTokens(obj, opts.MaxOutputTokens[m]); injected > 0 {
+				res.MaxTokensInjected = injected
+			}
+		}
+	}
 	// 5b. GPT 系 max_tokens 下限（抬到 16）：上游对 GPT 系小于 16 的值一律 400
 	// code=11133，而这是模型参数级拒绝 —— 换账号同样被拒，必须在发送前修。
 	if from, clamped := clampGPTMinMaxTokens(obj); clamped {
