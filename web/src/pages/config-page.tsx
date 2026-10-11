@@ -311,7 +311,7 @@ function toForm(config: PanelConfig): ConfigForm {
     },
     tasks: {
       // 默认关：后端未下发时按「关闭」处理（与 config 的 nil=false 口径一致）。
-      desktop_events_enabled: config.tasks?.desktop_events_enabled ?? false,
+      desktop_events_enabled: config.tasks?.desktop_events_enabled ?? true,
     },
     prompt: config.prompt
       ? {
@@ -541,7 +541,7 @@ function buildPatch(form: ConfigForm, base: PanelConfig): ConfigPatch {
     patch.server = { read_timeout: form.server.read_timeout.trim() };
   }
 
-  if (form.tasks.desktop_events_enabled !== (base.tasks?.desktop_events_enabled ?? false)) {
+  if (form.tasks.desktop_events_enabled !== (base.tasks?.desktop_events_enabled ?? true)) {
     patch.tasks = { desktop_events_enabled: form.tasks.desktop_events_enabled };
   }
 
@@ -1386,11 +1386,11 @@ export function ConfigPage() {
                 />
               </ConfigRow>
 
-              {/* 客户端事件链开关。默认关闭，且说明必须写在界面上 ——
-                  打开它意味着开始伪装客户端行为，那是个需要知情的决定。 */}
+              {/* 客户端事件链开关。默认开启（对齐上游），说明写清楚代价 ——
+                  关掉它会让「需电脑端 / 小程序」类任务不再自动执行。 */}
               <ConfigRow
                 label="客户端事件链"
-                hint="为「需电脑端 / 小程序」类任务上报客户端指纹事件（模板 / 灵感 / 画布 / 资料库 / 换肤 / 专家召唤 / 技能加载 / 校园日与 Sequential 链）。默认关闭：事件形状按实测样本复刻，但上游是否接受无法离线验证，且伪造事件有被风控识别的风险。专家系只伪造「点了召唤」这一个动作——专家 id 与对话都是真实的"
+                hint="为「需电脑端 / 小程序」类任务上报客户端指纹事件（模板 / 灵感 / 画布 / 资料库 / 换肤 / 专家召唤 / 技能加载 / 校园日与 Sequential 链）。默认开启（对齐上游，关掉后这 12+ 条任务不会自动执行）。事件形状按实测样本复刻，伪造事件有被风控识别的风险，代价由账号承担；专家系只伪造「点了召唤」这一个动作——专家 id 与对话都是真实的"
               >
                 <Switch
                   checked={form.tasks.desktop_events_enabled}

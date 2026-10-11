@@ -1,8 +1,7 @@
 // 客户端指纹事件链的执行器（切片 18）。
 //
-// 只在配置 `tasks.desktop_events_enabled = true` 时才会被走到
-// （见 Manager.actionFor 的过滤）。这里只负责把事件链发出去，
-// 「该不该发」的判断不在这一层。
+// 受配置 `tasks.desktop_events_enabled` 控制（默认开，见 Manager.actionFor 的过滤）。
+// 这里只负责把事件链发出去，「该不该发」的判断不在这一层。
 package tasks
 
 import (

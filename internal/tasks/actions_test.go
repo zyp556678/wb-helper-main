@@ -82,28 +82,31 @@ func TestMPTaskCodeRegistration(t *testing.T) {
 	}
 }
 
-// 「伪造客户端行为」的动作默认必须关着：开关关掉时 actionFor 返回 nil，
-// 这些 code 会自然落进「需客户端」分类，界面提示与开关状态因此永远一致。
+// 「伪造客户端行为」的动作默认**开启**（对齐上游），但必须能被显式关掉：
+// 开关关掉时 actionFor 返回 nil，这些 code 会自然落进「需客户端」分类，
+// 界面提示与开关状态因此永远一致。
 //
 // 开关判断是这条约定的**唯一执行点**，所以单独钉住。
 func TestGatedActionsRespectSwitch(t *testing.T) {
-	off := newTestManager(t)
 	on := newTestManager(t)
+	off := newTestManager(t)
 	// 开关走「换配置快照」热生效路径（与面板保存配置同一条），因此这里也换快照，
 	// 而不是改写 Manager 持有的那一份 —— 后者已不是配置的来源。
-	enabled := true
-	next := on.config().Clone()
-	next.Tasks.DesktopEventsEnabled = &enabled
-	on.SetConfig(next)
+	disabled := false
+	next := off.config().Clone()
+	next.Tasks.DesktopEventsEnabled = &disabled
+	off.SetConfig(next)
 
 	gated := []string{"expert_5", "Expert_team_use_3", "Expert_lighthouse", "skill_1",
 		"template_5", "RichMeow_Chat", "school_season", "Sequential_Tasks_1"}
 	for _, code := range gated {
+		// 默认（未提交）就是开。
+		if on.actionFor(code) == nil {
+			t.Fatalf("默认应开启：%s 应有自动动作", code)
+		}
+		// 显式关掉后不再有动作，并落进「需客户端」。
 		if off.actionFor(code) != nil {
 			t.Fatalf("开关关闭时 %s 不应有自动动作", code)
-		}
-		if on.actionFor(code) == nil {
-			t.Fatalf("开关打开后 %s 应有自动动作", code)
 		}
 		// 被开关挡住时要能给出可行动的提示（告诉用户去设置里打开），
 		// 而不是笼统的「需客户端操作」—— 后者会让用户真的去客户端手动做一遍。

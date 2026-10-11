@@ -21,8 +21,8 @@
 //     要验证必须拿真实账号发一次并观察任务进度，那会消耗额度。
 //  2. 上游对事件链有真实性校验倾向（参考实现记载：它需要消息成功回执），
 //     所以**不保证**每个任务都能点亮。
-//  3. 因此这条通路在配置里默认**关闭**（`tasks.desktop_events_enabled`），
-//     由使用者显式打开 —— 见 internal/tasks 里的开关说明。
+//  3. 这条通路受 `tasks.desktop_events_enabled` 控制，**默认开启**（对齐上游）。
+//     不想要伪造客户端行为的人可以显式关掉 —— 见 internal/tasks 里的开关说明。
 package upstream
 
 import (

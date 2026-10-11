@@ -387,12 +387,13 @@ func TestCheckinWindowCanBeCleared(t *testing.T) {
 // 切片 18：客户端事件链开关（tasks.desktop_events_enabled）
 // -----------------------------------------------------------------------------
 
-// 默认必须是**关闭**：打开意味着开始向上游伪造客户端行为，代价由账号承担。
-// 默认开会让用户在不知情的情况下接受这个风险。
-func TestDesktopEventsDefaultOff(t *testing.T) {
+// 默认必须是**开启**（对齐上游：上游没有这个开关，全部任务开箱可用）。
+// 默认关的后果是任务中心形同虚设——12+ 条任务永远落进「需客户端」不执行。
+// 开关保留是为了让「不想要伪造客户端行为」的人能显式关掉。
+func TestDesktopEventsDefaultOn(t *testing.T) {
 	c := newTestConfig(t)
-	if c.TaskDesktopEventsEnabled() {
-		t.Fatal("默认必须关闭")
+	if !c.TaskDesktopEventsEnabled() {
+		t.Fatal("默认必须开启（对齐上游）")
 	}
 }
 

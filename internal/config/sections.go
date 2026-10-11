@@ -164,15 +164,11 @@ type TasksSection struct {
 	// 专家 id 取自真实市场列表、对话是真的对话、事件的 requestId 取自服务端返回 ——
 	// 也就是说它们伪造的只是「用户点了召唤」这个动作，而不是整条链路。
 	//
-	// 默认 **false**，理由要说清楚：这些通路是**按参考实现的实测样本复刻的事件形状**，
-	// 不是官方接口。形状是确定的（每个字段都有样本依据），但「上游是否接受、
-	// 是否会计数」**无法离线验证** —— 要验证必须拿真实账号发一次并看任务进度，
-	// 那会消耗额度。
-	//
-	// 还有一个更重要的理由：伪造客户端事件本身有**被风控识别的风险**，
-	// 而代价由账号承担。本项目此前明确把这类动作归为「需客户端、不做」；
-	// 现在把它做成**显式开关**而不是默认行为，是为了让打开它成为一个
-	// 有意识的决定，而不是某次升级后的意外变化。
+	// 默认 **true**（对齐上游：上游没有这个开关，全部任务开箱可用）。
+	// 曾经默认关，理由是「伪造客户端行为有被风控识别的风险，代价由账号承担」——
+	// 那个顾虑仍然成立，但默认关的代价是任务中心形同虚设（只有 5 条任务可自动完成，
+	// 其余 12+ 条全落进「需客户端」永不执行）。把默认值交给上游的实际行为，
+	// 同时保留这个开关，让不想要这类动作的人可以显式关掉。
 	DesktopEventsEnabled *bool `json:"desktop_events_enabled"`
 }
 
@@ -587,11 +583,10 @@ func (c *Config) PreferFreeSiteEnabled() bool {
 
 // TaskDesktopEventsEnabled 报告是否允许上报桌面客户端指纹事件链。
 //
-// 默认 **false**：该通路按参考实现的实测样本复刻，形状确定但上游是否接受
-// 无法离线验证，且伪造客户端事件有被风控识别的风险（代价由账号承担）。
-// 显式打开才算数，见 TasksSection 的注释。
+// 默认 **true**（对齐上游：上游无此开关，全部任务开箱可用）。指针语义：
+// 显式写 false 才算关掉 —— 见 TasksSection 的注释。
 func (c *Config) TaskDesktopEventsEnabled() bool {
-	return c.Tasks.DesktopEventsEnabled != nil && *c.Tasks.DesktopEventsEnabled
+	return c.Tasks.DesktopEventsEnabled == nil || *c.Tasks.DesktopEventsEnabled
 }
 
 // CreditFloor 返回积分保底阈值（0 = 关闭）。

@@ -109,24 +109,46 @@ func TestTravelInspectEmptyPoolErrors(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 切片 18：客户端指纹事件链的**默认关闭**约定
+// 切片 18：客户端指纹事件链的**默认开启**约定（对齐上游）
 // -----------------------------------------------------------------------------
 
-// 关闭时这些 code 必须落进「需客户端」而不是「可自动」。
+// 默认（未提交开关）时这些 code 必须落进「可自动」而不是「需客户端」——
+// 这是任务中心能真正干活的前提：默认关会让 12+ 条任务永不执行。
+// 显式关掉开关后则必须落进「需客户端」，且给出可行动的提示。
 //
-// 这是「默认不伪造客户端行为」这条约定的**唯一执行点**：如果 actionFor 漏了过滤，
-// 用户会在没有任何提示的情况下开始往上游发伪造事件 —— 代价由账号承担。
-func TestDesktopActionsHiddenByDefault(t *testing.T) {
+// 开关判断是这条约定的**唯一执行点**：如果 actionFor 漏了过滤，
+// 显式关掉开关的用户仍会往上游发伪造事件 —— 代价由账号承担。
+func TestDesktopActionsDefaultEnabled(t *testing.T) {
 	m := newTestManager(t)
-	for _, code := range []string{"template_5", "playbook_prompt", "create_canvas", "Library_read", "Hp_Appearance"} {
-		if a := m.actionFor(code); a != nil {
-			t.Fatalf("%s 在默认（关闭）状态下不该有自动动作", code)
+	codes := []string{"template_5", "playbook_prompt", "create_canvas", "Library_read", "Hp_Appearance"}
+
+	// 默认开：这些 code 有自动动作、归入可自动。
+	for _, code := range codes {
+		if a := m.actionFor(code); a == nil {
+			t.Fatalf("%s 在默认（开启）状态下应有自动动作", code)
 		}
 		cat, _, _ := m.classify(upstream.GrowthTask{TaskCode: code, AcceptStatus: "accepted"})
-		if cat != CatManual {
-			t.Fatalf("%s 默认应归入「需客户端」，实际 %s", code, cat)
+		if cat != CatAuto {
+			t.Fatalf("%s 默认应归入「可自动完成」，实际 %s", code, cat)
 		}
 	}
+
+	// 显式关掉后落进「需客户端」，并给出「开关未打开」类提示。
+	off := newTestManager(t)
+	disabled := false
+	next := off.config().Clone()
+	next.Tasks.DesktopEventsEnabled = &disabled
+	off.SetConfig(next)
+	for _, code := range codes {
+		if a := off.actionFor(code); a != nil {
+			t.Fatalf("显式关闭后 %s 不该有自动动作", code)
+		}
+		cat, _, _ := off.classify(upstream.GrowthTask{TaskCode: code, AcceptStatus: "accepted"})
+		if cat != CatManual {
+			t.Fatalf("显式关闭后 %s 应归入「需客户端」，实际 %s", code, cat)
+		}
+	}
+
 	// 对话类动作不受影响。
 	if a := m.actionFor("chat_5"); a == nil {
 		t.Fatal("对话上报类动作不该受开关影响")

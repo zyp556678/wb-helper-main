@@ -129,16 +129,17 @@ const (
 	// 资料库介绍 / 换肤 / 专家召唤 / 技能加载 / 桌面端对话）。
 	//
 	// 与 modeReport 的本质差别：它发的不是「对话活跃」，而是**伪造的客户端行为**。
-	// 因此它在配置里默认关闭（tasks.desktop_events_enabled），
-	// 只有显式打开才会进入可自动完成的分类 —— 见 TasksSection 的注释。
+	// 因此它受 tasks.desktop_events_enabled 开关控制 —— 但**默认开启**（对齐上游：
+	// 上游没有这个开关，全部任务开箱可用）。见 TasksSection 的注释。
 	modeDesktopEvent = "desktop"
 	// modeMP 小程序口径（事件形状按小程序源码对齐，同样属于伪造客户端行为，
 	// 与 modeDesktopEvent 共用同一个开关）。
 	modeMP = "mp"
 )
 
-// gatedMode 报告该动作是否属于「伪造客户端行为」——这类动作默认关闭，
-// 必须显式打开 tasks.desktop_events_enabled 才会进入可自动完成的分类。
+// gatedMode 报告该动作是否属于「伪造客户端行为」——这类动作受
+// tasks.desktop_events_enabled 控制，但**默认开启**（对齐上游）；
+// 显式关掉该开关后才会落进「需客户端」分类、不再自动执行。
 func gatedMode(mode string) bool {
 	return mode == modeDesktopEvent || mode == modeMP
 }
