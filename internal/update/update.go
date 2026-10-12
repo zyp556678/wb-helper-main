@@ -108,6 +108,10 @@ const (
 	retryBackoff     = 300 * time.Millisecond
 )
 
+// autoDownloadTimeout 是自动下载的时限。比面板手动下载那个（10 分钟）更宽：
+// 自动下载在后台跑，等得起慢网络，而失败要再等一个检查周期才有下一次机会。
+const autoDownloadTimeout = 20 * time.Minute
+
 // State 是一次检查的结果快照，也是面板那张卡片的全部数据来源。
 //
 // 字段名直接用 snake_case：面板的其它端点（autostart / stats / config）都是这个口径。
@@ -143,6 +147,15 @@ type State struct {
 	AutoCheck     bool `json:"auto_check"`
 	IntervalHours int  `json:"interval_hours"`
 	TokenSet      bool `json:"token_set"`
+	// AutoDownload 来自配置：发现新版本后是否自动把安装包下到数据目录（默认 true）。
+	AutoDownload bool `json:"auto_download"`
+	// LocalPath / LocalBytes 是**本地已就绪**的安装包（不存在或大小不符时为空）。
+	// 面板据此把「下载安装包」换成「安装并重启」，刷新页面也不必重新下载。
+	LocalPath  string `json:"local_path,omitempty"`
+	LocalBytes int64  `json:"local_bytes,omitempty"`
+	// Install 是「在这台机器上装这个包」的方案：面板在确认框里如实展示要执行的命令、
+	// 是否提权、装完谁负责重启。平台差异只有后端知道，前端不自己拼这些文案。
+	Install InstallPlan `json:"install"`
 	// Error 是本次检查**失败**的原因（网络、限流、缺令牌……）。
 	// 与 Detail 分开：Error 非空时面板显示红色提示条，Detail 是中性说明。
 	Error string `json:"error,omitempty"`
@@ -204,7 +217,16 @@ type Checker struct {
 	// inflight 非 nil 表示此刻有一次真实的检查在跑；并发的第二次请求等它，
 	// 而不是再打一次上游（见 Check 的说明）。
 	inflight chan struct{}
+	// bg 跟踪后台动作（目前只有「发现新版本就自动下载」）。
+	//
+	// 生产代码不需要等它 —— 进程退出会把一切收掉。但测试需要：goroutine 在测试
+	// 结束后还去 t.Logf（或写已被删掉的临时目录）会让 `go test` 直接 panic，
+	// 而那个 panic 看上去与用例毫无关系。用例用 WaitBackground 收尾。
+	bg sync.WaitGroup
 }
+
+// WaitBackground 等后台动作（自动下载）收尾。仅供测试使用。
+func (c *Checker) WaitBackground() { c.bg.Wait() }
 
 // New 构造 Checker。
 func New(cfg *config.Config, opt Options) *Checker {
@@ -259,15 +281,16 @@ func (c *Checker) DownloadDir() string { return c.downloadDir }
 
 // settings 从当前配置快照里取本次检查所需的参数（每次现读，改完即生效）。
 type settings struct {
-	repo       string
-	token      string
-	prerelease bool
-	enabled    bool
-	hours      int
+	repo         string
+	token        string
+	prerelease   bool
+	enabled      bool
+	autoDownload bool
+	hours        int
 }
 
 func (c *Checker) settings() settings {
-	s := settings{repo: DefaultRepo, hours: DefaultCheckHours, enabled: true}
+	s := settings{repo: DefaultRepo, hours: DefaultCheckHours, enabled: true, autoDownload: true}
 	cfg := c.cfgPtr.Load()
 	if cfg == nil {
 		return s
@@ -275,6 +298,7 @@ func (c *Checker) settings() settings {
 	s.enabled = cfg.UpdateEnabled()
 	s.prerelease = cfg.UpdatePrerelease()
 	s.token = cfg.UpdateToken()
+	s.autoDownload = cfg.UpdateAutoDownload()
 	if r := strings.TrimSpace(cfg.Update.Repo); r != "" {
 		s.repo = r
 	}
@@ -304,9 +328,17 @@ func (c *Checker) State() State {
 	st.AutoCheck = s.enabled
 	st.IntervalHours = s.hours
 	st.TokenSet = s.token != ""
+	st.AutoDownload = s.autoDownload
 	if strings.TrimSpace(st.Repo) == "" {
 		st.Repo = s.repo
 	}
+	// 本地已就绪的安装包 + 本机安装方案：面板据此决定显示「下载」还是「安装并重启」。
+	// 每次 State() 都 stat 一次（几微秒），换来「刷新页面不用重新下载」的体验。
+	st.LocalPath, st.LocalBytes = "", 0
+	if st.UpdateAvailable {
+		st.LocalPath, st.LocalBytes = c.localAsset(st.AssetName, st.AssetSize)
+	}
+	st.Install = planFor(c.goos, st.LocalPath)
 	return st
 }
 
@@ -393,7 +425,48 @@ func (c *Checker) Check(ctx context.Context, force bool) State {
 			"发现新版本 "+st.Latest+"（当前 "+c.current+"）",
 			map[string]any{"current": c.current, "latest": st.Latest, "repo": st.Repo})
 	}
+	// 发现新版本就顺手把安装包下下来（默认开，见 config.UpdateSection.AutoDownload）。
+	// 放在后台：几十 MB 会拖住这次检查的响应，而面板只想知道「有没有新版本」。
+	c.autoDownload()
 	return c.State()
+}
+
+// autoDownload 在后台把匹配本机平台的安装包下到数据目录。
+//
+// 幂等由两处保证：本地已有同大小文件时 Download 直接跳过；并发调用由 dlMu 串行化。
+// 失败只记日志、不记事件 —— 这是「顺手做的事」，每轮检查都往事件日志里刷一条告警
+// 会把真正有用的告警淹掉，而面板上仍显示「未下载」，用户可以手动点下载重试。
+func (c *Checker) autoDownload() {
+	if !c.settings().autoDownload {
+		return
+	}
+	st := c.State()
+	if st.UpdateAvailable && st.Error == "" && st.Latest != "" && st.AssetName != "" {
+		if p, _ := c.localAsset(st.AssetName, st.AssetSize); p != "" {
+			return // 已经下好了
+		}
+	} else {
+		return
+	}
+	// Add 必须在 go 之前：放在 goroutine 里的话，等待方可能先一步返回
+	//（Add 还没执行），于是「等后台收尾」变成一句空话。
+	c.bg.Add(1)
+	go func() {
+		defer c.bg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), autoDownloadTimeout)
+		defer cancel()
+		res, err := c.Download(ctx)
+		if err != nil {
+			c.logf("[更新] 自动下载安装包失败: %v", err)
+			return
+		}
+		c.logf("[更新] 新版本安装包已就绪: %s（%.1f MiB）", res.Path, float64(res.Bytes)/(1<<20))
+		c.events.Info(eventlog.ChannelSystem, "update_downloaded",
+			"新版本 "+res.Version+" 的安装包已自动下载",
+			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
+		debuglog.Event(nil, "info", "update_auto_downloaded",
+			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
+	}()
 }
 
 func (c *Checker) runCheck(ctx context.Context, prev State) State {

@@ -3,6 +3,7 @@ import {
   ArrowRightLeft,
   Coins,
   HardDrive,
+  HardDriveDownload,
   Link2,
   Layers,
   BarChart3,
@@ -28,6 +29,7 @@ export type PageId =
   | "sessions"
   | "local"
   | "config"
+  | "updates"
   | "logs"
   | "requests";
 
@@ -48,6 +50,9 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "sessions", label: "关联会话", icon: Link2 },
   { id: "local", label: "本机客户端", icon: HardDrive },
   { id: "config", label: "配置", icon: Settings },
+  // 更新跟在配置后面：它整页是「动作」而不是偏好，混在配置页里既不容易被发现，
+  // 也不容易看懂点下去会发生什么（见 updates-page.tsx 的开头说明）。
+  { id: "updates", label: "更新", icon: HardDriveDownload },
   { id: "logs", label: "日志", icon: ScrollText },
   { id: "requests", label: "请求流水", icon: Activity },
 ];

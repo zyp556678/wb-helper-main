@@ -90,7 +90,13 @@ func asset(name string, size int64, url string) map[string]any {
 
 func newChecker(t *testing.T, f *fakeGitHub, cur string, goos, goarch string, sec config.UpdateSection) *Checker {
 	t.Helper()
-	return New(testConfig(t, sec), Options{
+	// 默认关掉「发现新版本就自动下载」：本文件里绝大多数用例都是**手工**驱动
+	// Download 并数请求次数 / 断言 skipped 的，而后台自动下载会先一步把包下好，
+	// 那些断言就量不到它们想量的事了。要测自动下载的用例自己显式打开。
+	if sec.AutoDownload == nil {
+		sec.AutoDownload = boolPtr(false)
+	}
+	c := New(testConfig(t, sec), Options{
 		Current:     cur,
 		Client:      f.Client(),
 		APIBase:     f.URL,
@@ -99,6 +105,19 @@ func newChecker(t *testing.T, f *fakeGitHub, cur string, goos, goarch string, se
 		DownloadDir: t.TempDir(),
 		Logf:        t.Logf,
 	})
+	// 后台自动下载可能还在跑：等它收尾，否则它会在测试结束后 t.Logf（panic）。
+	t.Cleanup(c.WaitBackground)
+	return c
+}
+
+// noAutoDownload 给测试用的 update 段：关掉「发现新版本就自动下载」。
+//
+// 本文件大多数用例都是**手工**驱动 Download 并数请求次数 / 断言 skipped 的，而后台
+// 自动下载会抢在它们之前把包下好（断言失真），还会在用例结束后继续 t.Logf ——
+// 那会让 `go test` 直接 panic，且报错看上去与用例毫无关系。
+// 要测自动下载的用例自己显式打开（见 TestAutoDownloadDefaultsTrue）。
+func noAutoDownload() config.UpdateSection {
+	return config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)}
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +432,7 @@ func TestDownloadWritesAssetAtomically(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -571,7 +590,7 @@ func TestDownloadRetriesTransientFailure(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -615,7 +634,7 @@ func TestDownloadDoesNotRetryHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
 	})
@@ -636,7 +655,7 @@ func TestCheckKeepsLastResultOnFailure(t *testing.T) {
 			asset("pkg_0.9.3_amd64.deb", 10, "https://github.com/o/r/releases/download/v0.9.3/pkg.deb"),
 		},
 	}))
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", config.UpdateSection{Repo: "o/r"})
+	c := newChecker(t, f, "0.9.2", "linux", "amd64", noAutoDownload())
 	good := c.Check(context.Background(), true)
 	if good.Error != "" || !good.UpdateAvailable {
 		t.Fatalf("前置检查应当成功且发现更新，实际 %+v", good)
@@ -659,7 +678,7 @@ func TestCheckKeepsLastResultOnFailure(t *testing.T) {
 func TestCheckThrottlesAfterFailure(t *testing.T) {
 	f := newFakeGitHub(t)
 	f.status = http.StatusInternalServerError
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", config.UpdateSection{Repo: "o/r"})
+	c := newChecker(t, f, "0.9.2", "linux", "amd64", noAutoDownload())
 	c.Check(context.Background(), true)
 	if f.calls != 1 {
 		t.Fatalf("第一次应当发一次请求，实际 %d", f.calls)
@@ -747,7 +766,7 @@ func TestDownloadUsesBrowserURLWithoutToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
 	})
@@ -786,7 +805,10 @@ func TestDownloadIsSerialized(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	// 关掉自动下载：这条用例量的是「两个并发 Download 只会真下一次」，而自动下载
+	// 也在调同一个入口 —— 它先把包下好之后，两个显式请求都会走「已存在」分支，
+	// 用例就量不到它想量的事了。
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -803,7 +825,6 @@ func TestDownloadIsSerialized(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-
 	for i, err := range errs {
 		if err != nil {
 			t.Fatalf("并发下载第 %d 个失败: %v", i, err)
@@ -858,7 +879,7 @@ func TestDownloadCleansStaleTempFiles(t *testing.T) {
 		t.Fatalf("造陈旧临时文件失败: %v", err)
 	}
 
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
+	c := New(testConfig(t, noAutoDownload()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})

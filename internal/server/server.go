@@ -80,7 +80,12 @@ type Server struct {
 	// cfgWatch 是 config.json 的内容摘要游标：判断文件是否被**外部**改过
 	//（面板保存走自己那条路，不该被监听循环当成外部改动重放）。
 	cfgWatch *config.Watch
-	start    time.Time
+	// restartFn 由 main 注入：请求网关「优雅关闭后用新二进制重新执行自己」，
+	// 安装更新成功后调用（见 /panel/api/update/install）。
+	// 用回调而不是在这里调 syscall.Exec：进程生命周期属于 main，而且 Windows
+	// 上根本没有 exec 这一说 —— 那边的重启由安装程序接管。
+	restartFn func()
+	start     time.Time
 
 	// panelFS 是面板静态资源（前端构建产物），由 main 注入。
 	panelFS fs.FS
@@ -167,6 +172,29 @@ func (s *Server) SetAccountMeta(store *accountmeta.Store) { s.accountMeta = stor
 
 // SetUpdateChecker 注入更新检查器（可选增强，nil 安全）。
 func (s *Server) SetUpdateChecker(checker *update.Checker) { s.updates = checker }
+
+// SetRestartFunc 注入「重启网关」的实现（由 main 提供）。
+//
+// 安装更新后需要重启才会跑上新版本。这个动作用回调表达，而不是在这里直接
+// syscall.Exec：进程生命周期属于 main（它才知道自己是怎么被拉起来的、要不要等
+// systemd 重启、exec 前后该怎么收尾），而且 Windows 上由安装程序接管这一步。
+func (s *Server) SetRestartFunc(fn func()) { s.restartFn = fn }
+
+// restartDelayAfterInstall 是「安装完成 → 请求重启」之间的等待。
+//
+// 为什么必须等：重启会掐断正在写响应的那条连接。紧接着重启的话，面板收到的是一个
+// 网络错误，用户会以为安装失败并重复点击（而那时网关已经在重启了）。
+// 700ms 足够把响应刷出去，又不至于让人觉得卡住。
+const restartDelayAfterInstall = 700 * time.Millisecond
+
+// requestRestart 在响应写回之后请求网关重启。
+func (s *Server) requestRestart(after time.Duration) {
+	if s.restartFn == nil {
+		s.logf("[更新] 本实例没有配置重启通路，请手动重启网关以运行新版本")
+		return
+	}
+	time.AfterFunc(after, s.restartFn)
+}
 
 // StartBackground 启动后台任务。
 func (s *Server) StartBackground(ctx context.Context) {
@@ -325,6 +353,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/panel/api/update", s.withPanelAuth(s.handlePanelUpdateRoute))
 	mux.HandleFunc("/panel/api/update/auto", s.withPanelAuth(s.setUpdateAutoCheck))
 	mux.HandleFunc("/panel/api/update/download", s.withPanelAuth(s.downloadUpdate))
+	mux.HandleFunc("/panel/api/update/install", s.withPanelAuth(s.installUpdate))
 
 	// ---- 面板：用量统计（切片 6）----
 	mux.HandleFunc("/panel/api/stats", s.withPanelAuth(s.handlePanelStats))

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy-gateway/internal/eventlog"
 	"workbuddy-gateway/internal/update"
@@ -43,7 +44,13 @@ func fakeGitHubForServer(t *testing.T, tag string) (*httptest.Server, []byte) {
 // attachChecker 给测试 Server 挂一个指向假 GitHub 的检查器。
 func attachChecker(t *testing.T, s *Server, fake *httptest.Server, dir string) *update.Checker {
 	t.Helper()
-	checker := update.New(s.config(), update.Options{
+	// 默认关掉「发现新版本就自动下载」：本文件量的是端点行为（状态、字段、开关落盘），
+	// 而后台自动下载会在用例结束后继续 t.Logf（go test 会因此 panic），
+	// 也会让「还没下载」这类前置条件在用例中途被悄悄满足。要测自动下载的用例自己打开。
+	cfg := s.config().Clone()
+	off := false
+	cfg.Update.AutoDownload = &off
+	checker := update.New(cfg, update.Options{
 		Current:     "0.9.2",
 		Client:      fake.Client(),
 		APIBase:     fake.URL,
@@ -52,6 +59,7 @@ func attachChecker(t *testing.T, s *Server, fake *httptest.Server, dir string) *
 		DownloadDir: dir,
 		Logf:        t.Logf,
 	})
+	t.Cleanup(checker.WaitBackground)
 	s.SetUpdateChecker(checker)
 	return checker
 }
@@ -235,4 +243,113 @@ func TestUpdateDownloadWritesPackage(t *testing.T) {
 	if res := s.events.Query(eventlog.Query{}); res.Total == 0 {
 		t.Error("下载成功后应当记一条事件")
 	}
+}
+
+// 安装端点：还没下载就点安装 → 409 + 一句「该做什么」，而不是 502。
+//
+// 用 502 的话用户会以为是网络抖动，去重试、去查网络，而真正的原因是自己还没点下载。
+func TestUpdateInstallRequiresDownloadedAsset(t *testing.T) {
+	s := newTestServer(t, "")
+	fake, _ := fakeGitHubForServer(t, "v0.9.3")
+	checker := attachChecker(t, s, fake, t.TempDir())
+	if st := checker.Check(context.Background(), true); st.Error != "" {
+		t.Fatalf("前置检查失败: %s", st.Error)
+	}
+
+	rec := httptest.NewRecorder()
+	s.installUpdate(rec, httptest.NewRequest(http.MethodPost, "/panel/api/update/install", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("应当 409（前提不满足），实际 %d（体=%s）", rec.Code, rec.Body.String())
+	}
+	body := decodeJSONBody(t, rec)
+	if body["ok"] != false {
+		t.Errorf("应当 ok=false，实际 %v", body["ok"])
+	}
+	detail, _ := body["detail"].(string)
+	if !strings.Contains(detail, "下载") {
+		t.Errorf("提示要指向「先下载」，实际 %q", detail)
+	}
+}
+
+// 安装端点只接受 POST（它是动作，不是状态查询）。
+func TestUpdateInstallRejectsGet(t *testing.T) {
+	s := newTestServer(t, "")
+	fake, _ := fakeGitHubForServer(t, "v0.9.3")
+	attachChecker(t, s, fake, t.TempDir())
+
+	rec := httptest.NewRecorder()
+	s.installUpdate(rec, httptest.NewRequest(http.MethodGet, "/panel/api/update/install", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("应当 405，实际 %d", rec.Code)
+	}
+}
+
+// 「自动下载」开关写进 config.json 的 update.auto_download，并回最新状态。
+func TestUpdateAutoDownloadSwitchPersists(t *testing.T) {
+	s := newTestServer(t, "")
+	fake, _ := fakeGitHubForServer(t, "v0.9.3")
+	attachChecker(t, s, fake, t.TempDir())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/update/auto",
+		strings.NewReader(`{"auto_download":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.setUpdateAutoCheck(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应当 200，实际 %d（体=%s）", rec.Code, rec.Body.String())
+	}
+	if body := decodeJSONBody(t, rec); body["auto_download"] != false {
+		t.Fatalf("响应里的开关状态不对: %v", body["auto_download"])
+	}
+	// 内存与磁盘都要落下来（面板与文件监听读的是它们）。
+	if s.config().UpdateAutoDownload() {
+		t.Error("内存里的开关没关掉")
+	}
+	raw, err := os.ReadFile(s.config().ConfigFile)
+	if err != nil {
+		t.Fatalf("读 config.json 失败: %v", err)
+	}
+	if !strings.Contains(string(raw), `"auto_download": false`) {
+		t.Errorf("config.json 里没写下来: %s", raw)
+	}
+	// 自动检查开关不受影响（两个开关各管各的）。
+	if !s.config().UpdateEnabled() {
+		t.Error("只改自动下载时不该动到自动检查")
+	}
+}
+
+// 两个字段都不给 → 400。默认 false 的话，一个拼错的字段名会静默变成「关掉自动检查」。
+func TestUpdateAutoEndpointRequiresAField(t *testing.T) {
+	s := newTestServer(t, "")
+	fake, _ := fakeGitHubForServer(t, "v0.9.3")
+	attachChecker(t, s, fake, t.TempDir())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/update/auto", strings.NewReader(`{"enabeld":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.setUpdateAutoCheck(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("拼错字段名应当 400，实际 %d（体=%s）", rec.Code, rec.Body.String())
+	}
+	if !s.config().UpdateEnabled() || !s.config().UpdateAutoDownload() {
+		t.Error("被拒绝的请求不该改动任何开关")
+	}
+}
+
+// 安装成功后请求重启：回调要被调用，且是在响应写回之后。
+func TestInstallRequestsRestartAfterInstall(t *testing.T) {
+	s := newTestServer(t, "")
+	restarted := make(chan struct{}, 1)
+	s.SetRestartFunc(func() { restarted <- struct{}{} })
+
+	s.requestRestart(10 * time.Millisecond)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("请求重启后回调没有被调用")
+	}
+
+	// 没有重启通路时只提示，不 panic（精简装配的实例就是这样）。
+	plain := newTestServer(t, "")
+	plain.requestRestart(0)
 }

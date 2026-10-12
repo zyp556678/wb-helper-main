@@ -17,6 +17,7 @@ import { SitesPage } from "@/pages/sites-page";
 import { LocalPage } from "@/pages/local-page";
 import { LinkedSessionsPage } from "@/pages/linked-sessions-page";
 import { TasksPage } from "@/pages/tasks-page";
+import { UpdatesPage } from "@/pages/updates-page";
 import { useLocalCapabilities } from "@/lib/use-local-capabilities";
 
 /**
@@ -90,6 +91,8 @@ export default function App() {
             </Suspense>
           ) : page === "config" ? (
             <ConfigPage />
+          ) : page === "updates" ? (
+            <UpdatesPage />
           ) : page === "credits" ? (
             <Suspense
               fallback={

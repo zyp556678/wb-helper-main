@@ -327,6 +327,22 @@ func runServe(args []string) {
 	// 不写进凭据、也不进账号池治理状态。
 	srv.SetAccountMeta(accountmeta.New(filepath.Join(cfg.WorkDir, "wb-account-meta.json")))
 	srv.SetUpdateChecker(updater)
+	// 「安装更新 → 自我重启」的接线。
+	//
+	// 自身路径在**启动时**就记下来：dpkg / ditto 覆盖安装之后，运行时再调
+	// os.Executable() 可能拿到指向已删除旧 inode 的路径（形如 "... (deleted)"），
+	// exec 它会跑起旧版本 —— 那正是「装完还是老版本」这类问题的来源。
+	selfExe, _ := os.Executable()
+	restartCh := make(chan struct{}, 1)
+	srv.SetRestartFunc(func() {
+		select {
+		case restartCh <- struct{}{}:
+		default:
+		}
+		// 与 SIGTERM 完全同一条优雅关闭路径：停 HTTP、刷统计、收本机代理，
+		// 收尾完成后再在 runServe 末尾决定要不要 exec。
+		stop()
+	})
 	// 客户端日志限流扫描（切片 19 追加）：WorkBuddy 桌面客户端直连官方，
 	// 它的模型限流不经过网关，只能从客户端日志还原（对齐 wb-switch 的扫日志兜底通路）。
 	if home, err := os.UserHomeDir(); err == nil {
@@ -401,6 +417,14 @@ func runServe(args []string) {
 	// （采样器周期是 1 分钟，被强杀或优雅退出都可能刚好错过那次写）。
 	statStore.FlushIfDirty()
 	log.Printf("网关已停止")
+
+	// 收尾完成后再决定要不要换上新装好的二进制（见 restart.go 的说明）。
+	// 必须放在最后：exec 会跳过所有 defer，先 exec 等于把上面这些清理全丢掉。
+	select {
+	case <-restartCh:
+		reExecSelf(selfExe)
+	default:
+	}
 }
 
 func printBanner(cfg *config.Config, p *pool.Pool, loaded int) {

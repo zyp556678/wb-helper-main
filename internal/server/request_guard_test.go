@@ -34,8 +34,15 @@ func sseServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request
 	)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		attempts++
-		n := attempts
+		// 只数**对话**请求。`withFakeUpstream` 改的是包级 Profile，于是上一个用例
+		// 遗留的后台协程（成长任务扫描之类）会把请求打到当前这个假上游上 ——
+		// 把它们算进 attempts 会让「上游被打了 1 次还是 2 次」这类断言失真，
+		// 而且是在 -count=2 或加并行时才现形的那种失真。
+		n := 0
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			attempts++
+			n = attempts
+		}
 		mu.Unlock()
 		handler(w, r, n)
 	}))

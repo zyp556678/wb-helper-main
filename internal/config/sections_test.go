@@ -178,7 +178,8 @@ func TestPromptOutboundSwitchesRoundTrip(t *testing.T) {
 	}
 }
 
-func readConfigJSON(t *testing.T, c *Config) map[string]any {	t.Helper()
+func readConfigJSON(t *testing.T, c *Config) map[string]any {
+	t.Helper()
 	data, err := os.ReadFile(c.ConfigFile)
 	if err != nil {
 		t.Fatalf("读取 config.json 失败: %v", err)
@@ -561,5 +562,39 @@ func TestEmptyModelsListClearsList(t *testing.T) {
 	}
 	if len(c.ModelAllow) != 1 || c.ModelAllow[0] != "c" {
 		t.Fatalf("同一次提交里未涉及的白名单不应被改动，实际 %#v", c.ModelAllow)
+	}
+}
+
+// TestUpdateAutoDownloadRoundTrip 自动下载开关：默认开、显式关能关掉、
+// 只改其它字段不会把它重置（用指针记「显式提交」正是为了这个）。
+func TestUpdateAutoDownloadRoundTrip(t *testing.T) {
+	c := newTestConfig(t)
+	if !c.UpdateAutoDownload() {
+		t.Fatal("未配置时应默认开启自动下载")
+	}
+
+	save(t, c, `{"update":{"auto_download":false}}`)
+	if c.UpdateAutoDownload() {
+		t.Fatal("显式关掉后仍报告开启")
+	}
+
+	// 只改间隔：不能把开关带回默认值（那会让「关掉自动下载」在下次改别的设置时失效）。
+	save(t, c, `{"update":{"check_hours":12}}`)
+	if c.UpdateAutoDownload() {
+		t.Fatal("局部提交不该重置自动下载开关")
+	}
+	if c.Update.CheckHours != 12 {
+		t.Fatalf("检查间隔没生效: %d", c.Update.CheckHours)
+	}
+
+	save(t, c, `{"update":{"auto_download":true}}`)
+	if !c.UpdateAutoDownload() {
+		t.Fatal("重新打开后应当报告开启")
+	}
+	// 落盘的键名与面板/文档一致。
+	raw := readConfigJSON(t, c)
+	upd, _ := raw["update"].(map[string]any)
+	if upd["auto_download"] != true {
+		t.Fatalf("config.json 里的键不对: %#v", upd)
 	}
 }

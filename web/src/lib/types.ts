@@ -2443,10 +2443,43 @@ export interface UpdateStatus {
   interval_hours: number;
   /** 是否配了私有仓库令牌（不回令牌原文）。 */
   token_set: boolean;
+  /** 发现新版本后是否自动下载安装包（config.json 的 update.auto_download，默认开）。 */
+  auto_download: boolean;
+  /** 本地已就绪的安装包（不存在或大小与 Release 不符时为空）。 */
+  local_path?: string;
+  local_bytes?: number;
+  /** 本机安装方案：确认框里如实展示要执行的命令与提醒。 */
+  install: UpdateInstallPlan;
   /** 检查失败的原因；非空时面板显示红色提示条。 */
   error?: string;
   /** 中性补充说明（例如「当前版本不是发行版本号，无法比较」）。 */
   detail?: string;
+}
+
+/** 本机「怎么装这个包」的方案（后端按平台给出，前端不自己拼）。 */
+export interface UpdateInstallPlan {
+  supported: boolean;
+  /** 将要执行的命令（多条时按行展示）。 */
+  command?: string;
+  /** 会弹系统授权框（Linux 的 pkexec）。 */
+  needs_auth?: boolean;
+  /** 安装成功后网关会自行重启到新版本。 */
+  restart?: boolean;
+  /** 不支持自动安装时的原因。 */
+  reason?: string;
+  /** 平台相关的额外提醒（macOS 无签名、Windows 会弹向导等）。 */
+  note?: string;
+}
+
+/** POST /panel/api/update/install 的响应。 */
+export interface UpdateInstallResult {
+  ok: boolean;
+  detail?: string;
+  /** 网关随后会自行重启（面板据此显示「正在重启」而不是「完成」）。 */
+  restart?: boolean;
+  /** 安装命令的输出（失败时最有价值：dpkg 会在这里说清缺什么）。 */
+  output?: string;
+  state?: UpdateStatus;
 }
 
 /** POST /panel/api/update/download 的响应。 */

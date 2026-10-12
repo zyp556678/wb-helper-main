@@ -19,8 +19,9 @@ import (
 //
 //	GET  /panel/api/update           读状态（不阻塞；没查过时后台补一次）
 //	POST /panel/api/update           立即检查（force，用户显式点的那一下）
-//	POST /panel/api/update/auto      开关「自动检查」，写进 config.json 的 update.enabled
+//	POST /panel/api/update/auto      开关「自动检查」/「自动下载」，写进 config.json 的 update 段
 //	POST /panel/api/update/download  把匹配本机平台的安装包下到数据目录
+//	POST /panel/api/update/install   把已下好的安装包装到本机（可能要提权、会重启网关）
 func (s *Server) handlePanelUpdateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.updates == nil {
 		// 没注入检查器（例如精简装配的实例）：如实说「未启用」，
@@ -66,7 +67,11 @@ func (s *Server) runUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.updates.Check(ctx, true))
 }
 
-// setUpdateAutoCheck 处理 `{"enabled": true|false}`：把自动检查开关写进 config.json。
+// setUpdateAutoCheck 处理 `{"enabled": bool}` / `{"auto_download": bool}`：
+// 把「自动检查」与「自动下载」两个开关写进 config.json 的 update 段。
+//
+// 两个开关共用一条端点，是因为它们的读写链路完全一样（都是 update 段的布尔字段），
+// 分成两条会多出一份几乎相同的错误处理。传哪个改哪个，两个都可以传。
 //
 // 复用配置层的 SavePatch（而不是自己写文件）：它同时负责原子替换、保留用户手写的
 // 未知键、以及把新配置推给运行期组件 —— 自己写一份迟早会漏掉其中一环。
@@ -76,22 +81,29 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		Enabled *bool `json:"enabled"`
+		Enabled      *bool `json:"enabled"`
+		AutoDownload *bool `json:"auto_download"`
 	}
 	if err := decodeBody(r, &payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("请求体解析失败："+err.Error()))
 		return
 	}
-	// 必须显式传 enabled。用指针判空而不是默认 false：默认 false 的话，
+	// 必须显式传至少一个字段。用指针判空而不是默认 false：默认 false 的话，
 	// 一个拼错的字段名会静默变成「关掉自动检查」，用户以为开着、实际关了。
-	if payload.Enabled == nil {
-		writeJSON(w, http.StatusBadRequest, errBody(`缺少 enabled 字段（应为 {"enabled": true} 或 {"enabled": false}）`))
+	if payload.Enabled == nil && payload.AutoDownload == nil {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`缺少字段（应为 {"enabled": true} 或 {"auto_download": false}）`))
 		return
 	}
 
-	patch, err := json.Marshal(map[string]any{
-		"update": map[string]any{"enabled": *payload.Enabled},
-	})
+	updates := map[string]any{}
+	if payload.Enabled != nil {
+		updates["enabled"] = *payload.Enabled
+	}
+	if payload.AutoDownload != nil {
+		updates["auto_download"] = *payload.AutoDownload
+	}
+	patch, err := json.Marshal(map[string]any{"update": updates})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("构造配置补丁失败："+err.Error()))
 		return
@@ -99,22 +111,87 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 	// 写时复制，与 /panel/api/config 同款：先克隆，成功再整体换指针。
 	next := s.config().Clone()
 	if _, _, err := next.SavePatch(patch); err != nil {
-		writeJSON(w, http.StatusBadRequest, errBody("保存自动检查开关失败："+err.Error()))
+		writeJSON(w, http.StatusBadRequest, errBody("保存更新设置失败："+err.Error()))
 		return
 	}
-	s.cfgPtr.Store(next)
-	s.applyRuntimeConfig()
+	s.storeConfig(next)
 
-	// 刚打开开关就顺手查一次：否则用户要等到下一个周期（默认 6 小时）才有结果，
+	// 刚打开「自动检查」就顺手查一次：否则用户要等到下一个周期（默认 6 小时）才有结果，
 	// 会以为开关没生效。这是后台进行，不阻塞本次响应。
-	if *payload.Enabled {
+	if payload.Enabled != nil && *payload.Enabled {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			s.updates.Check(ctx, true)
 		}()
 	}
+	// 刚打开「自动下载」而本地还缺包时，立刻补一次下载：否则要等到下一次检查
+	//（可能 6 小时后）才会下，用户会以为开关没生效。同样是后台进行。
+	if payload.AutoDownload != nil && *payload.AutoDownload {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			s.updates.Check(ctx, false)
+		}()
+	}
 	writeJSON(w, http.StatusOK, s.updateState(false))
+}
+
+// installUpdate 把「已经下好的」安装包装到本机。
+//
+// 端点**不接受客户端传路径**：要装哪个文件由 internal/update 从当前检查结果推导
+// （匹配本机平台的资产名，且在下载目录里、大小与 Release 一致），因此不存在
+// 「面板让网关执行任意文件」的面。
+//
+// 为什么这一步要人点一下：安装会覆盖已装好的程序、结束正在跑的进程、必要时提权，
+// 失败时可能留下一个既起不来也没有回退版本的现场。检测与下载是只读的，可以自动。
+func (s *Server) installUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.updates == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("本实例未启用更新检查"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errBody("仅支持 POST"))
+		return
+	}
+	// 提权框可能要等用户按指纹/输密码，给足 10 分钟；dpkg/ditto 本身都在秒级。
+	//
+	// 刻意**不**挂请求的 ctx：安装一旦开始就不该因为浏览器关了、网络断了而半途而废 ——
+	// 一个「装到一半」的 dpkg 比安装失败难收拾得多。下载可以随请求取消（幂等可重来），
+	// 安装不行。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// 前提不满足（还没下载、没有新版本、平台没产物）与「安装真的失败了」要分开：
+	// 前者是 409 + 一句可操作的话，后者才是 502。
+	if err := s.updates.Ready(); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "detail": err.Error()})
+		return
+	}
+
+	res, err := s.updates.Install(ctx)
+	if err != nil {
+		s.events.Warn(eventlog.ChannelSystem, "update_install_failed", "安装新版本失败："+err.Error(), nil)
+		writeActionError(w, err)
+		return
+	}
+	s.events.Info(eventlog.ChannelSystem, "update_installed", "新版本安装完成", map[string]any{
+		"restart": res.Restart,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      res.OK,
+		"detail":  res.Detail,
+		"restart": res.Restart,
+		"output":  res.Output,
+		// 装完把最新状态一并回给面板：重启途中面板还能用这份数据渲染「正在重启」。
+		"state": s.updateState(false),
+	})
+
+	// 必须**先**把响应写回面板，再请求重启：重启会立刻掐断这条连接，
+	// 紧接着发生的话面板只会看到「请求失败」，用户会以为安装失败并重复点击。
+	if res.Restart {
+		s.requestRestart(restartDelayAfterInstall)
+	}
 }
 
 // downloadUpdate 下载匹配本机平台的安装包。

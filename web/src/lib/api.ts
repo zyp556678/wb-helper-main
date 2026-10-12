@@ -73,6 +73,7 @@ import type {
   TaskVouchersResponse,
   TokenStatistics,
   UpdateDownloadResult,
+  UpdateInstallResult,
   UpdateStatus,
 } from "@/lib/types";
 
@@ -1267,6 +1268,16 @@ export function setUpdateAutoCheck(enabled: boolean) {
 }
 
 /**
+ * 开关「自动下载」（POST /panel/api/update/auto）。
+ *
+ * 写的是 config.json 的 `update.auto_download`。打开时后端会顺手补一次检查，
+ * 因此返回的状态里可能已经带着下载好的安装包。
+ */
+export function setUpdateAutoDownload(enabled: boolean) {
+  return request<UpdateStatus>("/update/auto", { method: "POST", body: { auto_download: enabled } });
+}
+
+/**
  * 下载匹配本机平台的安装包（POST /panel/api/update/download）。
  *
  * 动作型端点：<500 不抛异常，`{ok:false,detail}` 由调用方原样展示 ——
@@ -1276,6 +1287,19 @@ export function setUpdateAutoCheck(enabled: boolean) {
  */
 export function downloadUpdate() {
   return actionRequest<UpdateDownloadResult>("/update/download", {});
+}
+
+/**
+ * 把已下载的安装包装到本机（POST /panel/api/update/install）。
+ *
+ * **破坏性动作**：会覆盖已装好的程序、结束正在跑的进程、必要时弹系统授权框；
+ * 之后网关会自行重启（restart=true），面板要在响应拿到**之后**才开始等它回来。
+ *
+ * 端点不接受传路径：装哪个文件由后端从当前检查结果推导，前端无法让它执行任意文件。
+ * 提权框可能要等用户操作，请求可能持续很久（后端给 10 分钟）。
+ */
+export function installUpdate() {
+  return actionRequest<UpdateInstallResult>("/update/install", {});
 }
 
 // -----------------------------------------------------------------------------

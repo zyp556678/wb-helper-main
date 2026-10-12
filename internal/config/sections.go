@@ -250,6 +250,16 @@ type UpdateSection struct {
 	// 而不是报「已是最新」—— 把「查不到」说成「没有新版本」会让用户永远等不到更新，
 	// 而且没有任何迹象表明哪里配错了。
 	Token string `json:"token"`
+	// AutoDownload 决定「发现新版本后自动把安装包下到数据目录」是否开启，默认 **true**。
+	//
+	// 为什么默认开：**下载不是破坏性动作** —— 它只是往数据目录里放一个文件，
+	// 不改动任何已安装的东西、不重启进程，最坏结果是白占几十 MB 磁盘。
+	// 而默认关的后果很实在：用户点开面板才发现还得等一次几十 MB 的下载，
+	// 用慢网络时那一步恰好最贵。
+	//
+	// 真正破坏性的那一步（运行安装程序、覆盖已装好的程序并重启网关）**不在配置里**：
+	// 它必须由人在面板上点一下并确认，见 internal/update/install.go 的开头说明。
+	AutoDownload *bool `json:"auto_download"`
 }
 
 // ApplyDefaults 填充未配置字段的默认值（口径与 wb2api-panel 一致）。
@@ -686,6 +696,11 @@ func (c *Config) UpdateEnabled() bool {
 // UpdatePrerelease 报告预发布版本是否参与比较（默认 false）。
 func (c *Config) UpdatePrerelease() bool {
 	return c.Update.IncludePrerelease != nil && *c.Update.IncludePrerelease
+}
+
+// UpdateAutoDownload 报告「发现新版本后自动下载安装包」是否开启（默认 true）。
+func (c *Config) UpdateAutoDownload() bool {
+	return c.Update.AutoDownload == nil || *c.Update.AutoDownload
 }
 
 // UpdateToken 取更新源令牌：config.json 里的优先，其次环境变量 WB_UPDATE_TOKEN。

@@ -114,6 +114,7 @@ func (s *Server) configView() map[string]any {
 			"check_hours":        c.Update.CheckHours,
 			"repo":               c.Update.Repo,
 			"include_prerelease": c.UpdatePrerelease(),
+			"auto_download":      c.UpdateAutoDownload(),
 			"token_set":          c.UpdateToken() != "",
 		},
 
@@ -167,16 +168,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("配置保存失败: "+err.Error()))
 		return
 	}
-	s.cfgPtr.Store(next)
-
-	// 把新配置推给运行时组件（这一步才是「热生效」的实质）
-	s.applyRuntimeConfig()
-
-	// 记下刚写进磁盘的内容：文件监听据此不再把这次保存当成「外部改动」重放一遍。
-	// 反过来说，面板保存一次就「买断」了这份文件内容的监听 —— 只有下一次外部改动才会被处理。
-	if data, err := os.ReadFile(next.ConfigFile); err == nil {
-		s.cfgWatch.MarkApplied(data)
-	}
+	s.storeConfig(next)
 
 	s.logf("[配置] 已保存（热生效 %v，需重启 %v）", applied, needRestart)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -184,6 +176,24 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 		"need_restart": needRestart,
 		"config":       s.configView(),
 	})
+}
+
+// storeConfig 换入新配置快照、推给运行期组件，并把刚写盘的内容记为「已应用」。
+//
+// 所有**由本进程写盘**的保存路径都要走这里（面板补丁、更新页的开关）。
+// 少标记一次，文件监听就会把自己刚写的内容当成外部改动再重放一遍：
+// 多一次无意义的换快照，还会多一行「检测到 config.json 改动」——
+// 让「这份配置是谁改的」这条排障线索变模糊。
+func (s *Server) storeConfig(next *config.Config) {
+	s.cfgPtr.Store(next)
+	// 把新配置推给运行时组件（这一步才是「热生效」的实质）。
+	s.applyRuntimeConfig()
+	if next == nil {
+		return
+	}
+	if data, err := os.ReadFile(next.ConfigFile); err == nil {
+		s.cfgWatch.MarkApplied(data)
+	}
 }
 
 // applyRuntimeConfig 把配置同步到治理层与粘性表。
