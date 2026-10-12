@@ -343,10 +343,6 @@ pub fn ensure_frameless(app: &AppHandle) -> bool {
     }
 }
 
-fn frameless() -> bool {
-    FRAMELESS.load(Ordering::Relaxed)
-}
-
 /// 在 URL 的路径与 fragment 之间插入 `?host=desktop`。
 ///
 /// 为什么用 query 而不是 fragment：壳注入的密钥走 fragment，而面板读到密钥后会立刻
