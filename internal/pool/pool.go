@@ -165,8 +165,11 @@ type Pool struct {
 	// loadErr 记录最近一次凭据加载的错误（空串表示正常）。
 	// 用原子指针而不是 p.mu：Load 在返回前已释放锁，避免与它的锁序纠缠。
 	loadErr atomic.Pointer[string]
-	cfg     *config.Config
-	client  *upstream.Client
+	// cfg 是当前生效的配置快照。用原子指针而不是裸字段：配置可**热加载**
+	//（面板保存 / config.json 文件监听），而选号等热路径在并发读它。
+	cfg atomic.Pointer[config.Config]
+	// client 是上游访问客户端（凭据刷新、额度查询、任务等都用它）。
+	client *upstream.Client
 	// Logf 是日志输出函数，由 main 注入（默认空 = 不输出）。
 	Logf func(format string, args ...any)
 
@@ -241,10 +244,26 @@ func (p *Pool) AccountsBlockedByCreditFloor(paidSites map[string]bool, model str
 
 // New 构造账号池。
 func New(cfg *config.Config, client *upstream.Client) *Pool {
-	p := &Pool{cfg: cfg, client: client, Strategy: "weighted"}
+	p := &Pool{client: client, Strategy: "weighted"}
+	p.cfg.Store(cfg)
 	d := DefaultGov()
 	p.govParams.Store(&d)
 	return p
+}
+
+// config 取当前生效的配置快照（每次调用都 Load，不要缓存到局部变量）。
+func (p *Pool) config() *config.Config {
+	return p.cfg.Load()
+}
+
+// SetConfig 换入新的配置快照。
+//
+// 面板保存与 config.json 文件监听都会调用它 —— 不换快照，池里的
+// 「模型专属账号名单」等判据会一直停在启动那一刻，表现为「配置改了不生效」。
+func (p *Pool) SetConfig(cfg *config.Config) {
+	if cfg != nil {
+		p.cfg.Store(cfg)
+	}
 }
 
 // newAccount 构造账号并接上共享治理参数。
@@ -306,7 +325,7 @@ func (p *Pool) LoadError() string {
 }
 
 func (p *Pool) Load() (int, []error) {
-	paths := auth.Discover(p.cfg.WorkDir, p.cfg.AuthFile, p.cfg.AuthDir, p.cfg.AuthExplicit)
+	paths := auth.Discover(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
 
 	var (
 		accs []*Account
@@ -348,7 +367,7 @@ func (p *Pool) Load() (int, []error) {
 // 指纹变了（外部改过文件，例如重新登录或别处刷新了令牌）才重建对象，
 // 并把可保留的运行状态迁移过去。
 func (p *Pool) Reload() bool {
-	paths := auth.Discover(p.cfg.WorkDir, p.cfg.AuthFile, p.cfg.AuthDir, p.cfg.AuthExplicit)
+	paths := auth.Discover(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()

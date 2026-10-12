@@ -454,11 +454,11 @@ func (p *Pool) loadMarkers(paths []string) map[string]string {
 // CredentialPathFor 生成新登录账号的凭据文件路径。
 // 放在「凭据目录」下（如果配置了 -auth-dir），否则放在工作目录。
 func (p *Pool) CredentialPathFor(uid string) string {
-	dir := p.cfg.WorkDir
-	if strings.TrimSpace(p.cfg.AuthDir) != "" {
-		dir = p.cfg.AuthDir
+	dir := p.config().WorkDir
+	if strings.TrimSpace(p.config().AuthDir) != "" {
+		dir = p.config().AuthDir
 		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(p.cfg.WorkDir, dir)
+			dir = filepath.Join(p.config().WorkDir, dir)
 		}
 	}
 	name := "workbuddy"

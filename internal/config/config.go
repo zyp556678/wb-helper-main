@@ -2,8 +2,10 @@
 //
 // 配置分两层：
 //   - 启动层（Addr/Port/APIKey/凭据来源）：只能由命令行指定，改动需重启。
-//   - 运行层（上游超时/调试日志/模型黑白名单）：可由工作目录 config.json 覆盖，
-//     属于装配期字段，同样需要重启生效；后续切片会补齐面板在线改配置的热生效。
+//   - 运行层（上游超时/调试日志/模型黑白名单/治理与调度）：可由工作目录 config.json 覆盖。
+//     其中治理与调度、模型名单、上游超时都能**热生效**（面板保存即生效，手动改文件
+//     由文件监听接管，见 server.watchConfigLoop）；`server.read_timeout` 与
+//     `debug.enabled` 仍是装配期字段，改了要重启。
 package config
 
 import (
@@ -252,6 +254,19 @@ type Config struct {
 	ConfigFile string
 	Control    *http.Client // 控制类短请求（有总时长上限）
 	Chat       *http.Client // 对话流（无总时长上限，只受空闲看门狗约束）
+	// hotTransport 是 Control / Chat 共用的那份 Transport 外壳，用于让
+	// 「上游响应头等待上限」在配置热加载后生效（见 transport.go）。
+	// Clone 会连指针一起复制 —— 连接池与这层热改语义都只有一套。
+	hotTransport *HotTransport
+}
+
+// SetHeaderTimeoutSource 注入「当前响应头等待上限」的来源（见 HotTransport）。
+// 装配完成后由 server 调用一次；注入前 HotTransport 用装配时的值。
+func (c *Config) SetHeaderTimeoutSource(fn func() time.Duration) {
+	if c == nil || c.hotTransport == nil {
+		return
+	}
+	c.hotTransport.SetTimeoutSource(fn)
 }
 
 // Load 构建配置：opt 由命令行填充，随后读取工作目录 config.json 覆盖运行层。
@@ -295,7 +310,26 @@ func Load(opt *Config) (*Config, error) {
 	cfg.WorkDir = dir
 	cfg.ConfigFile = filepath.Join(dir, "config.json")
 
-	// 默认值
+	if err := cfg.loadRuntimeFile(); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.buildClients(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// resetRuntimeDefaults 把「文件驱动」的运行层字段恢复成默认值。
+//
+// 必须在读 config.json **之前**调用：文件是运行层的唯一真源，只有从默认值起步再叠加
+// 文件里写了的键，才能让「从文件里删掉一个键」等价于「回到默认值」。反过来说，
+// 如果直接在旧值上叠加，删掉的键会留着上一次的值 —— 表现为「配置删了却依然生效」，
+// 比「改了没生效」更难查。
+//
+// 不碰启动层字段（Addr/Port/APIKey/凭据来源/代理/WorkDir/ConfigFile/两个扫描间隔），
+// 它们只能由命令行决定。
+func (cfg *Config) resetRuntimeDefaults() {
 	cfg.HeaderTimeout = DefaultUpstreamHeaderTimeout
 	cfg.IdleTimeout = DefaultUpstreamIdleTimeout
 	cfg.TransientRetries = DefaultTransientRetries
@@ -305,11 +339,33 @@ func Load(opt *Config) (*Config, error) {
 	cfg.RequestArchiveEnabled = true
 	cfg.RequestRetentionDays = 7
 	cfg.RequestArchiveMaxMB = 100
+	cfg.DebugEnabled = false
+	cfg.ModelBlock = nil
+	cfg.ModelAllow = nil
+	cfg.ModelAccountRules = nil
+	cfg.Cooldown = CooldownSection{}
+	cfg.Pool = PoolSection{}
+	cfg.Sticky = StickySection{}
+	cfg.Schedule = ScheduleSection{}
+	cfg.Server = ServerSection{}
+	cfg.Prompt = PromptSection{}
+	cfg.Tasks = TasksSection{}
+	cfg.Local = LocalSection{}
+	cfg.Update = UpdateSection{}
+	cfg.ModelsNPM = nil
+	cfg.ModelsProbe = nil
+	cfg.poolPresent = false
+}
+
+// loadRuntimeFile 以「默认值 + config.json」重建运行层，并做一次完整校验。
+// 文件不存在视为空配置（全用默认值）；其他读取错误如实返回。
+func (cfg *Config) loadRuntimeFile() error {
+	cfg.resetRuntimeDefaults()
 
 	if raw, err := os.ReadFile(cfg.ConfigFile); err == nil {
 		var f runtimeFile
 		if err := json.Unmarshal(raw, &f); err != nil {
-			return nil, errors.New("config.json 解析失败: " + err.Error())
+			return errors.New("config.json 解析失败: " + err.Error())
 		}
 		// 记录哪些段在文件里真实出现过：max_in_flight 的 0 是合法值（表示不限），
 		// 因此必须区分「未配置」与「显式配成 0」，否则默认值无法正确落地。
@@ -353,25 +409,40 @@ func Load(opt *Config) (*Config, error) {
 		cfg.ModelsNPM = f.ModelsNPM
 		cfg.ModelsProbe = f.ModelsProbe
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, errors.New("读取 config.json 失败: " + err.Error())
+		return errors.New("读取 config.json 失败: " + err.Error())
 	}
 
 	cfg.ApplyDefaults()
 	if err := cfg.ScheduleErr(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := cfg.ServerErr(); err != nil {
-		return nil, err
+		return err
 	}
+	return nil
+}
 
-	if err := cfg.buildClients(); err != nil {
+// ReloadFromFile 重新读一遍 config.json，返回新的配置快照。
+//
+// 用于 config.json 的**文件监听热加载**（外部编辑器改文件不再需要重启）。
+// 以当前配置为底（用 Clone）是为了保住启动层字段与已装配的 http.Client ——
+// 连接池只有一套，换快照不换连接。运行层则完全由文件决定（见 loadRuntimeFile）。
+//
+// 调用方拿到新快照后自行换指针（写时复制，见 server.watchConfigLoop）：
+// 校验失败时返回错误，调用方保留上一份有效配置。
+func (c *Config) ReloadFromFile() (*Config, error) {
+	next := c.Clone()
+	if err := next.loadRuntimeFile(); err != nil {
 		return nil, err
 	}
-	return cfg, nil
+	return next, nil
 }
 
 // buildClients 装配两个 http.Client：控制类有总时长上限，对话流不设总时长。
 // 两者共用同一 Transport，因此上游超时策略只有一份实现。
+//
+// Transport 外面套一层 HotTransport：上游超时属于「改了想立刻生效」的参数，
+// 但字段不能原地改，只能改完克隆（见 transport.go）。
 func (c *Config) buildClients() error {
 	transport := &http.Transport{
 		// 响应头等待上限：只约束「发出请求 → 收到响应头」，不约束流式响应体。
@@ -388,9 +459,24 @@ func (c *Config) buildClients() error {
 		}
 		transport.Proxy = http.ProxyURL(u)
 	}
-	c.Control = &http.Client{Transport: transport, Timeout: DefaultControlTimeout}
+	hot := NewHotTransport(transport, nil)
+	c.hotTransport = hot
+	c.Control = &http.Client{Transport: hot, Timeout: DefaultControlTimeout}
 	// 对话流没有总时长上限：长思考/长输出不会被掐断，改由空闲读超时兜底。
-	c.Chat = &http.Client{Transport: transport, Timeout: 0}
+	c.Chat = &http.Client{Transport: hot, Timeout: 0}
+	return nil
+}
+
+// transportBase 取 Control 底层的 *http.Transport。
+// Control 的 Transport 是热改外壳（HotTransport），不能直接断言成 *http.Transport ——
+// 断言失败会让调用方悄悄回落到 http.DefaultTransport，丢掉上面的连接池参数。
+func (c *Config) transportBase() *http.Transport {
+	switch t := c.Control.Transport.(type) {
+	case *HotTransport:
+		return t.Base()
+	case *http.Transport:
+		return t
+	}
 	return nil
 }
 
@@ -413,10 +499,10 @@ func (c *Config) UpdateClient() *http.Client {
 		// 显式配了代理就以它为准 —— 与对话流量同一出口，行为可预期。
 		return c.Control
 	}
-	base, ok := c.Control.Transport.(*http.Transport)
-	if !ok || base == nil {
-		base, ok = http.DefaultTransport.(*http.Transport)
-		if !ok {
+	base := c.transportBase()
+	if base == nil {
+		base, _ = http.DefaultTransport.(*http.Transport)
+		if base == nil {
 			return c.Control
 		}
 	}

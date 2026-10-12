@@ -140,6 +140,23 @@ func TestChatRetryDisabledByZero(t *testing.T) {
 	}
 }
 
+// TestChatRetryPolicyHookOverridesFields 验证重试策略钩子优先于装配期字段。
+//
+// 钩子的用途是配置热加载：`upstream.transient_retries` 是热生效的，
+// 而字段只是装配时的拷贝 —— 钩子没接上就会「配置里改成 0，实际还在重试两次」。
+func TestChatRetryPolicyHookOverridesFields(t *testing.T) {
+	ft := &fakeTransport{failFirst: 1, transient: true}
+	c := newRetryClient(ft, 5) // 字段写着 5 次：这一轮不该被用到
+	c.RetryPolicy = func() (int, time.Duration) { return 0, 0 }
+
+	if _, err := c.Chat(context.Background(), &CredentialView{UID: "u1"}, testProfile(), []byte(`{}`)); err == nil {
+		t.Fatal("钩子返回 0 时应禁用重试，直接报错")
+	}
+	if ft.count() != 1 {
+		t.Fatalf("钩子禁用重试时只应尝试 1 次，实际 %d 次", ft.count())
+	}
+}
+
 // TestChatRetryHonoursContextCancel 客户端已断开时不再重试（避免白烧额度）。
 func TestChatRetryHonoursContextCancel(t *testing.T) {
 	ft := &fakeTransport{failFirst: 99, transient: true}

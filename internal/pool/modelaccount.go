@@ -32,7 +32,7 @@ func (a *Account) CredentialFileName() string {
 
 // ModelAccountRuleConfigured 报告该模型是否配了有效的账号名单。
 func (p *Pool) ModelAccountRuleConfigured(model string) bool {
-	rule, ok := p.cfg.ModelAccountRuleFor(model)
+	rule, ok := p.config().ModelAccountRuleFor(model)
 	return ok && rule.Configured()
 }
 
@@ -42,7 +42,7 @@ func (p *Pool) modelAccountAllowedLocked(model string, acc *Account) (bool, stri
 	if acc == nil {
 		return false, "账号为空"
 	}
-	rule, ok := p.cfg.ModelAccountRuleFor(model)
+	rule, ok := p.config().ModelAccountRuleFor(model)
 	if !ok || !rule.Configured() {
 		return true, ""
 	}

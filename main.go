@@ -428,6 +428,8 @@ func printBanner(cfg *config.Config, p *pool.Pool, loaded int) {
 	}
 	fmt.Printf("   上游超时:      响应头等待 %v / 流空闲 %v（%s 可覆盖）\n",
 		cfg.HeaderTimeout, cfg.IdleTimeout, cfg.ConfigFile)
+	fmt.Printf("   配置热加载:    %s 的改动 1 秒内自动生效（read_timeout / debug 需重启）\n",
+		cfg.ConfigFile)
 	fmt.Printf("   账号池:        %d 个账号\n", loaded)
 	if loaded > 0 {
 		fmt.Println("   ----------------------------------------------------------")

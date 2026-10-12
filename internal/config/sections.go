@@ -985,10 +985,13 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 	}
 }
 
-// hotFields 是需要重启才能生效的配置前缀。
-// 治理与调度参数都可热生效；上游超时属于装配期字段（Transport 在启动时建好），
-// 因此列在这里，保存后提示用户重启。
-var hotFields = []string{"cooldown", "pool", "session_sticky", "schedule", "models", "prompt", "local", "tasks", "update"}
+// hotFields 是可**热生效**的配置段前缀（保存后立即生效，不需要重启）。
+//
+// 治理与调度参数、模型名单都在此列；上游超时也在此列 —— 它的生效方式是
+// 克隆 Transport（见 transport.go），不属于装配期字段了。
+// 仍然需要重启的是 `server.read_timeout`（http.Server 只在启动时构造一次）与
+// `debug.enabled`（调试事件流的落盘开关在启动时决定）。
+var hotFields = []string{"cooldown", "pool", "session_sticky", "schedule", "models", "prompt", "local", "tasks", "update", "upstream"}
 
 // SavePatch 把补丁写入 config.json 并返回 (已热生效字段, 需重启字段)。
 //
@@ -1070,9 +1073,6 @@ func (c *Config) SavePatch(body []byte) ([]string, []string, error) {
 			applied = append(applied, k)
 		}
 	}
-	if _, ok := patchMap["upstream"]; ok {
-		needRestart = append(needRestart, "upstream")
-	}
 	if _, ok := patchMap["server"]; ok {
 		// 入站读取上限属装配期字段：http.Server 只在启动时构造一次。
 		needRestart = append(needRestart, "server.read_timeout")
@@ -1083,7 +1083,9 @@ func (c *Config) SavePatch(body []byte) ([]string, []string, error) {
 	return applied, needRestart, nil
 }
 
-// syncUpstreamFromPatch 处理上游超时补丁：只更新内存值供展示，实际生效需重启。
+// syncUpstreamFromPatch 处理上游超时补丁：写进当前快照的内存值。
+// 真正生效由 HotTransport 在每次 RoundTrip 时完成（发现值变了就克隆一份 Transport）——
+// 新请求用新超时，正在读取的旧流继续用旧的那份读到底。
 func (c *Config) syncUpstreamFromPatch(p *Patch) {
 	if p.Upstream == nil {
 		return

@@ -32,8 +32,14 @@ type Client struct {
 	TransientRetries int
 	// TransientRetryBackoff 是两次重试之间的等待。
 	TransientRetryBackoff time.Duration
-	Verbose               bool
-	Logf                  func(format string, args ...any)
+	// RetryPolicy 是可选钩子：返回**当前**应生效的（重试次数, 退避间隔）。
+	//
+	// 为什么需要它：这两个值来自 config.json 的 `upstream` 段，而配置文件是热加载的
+	// （面板保存 / 文件监听），上面两个字段却只是装配期的拷贝 —— 不接钩子就会出现
+	// 「配置里改成 0，实际还在重试两次」。nil 时用上面的字段（测试与旧调用点不变）。
+	RetryPolicy func() (int, time.Duration)
+	Verbose     bool
+	Logf        func(format string, args ...any)
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -258,8 +264,13 @@ func (c *Client) FetchModels(ctx context.Context, cred *CredentialView, p *Profi
 // Chat 转发一次对话请求，返回原始 SSE 响应。调用方负责关闭 Body。
 //
 // 走 doChatWithRetry：对「请求头尚未写出」时的瞬时网络错误做有界重试。
+// 重试策略每次取一遍：配置里的 `upstream.transient_retries` 可热改。
 func (c *Client) Chat(ctx context.Context, cred *CredentialView, p *Profile, body []byte) (*http.Response, error) {
-	return c.doChatWithRetry(ctx, cred, p, body, c.TransientRetries, c.TransientRetryBackoff)
+	retries, backoff := c.TransientRetries, c.TransientRetryBackoff
+	if c.RetryPolicy != nil {
+		retries, backoff = c.RetryPolicy()
+	}
+	return c.doChatWithRetry(ctx, cred, p, body, retries, backoff)
 }
 
 // IsTransientNetworkError 判断错误是否为「瞬时网络故障」——这类错误值得重试。

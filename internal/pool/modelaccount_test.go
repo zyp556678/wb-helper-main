@@ -25,7 +25,7 @@ func setModelAccountRules(p *Pool, model string, allow, block []string) {
 		}
 	}
 	rules[model] = r
-	p.cfg.ModelAccountRules = rules
+	p.config().ModelAccountRules = rules
 }
 
 // TestModelAccountRuleBlocksUnlistedAccount 白名单之外的账号不得被选中。

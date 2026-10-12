@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -76,7 +77,10 @@ type Server struct {
 	// updates 是更新检查器（internal/update）。
 	// 可选增强：nil 时面板的「检查更新」返回 503，其余功能不受影响。
 	updates *update.Checker
-	start   time.Time
+	// cfgWatch 是 config.json 的内容摘要游标：判断文件是否被**外部**改过
+	//（面板保存走自己那条路，不该被监听循环当成外部改动重放）。
+	cfgWatch *config.Watch
+	start    time.Time
 
 	// panelFS 是面板静态资源（前端构建产物），由 main 注入。
 	panelFS fs.FS
@@ -112,8 +116,29 @@ func New(cfg *config.Config, p *pool.Pool, client *upstream.Client, cat *catalog
 		//（否则每次网关重启后第一次开账号页，都要对每个国内站账号各打一次上游）。
 		checkinCache: newCheckinStatusCache(),
 		panelFS:      panelFS,
+		cfgWatch:     config.NewWatch(),
 	}
 	s.cfgPtr.Store(cfg)
+
+	// 记下启动时读到的 config.json：文件监听据此判断「是不是外部改的」。
+	// 读不到（没有配置文件）也不影响 —— 那时 Changed 首次总是 true，
+	// 于是「运行期间新建一份 config.json」也能被当成一次改动接住。
+	if data, err := os.ReadFile(cfg.ConfigFile); err == nil {
+		s.cfgWatch.MarkApplied(data)
+	}
+
+	// 上游超时 / 瞬时重试策略热改的接线。
+	//
+	// Transport 与上游客户端都是**跨配置快照共享**的（Clone 不复制 http.Client，
+	// 连接池只有一套），所以这里注入的是「读当前快照」的钩子，而不是某个值 ——
+	// 注入值会被下一次保存配置冻结在旧版本。
+	cfg.SetHeaderTimeoutSource(func() time.Duration { return s.config().HeaderTimeout })
+	if client != nil {
+		client.RetryPolicy = func() (int, time.Duration) {
+			c := s.config()
+			return c.TransientRetries, c.TransientRetryBackoff
+		}
+	}
 
 	// 缓存落盘 + 启动时恢复（放在 Store 之后：saveTo 可能用到 cfg）。
 	s.checkinCache.workDir = cfg.WorkDir
@@ -146,6 +171,8 @@ func (s *Server) SetUpdateChecker(checker *update.Checker) { s.updates = checker
 // StartBackground 启动后台任务。
 func (s *Server) StartBackground(ctx context.Context) {
 	go s.reloadLoop(ctx)
+	// 文件监听：手动编辑 config.json 也热生效（面板保存走自己的路径，见 saveConfig）。
+	go s.watchConfigLoop(ctx)
 }
 
 // Handler 组装完整路由与中间件。

@@ -144,11 +144,10 @@ func TestUpstreamTimeoutStopsRotation(t *testing.T) {
 	srv := newTestServer(t, ts.URL)
 
 	// 把「请求发出 → 收到响应头」的上限压到 80ms（默认 5 分钟，测试里等不起）。
-	if tr, ok := srv.client.ChatHTTP.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = 80 * time.Millisecond
-	} else {
-		t.Fatalf("测试前提不成立：ChatHTTP 用的不是 *http.Transport")
-	}
+	// 走热改入口注入而不是直接改 Transport 字段：Transport 现在套了一层
+	// HotTransport（上游超时可热改，见 internal/config/transport.go），
+	// 直接改内层字段会被下一轮 RoundTrip 的比对覆盖掉。
+	srv.config().SetHeaderTimeoutSource(func() time.Duration { return 80 * time.Millisecond })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", chatRequest(t, false))

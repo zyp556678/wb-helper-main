@@ -14,7 +14,9 @@ func TestUpdateClientFallsBackToEnvProxy(t *testing.T) {
 		t.Fatalf("装配客户端失败: %v", err)
 	}
 	// 没配 -proxy 时，Control 不带代理，UpdateClient 应当带上环境变量代理。
-	control, _ := cfg.Control.Transport.(*http.Transport)
+	// 取**底层** Transport：Control 外面套了一层热改外壳（上游超时可热改，见 transport.go），
+	// 直接断言 *http.Transport 会失败，也会让「代理没被改」的断言失去意义。
+	control := cfg.transportBase()
 	if control == nil || control.Proxy != nil {
 		t.Fatalf("未配 -proxy 时 Control 不该设代理，实际 %+v", control)
 	}
