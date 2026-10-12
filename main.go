@@ -46,7 +46,7 @@ import (
 )
 
 // version 是网关版本号。
-const version = "0.9.3"
+const version = "0.10.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
