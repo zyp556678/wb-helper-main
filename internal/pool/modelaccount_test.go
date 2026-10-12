@@ -10,7 +10,7 @@ import (
 
 // setModelAccountRules 给测试池装上模型账号名单。
 func setModelAccountRules(p *Pool, model string, allow, block []string) {
-	rules := map[string]config.ModelAccountRule{}
+
 	r := config.ModelAccountRule{}
 	if len(allow) > 0 {
 		r.Allow = map[string]bool{}
@@ -24,8 +24,12 @@ func setModelAccountRules(p *Pool, model string, allow, block []string) {
 			r.Block[n] = true
 		}
 	}
-	rules[model] = r
-	p.config().ModelAccountRules = rules
+	// 与已有的全局规则（models.accounts.all）合并，而不是整表替换：
+	// 测试里常先装全局层再装模型层，替换会把刚配的全局层抹掉。
+	if p.config().ModelAccountRules == nil {
+		p.config().ModelAccountRules = map[string]config.ModelAccountRule{}
+	}
+	p.config().ModelAccountRules[model] = r
 }
 
 // TestModelAccountRuleBlocksUnlistedAccount 白名单之外的账号不得被选中。
@@ -176,5 +180,82 @@ func TestModelAccountRuleNotBypassedByCooldownFallback(t *testing.T) {
 	}
 	if acc.CredentialFileName() != "cn-b.json" {
 		t.Fatalf("兜底路径捞出了名单外的账号 %s", acc.CredentialFileName())
+	}
+}
+
+// setGlobalAccountRule 给测试池装上**全局**账号名单（models.accounts.all）。
+func setGlobalAccountRule(p *Pool, allow, block []string) {
+	r := config.ModelAccountRule{}
+	if len(allow) > 0 {
+		r.Allow = map[string]bool{}
+		for _, n := range allow {
+			r.Allow[n] = true
+		}
+	}
+	if len(block) > 0 {
+		r.Block = map[string]bool{}
+		for _, n := range block {
+			r.Block[n] = true
+		}
+	}
+	if p.config().ModelAccountRules == nil {
+		p.config().ModelAccountRules = map[string]config.ModelAccountRule{}
+	}
+	p.config().ModelAccountRules[config.AccountsAllKey] = r
+}
+
+// TestModelAccountRuleGlobalAllBlocks 全局 all 层能单独挡账号（不必给每个模型都写一遍）。
+func TestModelAccountRuleGlobalAllBlocks(t *testing.T) {
+	p := newTestPool(t, auth.SiteCN, auth.SiteCN)
+	setGlobalAccountRule(p, nil, []string{"cn-a.json"})
+
+	// 未配任何模型专属规则，全局层照样生效 —— 而且对**任意**模型生效。
+	if ok, reason := p.ModelAccountAllowed("随便一个模型", p.accounts[0]); ok {
+		t.Fatal("全局名单应挡住该账号")
+	} else if reason != "命中全局账号黑名单" {
+		t.Fatalf("拒绝原因应指明是全局层，实际 %q", reason)
+	}
+	if ok, _ := p.ModelAccountAllowed("随便一个模型", p.accounts[1]); !ok {
+		t.Fatal("全局名单之外的账号应放行")
+	}
+	if !p.ModelAccountRuleConfigured("随便一个模型") {
+		t.Fatal("配了全局名单后，任何模型都应报告「已有账号名单约束」")
+	}
+	if n := p.AllowedAccountsForModel("随便一个模型"); n != 1 {
+		t.Fatalf("通过全局名单的账号数应为 1，实际 %d", n)
+	}
+}
+
+// TestModelAccountRuleGlobalAndModelAreTwoLayers 全局层与模型层是**两层 AND**：
+// 任一层拒绝即拒绝，只有两层都通过才放行。
+func TestModelAccountRuleGlobalAndModelAreTwoLayers(t *testing.T) {
+	p := newTestPool(t, auth.SiteCN, auth.SiteCN)
+	setGlobalAccountRule(p, nil, []string{"cn-a.json"})
+	// 模型层同时也是白名单：cn-a 被模型层允许，但被全局层挡住。
+	setModelAccountRules(p, "glm-5.3", []string{"cn-a.json", "cn-b.json"}, nil)
+
+	if ok, reason := p.ModelAccountAllowed("glm-5.3", p.accounts[0]); ok {
+		t.Fatal("模型层允许但全局层拒绝时应拒绝")
+	} else if reason != "命中全局账号黑名单" {
+		t.Fatalf("应先报全局层，实际 %q", reason)
+	}
+	// cn-b 两层都通过。
+	if ok, reason := p.ModelAccountAllowed("glm-5.3", p.accounts[1]); !ok {
+		t.Fatalf("两层都通过时应放行，实际 %q", reason)
+	}
+}
+
+// TestModelAccountRuleGlobalAllowlistBlocksUnlisted 全局白名单非空时只放行列表内账号。
+func TestModelAccountRuleGlobalAllowlistBlocksUnlisted(t *testing.T) {
+	p := newTestPool(t, auth.SiteCN, auth.SiteCN)
+	setGlobalAccountRule(p, []string{"cn-b.json"}, nil)
+
+	if ok, reason := p.ModelAccountAllowed("glm-5.3", p.accounts[0]); ok {
+		t.Fatal("全局白名单外的账号应被拒绝")
+	} else if reason != "不在全局账号白名单" {
+		t.Fatalf("拒绝原因应指明是全局白名单，实际 %q", reason)
+	}
+	if ok, _ := p.ModelAccountAllowed("glm-5.3", p.accounts[1]); !ok {
+		t.Fatal("全局白名单内的账号应放行")
 	}
 }

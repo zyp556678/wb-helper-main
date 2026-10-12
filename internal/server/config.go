@@ -188,7 +188,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 
 // applyRuntimeConfig 把配置同步到治理层与粘性表。
 // 上游超时**不在这里**：它由 Transport 外壳在每次请求时比对当前快照自行生效
-//（见 config.HotTransport），换快照就够了。仍需重启的只有
+// （见 config.HotTransport），换快照就够了。仍需重启的只有
 // `server.read_timeout` 与 `debug.enabled`（保存接口会在 need_restart 里如实告知）。
 func (s *Server) applyRuntimeConfig() {
 	c := s.config()

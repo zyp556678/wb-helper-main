@@ -2,6 +2,8 @@ package pool
 
 import (
 	"path/filepath"
+
+	"workbuddy-gateway/internal/config"
 )
 
 // 本文件实现「模型专属账号名单」（config.json 的 models.accounts）。
@@ -10,11 +12,12 @@ import (
 // 这里控制「这个模型能用哪些**账号**」。典型用途是把某个模型钉死在特定凭据上
 // （例如只有某几个账号开通了该模型的权限，或想让贵模型只走某个账号）。
 //
-// 三条判定规则，顺序不能换：
+// 判定规则，顺序不能换：
 //  1. 未配置的模型 → 全部允许（不能因为「没配」就把模型打死）；
 //  2. **同名凭据文件**同时存在于池里时 → 拒绝匹配。规则是按文件名写的，
 //     同名意味着无法判断用户指的是哪一个，此时匹配任意一个都是猜；
-//  3. 黑名单优先于白名单；白名单为空表示不限制。
+//  3. 黑名单优先于白名单；白名单为空表示不限制；
+//  4. **两层 AND**：全局层（`models.accounts.all`）与模型专属层都要通过。
 
 // CredentialFileName 返回凭据文件名（不含目录）。
 //
@@ -30,9 +33,17 @@ func (a *Account) CredentialFileName() string {
 	return filepath.Base(a.Cred.Path)
 }
 
-// ModelAccountRuleConfigured 报告该模型是否配了有效的账号名单。
+// ModelAccountRuleConfigured 报告该模型是否受**任一层**账号名单约束
+// （全局 all 层或模型专属层，任一有效即算）。
+//
+// 它是「403 model_account_disabled」的判定前提：只有「配了名单且没有任何账号通过」
+// 才是配置问题（换号无用），否则一律按普通的选号失败处理。
 func (p *Pool) ModelAccountRuleConfigured(model string) bool {
-	rule, ok := p.config().ModelAccountRuleFor(model)
+	cfg := p.config()
+	if rule, ok := cfg.ModelAccountRuleGlobal(); ok && rule.Configured() {
+		return true
+	}
+	rule, ok := cfg.ModelAccountRuleFor(model)
 	return ok && rule.Configured()
 }
 
@@ -42,32 +53,54 @@ func (p *Pool) modelAccountAllowedLocked(model string, acc *Account) (bool, stri
 	if acc == nil {
 		return false, "账号为空"
 	}
-	rule, ok := p.config().ModelAccountRuleFor(model)
+	cfg := p.config()
+	// 两层 AND：先全局（语义更宽，命中它时更该报这一层），再模型专属。
+	if rule, ok := cfg.ModelAccountRuleGlobal(); ok && rule.Configured() {
+		if denied, reason := p.checkAccountRuleLocked(true, rule, acc); denied {
+			return false, reason
+		}
+	}
+	rule, ok := cfg.ModelAccountRuleFor(model)
 	if !ok || !rule.Configured() {
 		return true, ""
 	}
+	// 注意方向：checkAccountRuleLocked 返回的是「是否**拒绝**」，
+	// 本函数返回的是「是否**放行**」，这里必须翻一次。
+	if denied, reason := p.checkAccountRuleLocked(false, rule, acc); denied {
+		return false, reason
+	}
+	return true, ""
+}
 
+// checkAccountRuleLocked 按**一层**规则判定账号是否被拒绝。
+// global 只影响错误文案（告诉用户是哪一层挡的：全局名单还是模型名单）。
+// **调用方必须持有 p.mu**。
+func (p *Pool) checkAccountRuleLocked(global bool, rule config.ModelAccountRule, acc *Account) (bool, string) {
+	layer := "账号"
+	if global {
+		layer = "全局账号"
+	}
 	name := acc.CredentialFileName()
 	if name == "" {
 		// 拿不到文件名就没法按名单判定。拒绝而不是放行：放行等于规则静默失效，
 		// 而用户配这条规则的意图正是「别让别的账号用这个模型」。
-		return false, "凭据文件名为空，无法匹配名单"
+		return true, "凭据文件名为空，无法匹配名单"
 	}
 
 	// 同名凭据重复：规则按文件名写，无法判断指的是哪一个。
 	for _, other := range p.accounts {
 		if other != acc && other.CredentialFileName() == name {
-			return false, "凭据文件名重复"
+			return true, "凭据文件名重复"
 		}
 	}
 
 	if rule.Block[name] {
-		return false, "命中账号黑名单"
+		return true, "命中" + layer + "黑名单"
 	}
 	if len(rule.Allow) > 0 && !rule.Allow[name] {
-		return false, "不在账号白名单"
+		return true, "不在" + layer + "白名单"
 	}
-	return true, ""
+	return false, ""
 }
 
 // ModelAccountAllowed 是 modelAccountAllowedLocked 的加锁版本（供外部调用）。

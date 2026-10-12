@@ -112,6 +112,48 @@ func TestNoModelAccountRulesIsNil(t *testing.T) {
 	}
 }
 
+// TestModelAccountRuleAllKeyIsGlobal 保留键 `all` 是全局规则，与模型专属规则并存。
+func TestModelAccountRuleAllKeyIsGlobal(t *testing.T) {
+	cfg := writeConfig(t, `{
+	  "models": {
+	    "accounts": {
+	      "all": { "blocklist": ["old-account.json"] },
+	      "hy3": { "allowlist": ["a.json"] }
+	    }
+	  }
+	}`)
+
+	global, ok := cfg.ModelAccountRuleGlobal()
+	if !ok {
+		t.Fatal("未解析出全局账号名单（all 键）")
+	}
+	if !global.Block["old-account.json"] {
+		t.Fatalf("全局黑名单解析错误: %#v", global.Block)
+	}
+	// 模型专属规则仍然独立存在，两者不是同一个对象。
+	rule, ok := cfg.ModelAccountRuleFor("hy3")
+	if !ok {
+		t.Fatal("未解析出 hy3 的账号名单")
+	}
+	if !rule.Allow["a.json"] {
+		t.Fatalf("hy3 白名单解析错误: %#v", rule.Allow)
+	}
+
+	// 没配 all 时全局层不存在（不是「空规则」）。
+	empty := writeConfig(t, `{"models":{"accounts":{"hy3":{"blocklist":["a.json"]}}}}`)
+	if _, ok := empty.ModelAccountRuleGlobal(); ok {
+		t.Fatal("未配 all 时不应报告全局规则存在")
+	}
+}
+
+// TestModelAccountRuleAllKeyEmptyEntryIgnored `all` 留了空壳同样视为没配。
+func TestModelAccountRuleAllKeyEmptyEntryIgnored(t *testing.T) {
+	cfg := writeConfig(t, `{"models":{"accounts":{"all":{"allowlist":[],"blocklist":[]}}}}`)
+	if _, ok := cfg.ModelAccountRuleGlobal(); ok {
+		t.Fatal("空壳 all 条目不应进规则表")
+	}
+}
+
 // TestTransientRetriesExplicitZeroKept 显式 0 表示禁用重试，不能被默认值覆盖。
 //
 // 这条与「保留显式 0」的 firstPtr 配套：用户明确关掉的东西又被打开，

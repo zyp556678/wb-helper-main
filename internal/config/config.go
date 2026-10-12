@@ -161,6 +161,9 @@ func (c *Config) Clone() *Config {
 // 判定顺序：黑名单优先；白名单为空表示不限制。只接受凭据**文件名**
 // （如 intl-a.json），不接受路径或通配符 —— 配了路径却按文件名匹配，
 // 会让规则静默失效。
+//
+// 两层 AND：`models.accounts.all`（全局，见 AccountsAllKey）与模型专属规则
+// 都要通过；任一层拒绝即拒绝。
 type ModelAccountRule struct {
 	Allow map[string]bool
 	Block map[string]bool
@@ -171,12 +174,28 @@ func (r ModelAccountRule) Configured() bool {
 	return len(r.Allow) > 0 || len(r.Block) > 0
 }
 
-// ModelAccountRuleFor 取某模型的账号名单规则。
+// AccountsAllKey 是「**全局**账号名单」在 models.accounts 里的保留键（与上游 v1.14.0 同口径）。
+//
+// 用途：想让某几个账号完全不参与调度时，不必给每个模型都写一遍规则 ——
+// 全局层的判定是**两层 AND**：全局规则与模型专属规则都要通过。
+// 保留字代价：一个真的叫 all 的模型无法单独配规则（这种模型名不存在于上游目录）。
+const AccountsAllKey = "all"
+
+// ModelAccountRuleFor 取某模型的账号名单规则（**不含**全局 all 层）。
 func (c *Config) ModelAccountRuleFor(model string) (ModelAccountRule, bool) {
 	if len(c.ModelAccountRules) == 0 {
 		return ModelAccountRule{}, false
 	}
 	r, ok := c.ModelAccountRules[normalizeModelKey(model)]
+	return r, ok
+}
+
+// ModelAccountRuleGlobal 取全局账号名单（models.accounts.all）。
+func (c *Config) ModelAccountRuleGlobal() (ModelAccountRule, bool) {
+	if len(c.ModelAccountRules) == 0 {
+		return ModelAccountRule{}, false
+	}
+	r, ok := c.ModelAccountRules[AccountsAllKey]
 	return r, ok
 }
 
@@ -592,6 +611,9 @@ func firstPositive(vals ...int) int {
 // 模型名归一化（小写去空格）后作键：上游模型名大小写不统一，而用户手写配置时
 // 也不会在意大小写 —— 严格区分会让「写了规则却不生效」变成静默故障。
 // 同名模型在文件里写两次时后者覆盖前者（JSON 对象本身不允许重复键，这里只是兜底）。
+//
+// 保留键 `all` 是**全局**规则（见 AccountsAllKey）：它与每个模型各自的规则
+// 一起做两层 AND，所以这里不把它当普通模型名处理，只是原样收进表里。
 func parseModelAccountRules(in map[string]struct {
 	Allowlist []string `json:"allowlist"`
 	Blocklist []string `json:"blocklist"`
