@@ -91,10 +91,18 @@
 - 查看：面板 `GET /panel/api/request-metrics`（进程内指标 + 最近 100 条 + 归档状态）、
   `GET /panel/api/request-logs?limit=&outcome=&account=&model=`（从归档读，limit 默认 200、最大 1000）。
   响应头 `X-Request-Id` 与记录里的 `request_id` 一致，便于和上游日志对齐。
-- `update.enabled`：是否在后台周期检查新版本，默认 `true`。热生效（面板「配置 → 检查更新」
+- `update.enabled`：是否在后台周期检查新版本，默认 `true`。热生效（面板「更新」页
   的「自动检查」开关写的就是它）。默认开是因为代价极低（每 6 小时一次只读 GET），
   而默认关的后果是装了旧版的人永远不会知道有新版本。
 - `update.check_hours`：自动检查间隔（小时），默认 `6`，最小 `1`。
+- `update.auto_download`：发现新版本后是否**自动把安装包下到数据目录**，默认 `true`。
+  下载只是往 `<数据目录>/updates/` 放一个文件，不改动已安装的程序、也不重启网关，
+  所以默认开着（默认关的代价是用户点开面板还得等一次几十 MB 的下载）。
+  面板「更新」页上的同名开关写的就是它。
+  **安装不会自动执行**：那一步会覆盖已装好的程序、结束正在跑的进程、必要时提权，
+  必须由人在面板上点一下并在确认框里确认（框里会列出将要执行的命令）。
+  各平台分别走 `pkexec dpkg -i`（Linux）/ `hdiutil` + `ditto`（macOS）/ 安装向导（Windows），
+  装完网关自行重启到新版本。
 - `update.repo`：更新源仓库（`owner/name`），默认 `zyp556678/wb-helper-main`（Release 只发在这里）。
   fork 出去自己发版的用户改成自己的仓库即可。
 - `update.include_prerelease`：预发布版本是否参与比较，默认 `false`

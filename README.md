@@ -35,8 +35,9 @@
   `?site=` 参数或 `X-WB-Site` 请求头）。
 - **任务体系**：签到、令牌保活、额度刷新、任务中心（成长任务扫描与执行）、夜猫子。
 - **统计与日志**：按小时聚合的持久化用量统计、请求级 trace、脱敏的请求归档。
-- **管理面板**：账号、监控、模型与档位、双站视图、任务中心、日志、用量统计、配置等页面，
-  治理参数保存即热生效。
+- **管理面板**：账号、监控、模型与档位、双站视图、任务中心、日志、用量统计、配置、
+  **更新**等页面，治理参数保存即热生效；**更新页**自动检查并下好新版本安装包，
+  点一下「安装并重启」就直接升级（安装这一步刻意不自动，见 PROGRESS.md）。
 - **部署形态**：命令行二进制、Docker、systemd、npm 全局安装、各平台安装包，以及桌面应用。
 
 完整的实现进度与设计取舍见 [PROGRESS.md](PROGRESS.md)。
@@ -141,8 +142,9 @@ npmmirror 镜像也能装。数据目录在 Windows 上取 `%LOCALAPPDATA%\wb-ga
 
 > 与 switch 的差异：switch 是 Tauri 桌面应用（`.app` / 托盘 / 自带自动更新）。
 > 本项目的桌面形态已交付（`desktop/`，Windows 产出 NSIS 安装包，托盘常驻、关闭收进托盘；
-> macOS/Linux 仍走各平台服务化安装路径）。尚未实现的只有代码签名与自动更新。
-> 完整对照见 `DEPLOY.md` 第零节。
+> macOS/Linux 仍走各平台服务化安装路径）。更新这条路做的是「自动检测 + 自动下载 +
+> 点一下安装并重启」，而不是静默自更新 —— 覆盖安装与重启交给人的一次确认。
+> 尚未实现的只有代码签名。完整对照见 `DEPLOY.md` 第零节。
 
 ## 快速开始
 
@@ -228,7 +230,7 @@ internal/stats               用量统计（按小时聚合持久化）
 internal/metrics             滚动窗口指标
 internal/eventlog            事件日志环形缓冲
 internal/localagent          本机代理代管器（发现 / 拉起 / 探活 / 反代）
-internal/update              检查更新（GitHub Release 探测、版本比较、安装包下载）
+internal/update              检查更新（Release 探测、版本比较、安装包自动下载与安装并重启）
 internal/server              HTTP 层（OpenAI 兼容端点 + 面板 API + 静态资源）
 web/                         React 前端（构建产物 web/dist 由 web/embed.go 嵌入）
 scripts/build.sh             日常构建
