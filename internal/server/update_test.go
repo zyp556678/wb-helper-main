@@ -353,3 +353,65 @@ func TestInstallRequestsRestartAfterInstall(t *testing.T) {
 	plain := newTestServer(t, "")
 	plain.requestRestart(0)
 }
+
+// 安装要求网关退出时（Windows：让出文件锁），回调要被调用。
+//
+// 与重启分开测：两者的结局不同（重启会换上新二进制继续服务，退出则留一个空档），
+// 混在一起会掩盖「Windows 上误走重启路径」这类回归。
+func TestInstallRequestsExitWhenAsked(t *testing.T) {
+	s := newTestServer(t, "")
+	exited := make(chan struct{}, 1)
+	s.SetExitFunc(func() { exited <- struct{}{} })
+
+	s.requestExit(10 * time.Millisecond)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("请求退出后回调没有被调用")
+	}
+
+	// 没有退出通路时只提示，不 panic（精简装配的实例就是这样）。
+	plain := newTestServer(t, "")
+	plain.requestExit(0)
+}
+
+// 加速前缀端点：合法值落盘、非法值 400 且不落盘、空串表示直连。
+func TestUpdateMirrorEndpoint(t *testing.T) {
+	s := newTestServer(t, "")
+	fake, _ := fakeGitHubForServer(t, "v0.9.3")
+	attachChecker(t, s, fake, t.TempDir())
+
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/update/mirror", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		s.setUpdateMirror(rec, req)
+		return rec
+	}
+
+	// 合法：落盘并回显。
+	if rec := post(`{"mirror":"https://ghfast.top"}`); rec.Code != http.StatusOK {
+		t.Fatalf("合法前缀应当 200，实际 %d（体=%s）", rec.Code, rec.Body.String())
+	}
+	if got := s.config().UpdateDownloadMirror(); got != "https://ghfast.top" {
+		t.Fatalf("前缀没落盘：%q", got)
+	}
+	// 非法：400 且不落盘。
+	if rec := post(`{"mirror":"ghfast.top"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺协议的前缀应当 400，实际 %d", rec.Code)
+	}
+	if got := s.config().UpdateDownloadMirror(); got != "https://ghfast.top" {
+		t.Fatalf("被拒的请求不该改动已有配置：%q", got)
+	}
+	// 空串 = 清掉（直连）。
+	if rec := post(`{"mirror":"  "}`); rec.Code != http.StatusOK {
+		t.Fatalf("空串应当 200，实际 %d", rec.Code)
+	}
+	if got := s.config().UpdateDownloadMirror(); got != "" {
+		t.Fatalf("空串应清掉前缀，实际 %q", got)
+	}
+	// 缺字段：400。
+	if rec := post(`{}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺 mirror 字段应当 400，实际 %d", rec.Code)
+	}
+}

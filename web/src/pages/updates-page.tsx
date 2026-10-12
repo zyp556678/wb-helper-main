@@ -4,10 +4,12 @@ import {
   CheckCircle2,
   Download,
   ExternalLink,
+  Globe,
   HardDriveDownload,
   Info,
   Loader2,
   RefreshCw,
+  Save,
   Sparkles,
   Wand2,
 } from "lucide-react";
@@ -26,6 +28,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CardHint, Section } from "@/components/section";
 import {
@@ -37,6 +40,8 @@ import {
   openExternalUrl,
   setUpdateAutoCheck,
   setUpdateAutoDownload,
+  setUpdateAutoInstall,
+  setUpdateMirror,
 } from "@/lib/api";
 import { formatBytes, formatRelativeTime, nowSeconds } from "@/lib/format";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -68,12 +73,18 @@ const RESTART_POLL_MS = 1500;
 export function UpdatesPage() {
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
   const [loading, setLoading] = React.useState(true);
-  const [busy, setBusy] = React.useState<"" | "check" | "download" | "install" | "switch">("");
+  const [busy, setBusy] = React.useState<"" | "check" | "download" | "install" | "switch" | "mirror">("");
   const [error, setError] = React.useState("");
-  /** 点了安装、网关正在重启：此时所有请求都会失败，页面进入探活模式。 */
-  const [restarting, setRestarting] = React.useState(false);
+  /**
+   * 点了安装之后网关的去向：`restart`（Unix：换上新二进制继续服务）或
+   * `exit`（Windows：退出以让出文件锁，等安装向导或用户把应用拉起来）。
+   * 两者都会让本页暂时连不上网关，所以统一进入探活模式。
+   */
+  const [outcome, setOutcome] = React.useState<"" | "restart" | "exit">("");
   const [installOutput, setInstallOutput] = React.useState("");
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+  /** 「自动安装」是更新链路里唯一动系统的自动化，打开前必须再确认一次。 */
+  const [confirmAutoInstall, setConfirmAutoInstall] = React.useState(false);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
     try {
@@ -101,18 +112,23 @@ export function UpdatesPage() {
     Boolean(status?.update_available) && status?.auto_download === true && !status?.local_path;
   useVisibleInterval(
     () => void load(),
-    CHECK_POLL_MS,
-    Boolean(status?.checking) || waitingForDownload,
+    // 下载进度条跟着这个节奏走：间隔太长条会一顿一顿的，太短又刷得太凶。
+    status?.downloading ? 800 : CHECK_POLL_MS,
+    Boolean(status?.checking) ||
+      Boolean(status?.downloading) ||
+      Boolean(status?.installing) ||
+      waitingForDownload,
   );
 
-  // 网关重启期间的探活：能拿到状态就说明新版本已经起来了，整页刷新让所有页面
-  // （含侧栏的版本号）都用新数据重建。
+  // 网关重启/退出期间的探活：能拿到状态就说明新版本已经起来了，整页刷新让所有页面
+  //（含侧栏的版本号）都用新数据重建。退出那条路上这一步可能要等用户走完安装向导，
+  // 所以探活不设总时长上限 —— 页面不可见时 useVisibleInterval 自己会停。
   useVisibleInterval(
     () => {
       void (async () => {
         try {
           await fetchUpdateStatus();
-          notifySuccess("网关已重启完成");
+          notifySuccess(outcome === "exit" ? "网关已重新启动" : "网关已重启完成");
           window.location.reload();
         } catch {
           // 还没起来，下一次探活继续。
@@ -120,7 +136,7 @@ export function UpdatesPage() {
       })();
     },
     RESTART_POLL_MS,
-    restarting,
+    outcome !== "",
   );
 
   const handleCheck = React.useCallback(async () => {
@@ -148,15 +164,19 @@ export function UpdatesPage() {
   }, []);
 
   const handleSwitch = React.useCallback(
-    async (kind: "check" | "download", next: boolean) => {
+    async (kind: "check" | "download" | "install", next: boolean) => {
       setBusy("switch");
       setError("");
       try {
         // 后端返回保存后的真实状态（含它顺手触发的那次检查/下载），不做乐观更新：
         // 写 config.json 可能失败，乐观更新会让开关停在用户点的那一下。
-        setStatus(
-          kind === "check" ? await setUpdateAutoCheck(next) : await setUpdateAutoDownload(next),
-        );
+        const next_status =
+          kind === "check"
+            ? await setUpdateAutoCheck(next)
+            : kind === "download"
+              ? await setUpdateAutoDownload(next)
+              : await setUpdateAutoInstall(next);
+        setStatus(next_status);
       } catch (err) {
         setError(describeError(err));
         await load();
@@ -166,6 +186,24 @@ export function UpdatesPage() {
     },
     [load],
   );
+
+  // 下载加速前缀：文本输入，失焦/回车才提交（每个字符都发请求太吵）。
+  const [mirrorInput, setMirrorInput] = React.useState<string | null>(null);
+  const mirrorDraft = mirrorInput ?? (status?.download_mirror ?? "");
+  const handleMirrorSave = React.useCallback(async () => {
+    setBusy("mirror");
+    setError("");
+    try {
+      const res = await setUpdateMirror(mirrorDraft.trim());
+      setStatus((prev) => (prev ? { ...prev, download_mirror: res.mirror } : prev));
+      notifySuccess(res.detail || "下载加速设置已保存");
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy("");
+      setMirrorInput(null);
+    }
+  }, [mirrorDraft]);
 
   const handleDownload = React.useCallback(async () => {
     setBusy("download");
@@ -198,10 +236,12 @@ export function UpdatesPage() {
       }
       setInstallOutput(res.output ?? "");
       if (res.state) setStatus(res.state);
-      if (res.restart) {
-        // 页面接下来会连不上网关（它在重启），进入探活模式而不是报错。
-        setRestarting(true);
-        notifyInfo("安装完成，网关正在重启…", { description: res.detail });
+      if (res.restart || res.exit) {
+        // 页面接下来会连不上网关（它在重启或退出），进入探活模式而不是报错。
+        setOutcome(res.restart ? "restart" : "exit");
+        notifyInfo(res.restart ? "安装完成，网关正在重启…" : "安装完成，网关即将退出", {
+          description: res.detail,
+        });
         return;
       }
       notifySuccess("安装完成", { description: res.detail });
@@ -229,7 +269,7 @@ export function UpdatesPage() {
   const plan = status?.install;
   const downloaded = Boolean(status?.local_path);
   const canInstall = Boolean(status?.update_available && downloaded && plan?.supported);
-  const busyAll = busy !== "" || restarting;
+  const busyAll = busy !== "" || outcome !== "" || Boolean(status?.installing);
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
@@ -256,15 +296,19 @@ export function UpdatesPage() {
         </Button>
       </header>
 
-      {restarting ? (
+      {outcome !== "" ? (
         <Card className="mb-5 border-primary/40 bg-primary/5">
           <CardContent className="flex items-start gap-3 py-4">
             <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" aria-hidden="true" />
             <div className="min-w-0 space-y-1">
-              <p className="text-sm font-medium">网关正在重启，页面会自动恢复</p>
+              <p className="text-sm font-medium">
+                {outcome === "exit" ? "网关已退出，等安装向导启动应用" : "网关正在重启，页面会自动恢复"}
+              </p>
               <p className="text-xs leading-5 text-muted-foreground">
-                已经装上{latest ? ` v${latest}` : "新版本"}。重启期间这个页面连不上网关是正常的，
-                起来了会自动刷新。
+                已经装上{latest ? ` v${latest}` : "新版本"}。
+                {outcome === "exit"
+                  ? "Windows 上必须先让出文件锁，所以网关会停一会儿：请在安装向导最后一页确认「运行」（或从开始菜单重新启动应用），页面会自动接回来。"
+                  : "重启期间这个页面连不上网关是正常的，起来了会自动刷新。"}
               </p>
             </div>
           </CardContent>
@@ -298,9 +342,51 @@ export function UpdatesPage() {
             ) : null}
           </div>
 
+          {status?.downloading ? (
+            <div className="space-y-1.5" aria-live="polite">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                  正在下载安装包…
+                </span>
+                {status.download_total_bytes ? (
+                  <span className="font-mono">
+                    {formatBytes(status.downloaded_bytes ?? 0)} / {formatBytes(status.download_total_bytes)}
+                    {status.download_total_bytes > 0 && status.downloaded_bytes !== undefined
+                      ? `（${Math.min(100, Math.round((status.downloaded_bytes / status.download_total_bytes) * 100))}%）`
+                      : ""}
+                  </span>
+                ) : null}
+              </div>
+              {status.download_total_bytes ? (
+                <div
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.min(100, Math.round(((status.downloaded_bytes ?? 0) / status.download_total_bytes) * 100))}
+                  className="h-1.5 overflow-hidden rounded-full bg-muted"
+                >
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width] duration-300"
+                    style={{
+                      width: `${Math.min(100, Math.round(((status.downloaded_bytes ?? 0) / status.download_total_bytes) * 100))}%`,
+                    }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {status?.installing ? (
+            <p className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground" aria-live="polite">
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              正在自动安装（可能弹系统授权框，装完网关会重启或退出）…
+            </p>
+          ) : null}
+
           {loading ? (
             <CardHint>正在读取更新状态…</CardHint>
-          ) : status?.update_available ? (
+          ) : !status?.downloading && status?.update_available ? (
             <p className="text-xs leading-5 text-muted-foreground">
               {status.release_name ? `${status.release_name} · ` : ""}
               {status.published_at
@@ -507,9 +593,108 @@ export function UpdatesPage() {
             )}
           </div>
 
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Wand2 className="size-4 text-muted-foreground" aria-hidden="true" />
+                自动安装
+              </div>
+              <div className="text-xs text-muted-foreground">
+                安装包下好之后直接装并重启（Windows 上是退出让出文件锁）。
+                它会覆盖程序、结束正在跑的进程 —— 打开前请确认你能接受这一点。
+              </div>
+            </div>
+            {loading ? (
+              <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden="true" />
+            ) : (
+              <Switch
+                checked={status?.auto_install ?? false}
+                disabled={busyAll || !status}
+                onCheckedChange={(checked) => {
+                  // 打开是危险动作（会覆盖程序、结束进程、重启网关），先确认；
+                  // 关掉是恢复安全状态，直接生效、不拦。
+                  if (checked) setConfirmAutoInstall(true);
+                  else void handleSwitch("install", false);
+                }}
+                aria-label="自动安装更新"
+              />
+            )}
+          </div>
+
+          <div className="space-y-1.5 border-t pt-4">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Globe className="size-4 text-muted-foreground" aria-hidden="true" />
+              下载加速
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              直连 github.com 下安装包慢时可填加速服务前缀（如{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">https://ghfast.top</code>），
+              实际请求会变成 前缀 + 原地址。只影响安装包下载，不影响版本检查；
+              配了访问令牌（私有仓库）时不加速。留空 = 直连。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={mirrorDraft}
+                onChange={(e) => setMirrorInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleMirrorSave();
+                }}
+                placeholder="https://ghfast.top（留空 = 直连）"
+                spellCheck={false}
+                className="h-8 max-w-md font-mono text-xs"
+                aria-label="下载加速前缀"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy === "mirror" || mirrorDraft.trim() === (status?.download_mirror ?? "")}
+                onClick={() => void handleMirrorSave()}
+              >
+                {busy === "mirror" ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Save className="size-3.5" aria-hidden="true" />
+                )}
+                保存
+              </Button>
+            </div>
+          </div>
+
+          <AlertDialog open={confirmAutoInstall} onOpenChange={setConfirmAutoInstall}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>打开「自动安装」？</AlertDialogTitle>
+                <AlertDialogDescription className="space-y-3">
+                  <span className="block">
+                    打开之后：发现新版本会**自动**下载并安装，网关随即重启到新版本；
+                    Windows 上是退出以让出文件锁（装完需在向导最后一步确认运行）。
+                  </span>
+                  <span className="block">
+                    安装会覆盖已装好的程序、结束正在跑的进程，必要时弹系统授权框；
+                    失败时可能留下一个既起不来、也没有回退版本的现场。
+                    装在跑着重要会话的机器上时，请确认你能接受这次重启。
+                  </span>
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>取消</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => {
+                    setConfirmAutoInstall(false);
+                    void handleSwitch("install", true);
+                  }}
+                >
+                  打开自动安装
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+
           <CardHint>
-            安装**不**自动执行：它会覆盖程序、结束正在跑的进程，必要时还要提权，
-            失败时可能留下一个既起不来也没有回退版本的现场。这一下由你点。
+            自动检查与自动下载是只读动作（查一次 GitHub、放一个文件），默认开；
+            自动安装会覆盖程序、结束正在跑的进程，默认关 —— 打不开的话它就只下不装，
+            安装那一下永远由你点。
           </CardHint>
         </CardContent>
       </Section>

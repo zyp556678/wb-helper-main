@@ -343,6 +343,17 @@ func runServe(args []string) {
 		// 收尾完成后再在 runServe 末尾决定要不要 exec。
 		stop()
 	})
+	// Windows 上安装更新的结局是**退出**而不是重启：正在运行的 .exe 被系统锁着，
+	// 而安装程序在升级时会先跑旧版本的卸载器 —— 不先让出文件锁，它会直接报
+	// 「无法卸载！」并中止（见 internal/update/install.go 的 installWindows）。
+	// 这里只触发优雅关闭，不置 restartCh，因此收尾时不会 exec。
+	srv.SetExitFunc(stop)
+	// 自动安装的结局钩子：与手动「安装并重启」按钮共用同一对优雅关闭回调，
+	// 这样「自动装 → 重启」与「手动装 → 重启」不会走出两条不同的路。
+	// 注意闭包里调的是 srv 的方法而不是摸 srv 的私有字段 —— 包不同（main vs server），
+	// 字段本来就摸不到；方法会做空值判断，没接通路时只记日志不崩。
+	updater.SetRestartHook(srv.RequestRestart)
+	updater.SetExitHook(srv.RequestExit)
 	// 客户端日志限流扫描（切片 19 追加）：WorkBuddy 桌面客户端直连官方，
 	// 它的模型限流不经过网关，只能从客户端日志还原（对齐 wb-switch 的扫日志兜底通路）。
 	if home, err := os.UserHomeDir(); err == nil {

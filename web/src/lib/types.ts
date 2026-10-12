@@ -2441,10 +2441,22 @@ export interface UpdateStatus {
   auto_check: boolean;
   /** 生效中的自动检查间隔（小时）。 */
   interval_hours: number;
+  /** 生效中的下载加速前缀（空串 = 直连）。 */
+  download_mirror?: string;
   /** 是否配了私有仓库令牌（不回令牌原文）。 */
   token_set: boolean;
   /** 发现新版本后是否自动下载安装包（config.json 的 update.auto_download，默认开）。 */
   auto_download: boolean;
+  /** 安装包下好之后是否自动安装（config.json 的 update.auto_install，默认关）。 */
+  auto_install: boolean;
+  /** 此刻正在下载安装包（配合下面两个字段画进度条）。 */
+  downloading: boolean;
+  /** 已下载的字节数（仅在 downloading 时有意义）。 */
+  downloaded_bytes?: number;
+  /** 安装包总大小（服务器没给 Content-Length 时为 0 → 退化为转圈）。 */
+  download_total_bytes?: number;
+  /** 此刻有一次自动安装在跑（面板据此置灰安装按钮）。 */
+  installing?: boolean;
   /** 本地已就绪的安装包（不存在或大小与 Release 不符时为空）。 */
   local_path?: string;
   local_bytes?: number;
@@ -2475,8 +2487,10 @@ export interface UpdateInstallPlan {
 export interface UpdateInstallResult {
   ok: boolean;
   detail?: string;
-  /** 网关随后会自行重启（面板据此显示「正在重启」而不是「完成」）。 */
+  /** 网关随后会自行重启（exec 换上新版本）。 */
   restart?: boolean;
+  /** 网关随后会**退出**且不自行回来（Windows：让出 `bin\*.exe` 的文件锁，见 PROGRESS.md）。 */
+  exit?: boolean;
   /** 安装命令的输出（失败时最有价值：dpkg 会在这里说清缺什么）。 */
   output?: string;
   state?: UpdateStatus;

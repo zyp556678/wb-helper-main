@@ -260,6 +260,28 @@ type UpdateSection struct {
 	// 真正破坏性的那一步（运行安装程序、覆盖已装好的程序并重启网关）**不在配置里**：
 	// 它必须由人在面板上点一下并确认，见 internal/update/install.go 的开头说明。
 	AutoDownload *bool `json:"auto_download"`
+	// AutoInstall 决定「安装包下好之后是否自动安装」。默认 **false**。
+	//
+	// 与 AutoDownload 的区别是本质的：下载只是往数据目录放一个文件，而安装会覆盖
+	// 已装好的程序、结束正在跑的进程、必要时提权，失败时可能留下一个既起不来也没有
+	// 回退版本的现场。所以默认关，由用户显式打开（面板上打开时会再确认一次）。
+	// 打开之后：下好 → 装 → 网关重启（Windows 上是退出，装完由向导拉起）。
+	AutoInstall *bool `json:"auto_install"`
+	// DownloadMirror 是 Release 附件的**下载加速前缀**，留空表示直连 github.com。
+	//
+	// 国内直连 github.com 下几十 MB 的安装包经常只有几十 KB/s 甚至超时，而这恰好是
+	// 升级路上最贵的一步。填社区常见的加速服务前缀即可，例如：
+	//
+	//	"https://ghfast.top/"   →  实际请求 https://ghfast.top/https://github.com/...
+	//
+	// 只影响**安装包下载**，不影响版本检查（那是 api.github.com 的一次小请求，
+	// 本来就不慢）。配了 update.token（私有仓库）时**不加速**：加速服务拿不到
+	// 我们的令牌，而私有附件必须带令牌 —— 硬走加速只会得到 404。
+	//
+	// 用第三方加速意味着安装包经由它转发。HTTPS 保证它看不到明文内容，
+	// 但它能决定给你哪一份文件（本项目没有代码签名，也就没有本地校验环节）——
+	// 所以这里**默认留空**，用不用、用哪家由用户自己决定。
+	DownloadMirror string `json:"download_mirror"`
 }
 
 // ApplyDefaults 填充未配置字段的默认值（口径与 wb2api-panel 一致）。
@@ -701,6 +723,19 @@ func (c *Config) UpdatePrerelease() bool {
 // UpdateAutoDownload 报告「发现新版本后自动下载安装包」是否开启（默认 true）。
 func (c *Config) UpdateAutoDownload() bool {
 	return c.Update.AutoDownload == nil || *c.Update.AutoDownload
+}
+
+// UpdateAutoInstall 报告「安装包下好之后自动安装」是否开启（默认 **false**）。
+//
+// 默认关是这个功能的边界：下载只是放一个文件，安装会覆盖程序、结束进程、重启网关，
+// 失败时可能留下既起不来也没有回退版本的现场。
+func (c *Config) UpdateAutoInstall() bool {
+	return c.Update.AutoInstall != nil && *c.Update.AutoInstall
+}
+
+// UpdateDownloadMirror 取 Release 附件的下载加速前缀（留空 = 直连 github.com）。
+func (c *Config) UpdateDownloadMirror() string {
+	return strings.TrimSpace(c.Update.DownloadMirror)
 }
 
 // UpdateToken 取更新源令牌：config.json 里的优先，其次环境变量 WB_UPDATE_TOKEN。

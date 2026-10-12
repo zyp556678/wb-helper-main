@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"workbuddy-gateway/internal/eventlog"
+	"workbuddy-gateway/internal/update"
 )
 
 // handlePanelUpdateRoute 按方法分发：GET 读状态（必要时补一次检查），POST 立即检查。
@@ -83,6 +85,7 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Enabled      *bool `json:"enabled"`
 		AutoDownload *bool `json:"auto_download"`
+		AutoInstall  *bool `json:"auto_install"`
 	}
 	if err := decodeBody(r, &payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("请求体解析失败："+err.Error()))
@@ -90,9 +93,9 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	// 必须显式传至少一个字段。用指针判空而不是默认 false：默认 false 的话，
 	// 一个拼错的字段名会静默变成「关掉自动检查」，用户以为开着、实际关了。
-	if payload.Enabled == nil && payload.AutoDownload == nil {
+	if payload.Enabled == nil && payload.AutoDownload == nil && payload.AutoInstall == nil {
 		writeJSON(w, http.StatusBadRequest,
-			errBody(`缺少字段（应为 {"enabled": true} 或 {"auto_download": false}）`))
+			errBody(`缺少字段（应为 {"enabled": true} / {"auto_download": false} / {"auto_install": true}）`))
 		return
 	}
 
@@ -102,6 +105,9 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.AutoDownload != nil {
 		updates["auto_download"] = *payload.AutoDownload
+	}
+	if payload.AutoInstall != nil {
+		updates["auto_install"] = *payload.AutoInstall
 	}
 	patch, err := json.Marshal(map[string]any{"update": updates})
 	if err != nil {
@@ -135,6 +141,61 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	writeJSON(w, http.StatusOK, s.updateState(false))
+}
+
+// setUpdateMirror 处理 `{"mirror": "https://ghfast.top" | ""}`：下载加速前缀写进 config.json。
+//
+// 单独一条端点而不是并进 /update/auto：auto 那条全是布尔开关（按钮点击语义），
+// 这里是**文本输入 + 保存**语义，失败提示也不一样（前缀格式错要说明怎么改）。
+// 用 SavePatch 走同一条配置链路（原子替换、保留未知键、热生效）。
+func (s *Server) setUpdateMirror(w http.ResponseWriter, r *http.Request) {
+	if s.updates == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("本实例未启用更新检查"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errBody("仅支持 POST"))
+		return
+	}
+	var payload struct {
+		Mirror *string `json:"mirror"`
+	}
+	if err := decodeBody(r, &payload); err != nil || payload.Mirror == nil {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`缺少 mirror 字段（应为 {"mirror": "https://ghfast.top"}，空串表示直连）`))
+		return
+	}
+
+	// 先按**提交值**校验形态（空串合法 = 直连）。不合法直接 400，让用户当场改，
+	// 而不是存进去之后每次下载都悄悄退回直连。
+	value := strings.TrimSpace(*payload.Mirror)
+	if value != "" {
+		if _, err := update.ApplyDownloadMirror(value, "https://github.com/o/r/releases/download/v1/x.deb"); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+	}
+	patch, err := json.Marshal(map[string]any{"update": map[string]any{"download_mirror": value}})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("构造配置补丁失败："+err.Error()))
+		return
+	}
+	next := s.config().Clone()
+	if _, _, err := next.SavePatch(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("保存下载加速设置失败："+err.Error()))
+		return
+	}
+	s.storeConfig(next)
+	detail := "已改为直连 github.com"
+	if value != "" {
+		detail = "已启用下载加速：" + value
+	}
+	s.logf("[更新] %s", detail)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"mirror": value,
+		"detail": detail,
+	})
 }
 
 // installUpdate 把「已经下好的」安装包装到本机。
@@ -182,15 +243,20 @@ func (s *Server) installUpdate(w http.ResponseWriter, r *http.Request) {
 		"ok":      res.OK,
 		"detail":  res.Detail,
 		"restart": res.Restart,
+		"exit":    res.Exit,
 		"output":  res.Output,
-		// 装完把最新状态一并回给面板：重启途中面板还能用这份数据渲染「正在重启」。
+		// 装完把最新状态一并回给面板：重启/退出途中面板还能用这份数据渲染提示。
 		"state": s.updateState(false),
 	})
 
-	// 必须**先**把响应写回面板，再请求重启：重启会立刻掐断这条连接，
+	// 必须**先**把响应写回面板，再请求重启/退出：那会立刻掐断这条连接，
 	// 紧接着发生的话面板只会看到「请求失败」，用户会以为安装失败并重复点击。
-	if res.Restart {
+	switch {
+	case res.Restart:
 		s.requestRestart(restartDelayAfterInstall)
+	case res.Exit:
+		// Windows：退出以让出文件锁（详见 installWindows 的说明）。
+		s.requestExit(restartDelayAfterInstall)
 	}
 }
 

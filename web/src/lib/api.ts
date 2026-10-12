@@ -1278,6 +1278,25 @@ export function setUpdateAutoDownload(enabled: boolean) {
 }
 
 /**
+ * 开关「自动安装」（POST /panel/api/update/auto）。
+ *
+ * 写的是 config.json 的 `update.auto_install`。打开之后：安装包下好即自动安装并
+ * 重启（Windows 上是退出让出文件锁）。**这是更新链路里唯一真正动系统的自动化**，
+ * 所以默认关。
+ */
+export function setUpdateAutoInstall(enabled: boolean) {
+  return request<UpdateStatus>("/update/auto", { method: "POST", body: { auto_install: enabled } });
+}
+
+/** 设置下载加速前缀（POST /panel/api/update/mirror，传空串表示直连）。 */
+export function setUpdateMirror(mirror: string) {
+  return request<{ ok: boolean; mirror: string; detail?: string }>("/update/mirror", {
+    method: "POST",
+    body: { mirror },
+  });
+}
+
+/**
  * 下载匹配本机平台的安装包（POST /panel/api/update/download）。
  *
  * 动作型端点：<500 不抛异常，`{ok:false,detail}` 由调用方原样展示 ——

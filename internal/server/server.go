@@ -80,11 +80,11 @@ type Server struct {
 	// cfgWatch 是 config.json 的内容摘要游标：判断文件是否被**外部**改过
 	//（面板保存走自己那条路，不该被监听循环当成外部改动重放）。
 	cfgWatch *config.Watch
-	// restartFn 由 main 注入：请求网关「优雅关闭后用新二进制重新执行自己」，
-	// 安装更新成功后调用（见 /panel/api/update/install）。
-	// 用回调而不是在这里调 syscall.Exec：进程生命周期属于 main，而且 Windows
-	// 上根本没有 exec 这一说 —— 那边的重启由安装程序接管。
+	// restartFn / exitFn 由 main 注入：安装更新之后，Unix 上换上新二进制继续服务
+	// （exec 自我重启），Windows 上退出去让出文件锁（见各自的注入点与
+	// internal/update/install.go 的说明）。
 	restartFn func()
+	exitFn    func()
 	start     time.Time
 
 	// panelFS 是面板静态资源（前端构建产物），由 main 注入。
@@ -180,6 +180,14 @@ func (s *Server) SetUpdateChecker(checker *update.Checker) { s.updates = checker
 // systemd 重启、exec 前后该怎么收尾），而且 Windows 上由安装程序接管这一步。
 func (s *Server) SetRestartFunc(fn func()) { s.restartFn = fn }
 
+// SetExitFunc 注入「退出网关、且不自行回来」的实现（由 main 提供）。
+//
+// 与 SetRestartFunc 分开是因为**结局不同**：重启把进程换上新版本继续服务，
+// 退出则留一个空档，等安装程序或用户把应用拉起来。只有 Windows 走退出这条路 ——
+// 那边必须先让出 `bin\*.exe` 的文件锁，否则安装程序跑旧版本卸载器时会报
+// 「无法卸载！」并中止（见 internal/update/install.go 的 installWindows）。
+func (s *Server) SetExitFunc(fn func()) { s.exitFn = fn }
+
 // restartDelayAfterInstall 是「安装完成 → 请求重启」之间的等待。
 //
 // 为什么必须等：重启会掐断正在写响应的那条连接。紧接着重启的话，面板收到的是一个
@@ -194,6 +202,23 @@ func (s *Server) requestRestart(after time.Duration) {
 		return
 	}
 	time.AfterFunc(after, s.restartFn)
+}
+
+// RequestRestart 立即请求网关重启（供自动安装的完成钩子调用，见 main.go 的接线）。
+func (s *Server) RequestRestart() { s.requestRestart(0) }
+
+// RequestExit 立即请求网关退出（供自动安装的完成钩子调用，见 main.go 的接线）。
+func (s *Server) RequestExit() { s.requestExit(0) }
+
+// requestExit 在响应写回之后请求网关退出（不重启）。
+//
+// 同样要等响应写完：否则面板只会看到一个网络错误，用户以为安装失败。
+func (s *Server) requestExit(after time.Duration) {
+	if s.exitFn == nil {
+		s.logf("[更新] 本实例没有配置退出通路，请手动退出网关以让出文件锁")
+		return
+	}
+	time.AfterFunc(after, s.exitFn)
 }
 
 // StartBackground 启动后台任务。
@@ -354,6 +379,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/panel/api/update/auto", s.withPanelAuth(s.setUpdateAutoCheck))
 	mux.HandleFunc("/panel/api/update/download", s.withPanelAuth(s.downloadUpdate))
 	mux.HandleFunc("/panel/api/update/install", s.withPanelAuth(s.installUpdate))
+	mux.HandleFunc("/panel/api/update/mirror", s.withPanelAuth(s.setUpdateMirror))
 
 	// ---- 面板：用量统计（切片 6）----
 	mux.HandleFunc("/panel/api/stats", s.withPanelAuth(s.handlePanelStats))

@@ -4,6 +4,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { WindowTitleBar } from "@/components/window-titlebar";
 import { formatUptime } from "@/lib/format";
 import type { PageId } from "@/lib/navigation";
 import { usePanelData } from "@/lib/use-panel-data";
@@ -46,71 +47,76 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="flex h-screen min-h-0 overflow-hidden bg-background">
-        <AppSidebar
-          current={page}
-          onNavigate={setPage}
-          online={online}
-          version={data.overview?.version}
-          uptime={data.overview ? formatUptime(data.overview.uptime_seconds) : undefined}
-          onOpenApiKey={() => setKeyPanelOpen(true)}
-          showLocal={localAvailable}
-        />
-        <main className="min-w-0 flex-1 overflow-y-auto overscroll-contain bg-background">
-          {/* key 用 page：切换导航即重建边界，避免上一页的错误状态粘住新页面 */}
-          <ErrorBoundary key={page}>
-          {page === "accounts" ? (
-            <AccountsPage
-              data={data}
-              keyPanelOpen={keyPanelOpen}
-              onKeyPanelOpenChange={setKeyPanelOpen}
-              onNavigate={setPage}
-            />
-          ) : page === "monitoring" ? (
-            <MonitoringPage />
-          ) : page === "models" ? (
-            <ModelsPage />
-          ) : page === "sites" ? (
-            <SitesPage />
-          ) : page === "tasks" ? (
-            <TasksPage />
-          ) : page === "sessions" ? (
-            <LinkedSessionsPage accounts={data.accounts ?? []} />
-          ) : page === "local" ? (
-            <LocalPage />
-          ) : page === "stats" ? (
-            <Suspense
-              fallback={
-                <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-                  <div className="h-8 w-40 animate-pulse rounded bg-muted" />
-                  <div className="mt-6 h-72 animate-pulse rounded-lg bg-muted" />
-                </div>
-              }
-            >
-              <StatsPage />
-            </Suspense>
-          ) : page === "config" ? (
-            <ConfigPage />
-          ) : page === "updates" ? (
-            <UpdatesPage />
-          ) : page === "credits" ? (
-            <Suspense
-              fallback={
-                <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-                  <div className="h-8 w-40 animate-pulse rounded bg-muted" />
-                  <div className="mt-6 h-72 animate-pulse rounded-lg bg-muted" />
-                </div>
-              }
-            >
-              <CreditStatsPage />
-            </Suspense>
-          ) : page === "logs" ? (
-            <LogsPage />
-          ) : page === "requests" ? (
-            <RequestsPage />
-          ) : null}
-          </ErrorBoundary>
-        </main>
+      <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
+        {/* 无边框桌面窗口（Linux/Windows）下唯一能拖窗、能点最小化/最大化/关闭的地方；
+            浏览器与 macOS 原生标题栏下渲染成 null。 */}
+        <WindowTitleBar />
+        <div className="flex min-h-0 flex-1">
+            <AppSidebar
+            current={page}
+            onNavigate={setPage}
+            online={online}
+            version={data.overview?.version}
+            uptime={data.overview ? formatUptime(data.overview.uptime_seconds) : undefined}
+            onOpenApiKey={() => setKeyPanelOpen(true)}
+            showLocal={localAvailable}
+          />
+          <main className="min-w-0 flex-1 overflow-y-auto overscroll-contain bg-background">
+            {/* key 用 page：切换导航即重建边界，避免上一页的错误状态粘住新页面 */}
+            <ErrorBoundary key={page}>
+            {page === "accounts" ? (
+              <AccountsPage
+                data={data}
+                keyPanelOpen={keyPanelOpen}
+                onKeyPanelOpenChange={setKeyPanelOpen}
+                onNavigate={setPage}
+              />
+            ) : page === "monitoring" ? (
+              <MonitoringPage />
+            ) : page === "models" ? (
+              <ModelsPage />
+            ) : page === "sites" ? (
+              <SitesPage />
+            ) : page === "tasks" ? (
+              <TasksPage />
+            ) : page === "sessions" ? (
+              <LinkedSessionsPage accounts={data.accounts ?? []} />
+            ) : page === "local" ? (
+              <LocalPage />
+            ) : page === "stats" ? (
+              <Suspense
+                fallback={
+                  <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+                    <div className="h-8 w-40 animate-pulse rounded bg-muted" />
+                    <div className="mt-6 h-72 animate-pulse rounded-lg bg-muted" />
+                  </div>
+                }
+              >
+                <StatsPage />
+              </Suspense>
+            ) : page === "config" ? (
+              <ConfigPage />
+            ) : page === "updates" ? (
+              <UpdatesPage />
+            ) : page === "credits" ? (
+              <Suspense
+                fallback={
+                  <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+                    <div className="h-8 w-40 animate-pulse rounded bg-muted" />
+                    <div className="mt-6 h-72 animate-pulse rounded-lg bg-muted" />
+                  </div>
+                }
+              >
+                <CreditStatsPage />
+              </Suspense>
+            ) : page === "logs" ? (
+              <LogsPage />
+            ) : page === "requests" ? (
+              <RequestsPage />
+            ) : null}
+            </ErrorBoundary>
+          </main>
+        </div>
       </div>
       <Toaster />
     </TooltipProvider>

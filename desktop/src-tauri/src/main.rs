@@ -41,6 +41,19 @@ fn main() {
     builder
         .setup(move |app| {
             tray::setup(app.handle())?;
+
+            // 去掉系统标题栏：窗口顶部改由面板自绘一条（拖拽区 + 最小化/最大化/关闭），
+            // 视觉上与面板融为一体。macOS 保留原生标签栏 —— 无边框窗口在那边会丢掉
+            // 边缘拖拽缩放与交通灯按钮，那是当地用户的基本预期。
+            //
+            // 结果要回传给 backend：只有真的去掉成功，壳才会在面板地址上带
+            // `?host=desktop`（见 backend::navigate_to_panel）。两边用同一个事实，
+            // 就不会出现「系统标题栏 + 自绘顶栏」叠成两条的情况。
+            //
+            // 这一次只是「尽量早」：此处窗口可能还没建好，那时它会静默跳过，
+            // 由导航前那一次兜底（见 backend::ensure_frameless）。
+            backend::ensure_frameless(app.handle());
+
             if !silent {
                 tray::show_main_window(app.handle());
             }

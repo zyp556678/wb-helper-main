@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -275,10 +276,14 @@ fn set_error(app: &AppHandle, text: &str) {
 /// 立刻从地址栏和历史里抹掉，于是用户不必手动输入密钥。
 fn navigate_to_panel(app: &AppHandle, port: u16, api_key: Option<&str>) {
     if let Some(win) = app.get_webview_window("main") {
-        let url = match api_key {
+        let base = match api_key {
             Some(key) => crate::api_key::panel_url_with_key(port, key),
             None => panel_url(port),
         };
+        // 本窗口没有系统标题栏时告诉面板，让它自绘一条（拖拽区 + 最小化/最大化/关闭）。
+        // 标记与 ensure_frameless 用的是同一个事实，因此不会出现「系统标题栏 + 自绘顶栏」。
+        // 这里调一次是**兜底**：setup() 里窗口可能还没建好（见 ensure_frameless 的说明）。
+        let url = if ensure_frameless(app) { with_host_marker(&base) } else { base };
         match url.parse() {
             Ok(url) => {
                 if let Err(err) = win.navigate(url) {
@@ -287,6 +292,69 @@ fn navigate_to_panel(app: &AppHandle, port: u16, api_key: Option<&str>) {
             }
             Err(err) => set_error(app, &format!("面板地址无效：{err}")),
         }
+    }
+}
+
+/// 本窗口是否已去掉系统标题栏（进程内只判定一次，见 ensure_frameless）。
+static FRAMELESS: AtomicBool = AtomicBool::new(false);
+static FRAMELESS_DECIDED: AtomicBool = AtomicBool::new(false);
+
+/// 去掉系统标题栏，返回「现在是不是无边框」。
+///
+/// 为什么要在两个地方调（`main.rs` 的 setup 与这里的 navigate_to_panel）：
+/// `setup()` 里窗口可能**还没建好**（那时 get_webview_window 返回 None，静默跳过，
+/// 作者实测就踩到了 —— 现象是窗口照旧带系统标题栏，而面板因为收到的地址里没有
+/// 标记也就不画自绘顶栏，两边都没错、结果都不对）。所以 setup 尽量早、导航前兜底，
+/// 用「只判定一次」的开关保证幂等。
+///
+/// 返回的是**真的设置成功**而不是「平台不是 macOS」：失败时窗口留着系统标题栏，
+/// 面板就不能再画一条自己的，否则界面上会叠出两条标题栏。
+pub fn ensure_frameless(app: &AppHandle) -> bool {
+    if FRAMELESS_DECIDED.load(Ordering::Relaxed) {
+        return FRAMELESS.load(Ordering::Relaxed);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 保留原生标签栏：无边框窗口在那边会丢掉边缘拖拽缩放与交通灯按钮，
+        // 那是当地用户的基本预期，而这条路径我们无法在开发机上验证。
+        let _ = app;
+        FRAMELESS_DECIDED.store(true, Ordering::Relaxed);
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some(win) = app.get_webview_window("main") else {
+            // 窗口还没建好：这次先不定，留给下一次调用（导航前那次通常就成功了）。
+            return false;
+        };
+        let ok = win.set_decorations(false).is_ok();
+        // 一行排障输出：面板「有没有自绘顶栏」取决于这里的结果，而窗口外观的问题
+        // 从界面上很难判断是「壳没去掉装饰」还是「面板没画顶栏」。壳刻意不引日志依赖，
+        // 这一行用 std 的 eprintln 就够（Windows 发布版没有控制台，它会自然消失）。
+        eprintln!("[壳] 去掉系统标题栏: {}", if ok { "成功" } else { "失败" });
+        // 只在**成功**时才认定「已判定」：失败（GTK 拒绝、窗口状态未就绪）留个口子，
+        // 下一次调用（导航前那次）可以再试。反过来写会出现「试过一次失败就永远带
+        // 系统标题栏」—— 而这正是作者第一版踩到的那个现象。
+        if ok {
+            FRAMELESS.store(true, Ordering::Relaxed);
+            FRAMELESS_DECIDED.store(true, Ordering::Relaxed);
+        }
+        ok
+    }
+}
+
+fn frameless() -> bool {
+    FRAMELESS.load(Ordering::Relaxed)
+}
+
+/// 在 URL 的路径与 fragment 之间插入 `?host=desktop`。
+///
+/// 为什么用 query 而不是 fragment：壳注入的密钥走 fragment，而面板读到密钥后会立刻
+/// 把 fragment 抹掉（避免密钥停在地址栏里）—— 标记放那儿会被一起清掉。
+fn with_host_marker(url: &str) -> String {
+    match url.split_once('#') {
+        Some((head, tail)) => format!("{head}?host=desktop#{tail}"),
+        None => format!("{url}?host=desktop"),
     }
 }
 
@@ -402,4 +470,28 @@ pub fn restart(app: AppHandle, port: u16) {
 /// 数据目录路径（供托盘「打开数据目录」使用）。
 pub fn data_dir_path() -> PathBuf {
     data_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_host_marker;
+
+    /// 标记必须落在路径与 fragment 之间：面板读到密钥后会抹掉 fragment，
+    /// 标记若跟着走就丢了（那样顶栏会时有时无）。
+    #[test]
+    fn host_marker_sits_before_fragment() {
+        let url = with_host_marker("http://127.0.0.1:8317/panel/#wb-key=wb-abc");
+        assert_eq!(url, "http://127.0.0.1:8317/panel/?host=desktop#wb-key=wb-abc");
+        // 密钥仍在 fragment 里（不发给服务器）。
+        assert_eq!(url.split_once('#').unwrap().1, "wb-key=wb-abc");
+    }
+
+    /// 没有 fragment 时（没配密钥的外部实例）也要能拼。
+    #[test]
+    fn host_marker_without_fragment() {
+        assert_eq!(
+            with_host_marker("http://127.0.0.1:8317/panel/"),
+            "http://127.0.0.1:8317/panel/?host=desktop"
+        );
+    }
 }

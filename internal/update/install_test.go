@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy-gateway/internal/config"
+	"workbuddy-gateway/internal/eventlog"
 )
 
 // assetServer 起一个「假 Release 源 + 假安装包下载」的服务端。
@@ -81,6 +82,14 @@ func TestPlanForPlatforms(t *testing.T) {
 	}
 	if win.Note == "" {
 		t.Fatal("windows 方案必须提醒会弹安装向导")
+	}
+	// Windows 上必须先退出让出文件锁：升级时安装程序会先跑**旧版本**的卸载器，
+	// 它删不掉还被占用的 bin\*.exe，会直接报「无法卸载！」并中止安装。
+	// 这条文案是用户点确认前唯一能看到的前因后果，不能省。
+	for _, want := range []string{"无法卸载", "退出"} {
+		if !strings.Contains(win.Note, want) {
+			t.Fatalf("windows 方案的说明缺少 %q：%q", want, win.Note)
+		}
 	}
 
 	other := planFor("plan9", path)
@@ -258,4 +267,175 @@ func TestPlanWarnsNpmInstalls(t *testing.T) {
 			t.Fatalf("%s 的方案没有提醒 npm 安装的实例：%q", goos, got.Note)
 		}
 	}
+}
+
+// TestApplyDownloadMirror 加速前缀的拼接与校验：前缀只能是 origin，原始地址必须是 http(s)。
+//
+// 这个值决定**请求发去哪**，且来自用户手写的 config.json —— 校验松了会把
+// 「半截 URL」拼成一个难懂的请求失败，不如在这里就报清楚。
+func TestApplyDownloadMirror(t *testing.T) {
+	raw := "https://github.com/o/r/releases/download/v1/pkg.deb"
+	for mirror, want := range map[string]string{
+		"https://ghfast.top":      "https://ghfast.top/" + raw,
+		"https://ghfast.top/":     "https://ghfast.top/" + raw,
+		"https://mirror.example/": "https://mirror.example/" + raw,
+	} {
+		got, err := ApplyDownloadMirror(mirror, raw)
+		if err != nil {
+			t.Fatalf("合法前缀 %q 报错: %v", mirror, err)
+		}
+		if got != want {
+			t.Fatalf("拼接结果不对：mirror=%q got=%s want=%s", mirror, got, want)
+		}
+	}
+
+	for _, bad := range []string{"ghfast.top", "ghfast.top/", "https://ghfast.top/sub", "https://ghfast.top/sub/", "ftp://x"} {
+		if _, err := ApplyDownloadMirror(bad, raw); err == nil {
+			t.Fatalf("非法前缀 %q 应当报错", bad)
+		}
+	}
+	// 空前缀 = 原样返回（直连）。
+	got, err := ApplyDownloadMirror("", raw)
+	if err != nil || got != raw {
+		t.Fatalf("空前缀应原样返回，实际 %q err=%v", got, err)
+	}
+}
+
+// TestAutoInstallFailsGracefully 端到端（不起壳、不弹授权框）：
+// auto_download + auto_install 全开时，检查 → 下载 → 自动安装 → 失败被如实记录。
+//
+// 「让安装失败」用 plan9：它没有任何安装方案（planFor 不支持），Install 会在碰
+// 平台命令之前就被拒 —— 测试绝不能真的调 pkexec。要验证的是失败路径本身：
+// 结局钩子不触发、事件日志里有 Warn（用户能在面板「日志」页看到为什么没装上）。
+func TestAutoInstallFailsGracefully(t *testing.T) {
+	dir := t.TempDir()
+	// plan9 没有安装方案 → Ready() 会拒 → 自动安装记失败事件。
+	// 这恰好覆盖「安装失败也要有痕迹、进程不能崩」的路径。
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases":
+			_, _ = io.WriteString(w, releasesJSON(mkRelease("v0.9.3", map[string]any{
+				"assets": []map[string]any{
+					asset("pkg_amd64.deb", 3, srv.URL+"/dl/pkg_amd64.deb"),
+				},
+			})))
+		case "/dl/pkg_amd64.deb":
+			_, _ = w.Write([]byte("deb"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	events := eventlog.New(50)
+	c := New(testConfig(t, config.UpdateSection{
+		Repo:        "o/r",
+		AutoInstall: boolPtr(true),
+	}), Options{
+		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
+		GOOS: "plan9", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf, Events: events,
+	})
+	var restarts, exits int
+	c.SetRestartHook(func() { restarts++ })
+	c.SetExitHook(func() { exits++ })
+	t.Cleanup(c.WaitBackground)
+
+	c.Check(context.Background(), true)
+	c.WaitBackground() // 等自动下载 + 自动安装都收尾
+
+	// 安装失败（plan9 不支持）→ 结局钩子不该被触发。
+	if restarts != 0 || exits != 0 {
+		t.Fatalf("安装失败时结局钩子不应触发，实际 restart=%d exit=%d", restarts, exits)
+	}
+	// 但失败要有痕迹：事件日志里应有 Warn（update_auto_install_failed）。
+	found := false
+	for _, e := range events.Query(eventlog.Query{}).Events {
+		if e.Event == "update_auto_install_failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("自动安装失败没有记事件")
+	}
+}
+
+// TestDownloadReportsProgress 下载过程中 State() 要能报出进度（面板进度条的数据来源）。
+//
+// 服务端边下边写、面板每 800ms 轮询一次，所以这里也必须**并发**观察：
+// 起一个慢速上游（分块 + 停顿），主协程轮询 State 直到看到 downloading=true、
+// 已下载字节数在增长、总量等于资产大小。
+func TestDownloadReportsProgress(t *testing.T) {
+	const total = 64 * 1024
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dl/pkg_amd64.deb" {
+			_, _ = io.WriteString(w, releasesJSON(mkRelease("v0.9.3", map[string]any{
+				"assets": []map[string]any{
+					asset("pkg_amd64.deb", total, srv.URL+"/dl/pkg_amd64.deb"),
+				},
+			})))
+			return
+		}
+		chunk := make([]byte, 4*1024)
+		for i := 0; i < total/len(chunk); i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(5 * time.Millisecond) // 拖慢，留出观察窗口
+		}
+	}))
+	defer srv.Close()
+
+	c := New(testConfig(t, config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)}), Options{
+		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
+		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
+	})
+	if st := c.Check(context.Background(), true); st.Error != "" {
+		t.Fatalf("前置检查失败: %s", st.Error)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Download(context.Background())
+		done <- err
+	}()
+
+	sawActive, sawGrowth := false, int64(0)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st := c.State()
+		if st.Downloading {
+			sawActive = true
+			if st.DownloadTotal != total {
+				t.Fatalf("总量应等于资产大小 %d，实际 %d", total, st.DownloadTotal)
+			}
+			if st.Downloaded > sawGrowth {
+				sawGrowth = st.Downloaded
+			}
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("下载失败: %v", err)
+			}
+			if !sawActive {
+				t.Fatal("整个下载过程都没看到 downloading=true，进度条不会有数据")
+			}
+			if sawGrowth <= 0 {
+				t.Fatal("没见过已下载字节数增长，进度条不会动")
+			}
+			// 下载结束后必须清零，否则面板会一直转圈。
+			if st := c.State(); st.Downloading || st.Downloaded != 0 {
+				t.Fatalf("下载结束后进度未清零: %+v", st)
+			}
+			return
+		default:
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	t.Fatal("下载没有在 5 秒内结束")
 }

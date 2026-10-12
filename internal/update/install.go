@@ -60,8 +60,17 @@ type InstallResult struct {
 	OK bool `json:"ok"`
 	// Detail 是给用户看的一句话结果。
 	Detail string `json:"detail"`
-	// Restart 表示网关会随后自行重启（面板据此显示「正在重启」而不是「完成」）。
+	// Restart 表示网关会随后自行重启（exec 换上新版本，面板等它回来即可）。
 	Restart bool `json:"restart"`
+	// Exit 表示网关会随后**退出**、且不自行回来。
+	//
+	// 只有 Windows 走这条：那边正在运行的 .exe 被系统锁住，而安装程序在**升级**时会
+	// 先跑**旧版本**的卸载器 —— 它删不掉还被占用的 `bin\*.exe`，于是直接报
+	// 「无法卸载！」并中止安装（Tauri 的 NSIS 模板里 unableToUninstall 就是这个文案）。
+	// 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚（卸载器早就返回了）。
+	// 所以唯一可靠的办法是在启动向导之后立刻退出，把文件锁让出去。
+	// 重新启动由安装向导最后一页的「运行」完成（见 installWindows）。
+	Exit bool `json:"exit,omitempty"`
 	// Output 是安装命令的输出（失败时最有价值：dpkg 会在这里说清缺什么）。
 	Output string `json:"output,omitempty"`
 }
@@ -106,7 +115,9 @@ func planFor(goos, path string) InstallPlan {
 			Supported: true,
 			Command:   path,
 			Restart:   false,
-			Note:      "会打开安装向导：它需要先结束正在运行的网关与桌面窗口才能覆盖文件，装完请在向导最后一页确认「运行」。",
+			Note: "会打开安装向导，网关随即退出以让出 bin\\*.exe 的文件锁 —— " +
+				"旧的卸载器删不掉被占用的文件，会直接报「无法卸载！」并中止安装。" +
+				"装完请在向导最后一页确认「运行」；中途取消的话网关会停着，需要手动启动一次。",
 		}
 	default:
 		return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
@@ -259,12 +270,20 @@ func (c *Checker) installDarwin(ctx context.Context, path string) (InstallResult
 	}, nil
 }
 
-// installWindows 启动安装向导（**不静默**）。
+// installWindows 启动安装向导（**不静默**），随后由调用方让网关退出。
 //
 // 为什么不像其它平台那样静默：Windows 上正在运行的 .exe 被锁，必须由一个提权的
 // 安装程序先结束进程再覆盖 —— 安装包自带这个钩子，而静默装完之后没有任何可靠的
-// 「重新启动应用」通路（.exe 无法像 Unix 那样 exec 自己）。向导的最后一页有
-// 「运行」勾选项，那一步交给用户点，至少不会留下一个装完却没人启动的现场。
+// 「重新启动应用」通路（.exe 无法像 Unix 那样 exec 自己）。
+//
+// 为什么要**退出**（而不是像 Linux/macOS 那样自己重启）：升级时安装向导会先跑
+// **旧版本**的卸载器，它删不掉还被我们占着的 `bin\workbuddy-gateway.exe` 与
+// `bin\wb-local-agent.exe`，于是 Tauri 的 NSIS 模板直接弹「无法卸载！」并中止 ——
+// 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚。
+//
+// 两道防线各管一段：新版安装包与卸载器里的钩子（desktop/src-tauri/windows/hooks.nsh）
+// 负责「以后的升级」；这里的退出负责「从任意旧版本升上来」—— 旧版本的卸载器里
+// 有没有那个钩子，我们无从判断。
 func (c *Checker) installWindows(path string) (InstallResult, error) {
 	cmd := exec.Command(path)
 	if err := cmd.Start(); err != nil {
@@ -273,8 +292,10 @@ func (c *Checker) installWindows(path string) (InstallResult, error) {
 	// 不 Wait：向导会先把本进程结束掉（这是它覆盖文件的必要步骤），
 	// 等它退出等于永远等不到。
 	return InstallResult{
-		OK:     true,
-		Detail: "安装向导已打开：按提示完成后，请从开始菜单或桌面快捷方式重新启动 WorkBuddy Gateway",
+		OK: true,
+		Detail: "安装向导已打开；网关随即退出以让出文件锁，" +
+			"装完请在向导最后一页确认「运行」（或从开始菜单重新启动）",
+		Exit: true,
 	}, nil
 }
 

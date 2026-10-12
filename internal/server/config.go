@@ -115,6 +115,8 @@ func (s *Server) configView() map[string]any {
 			"repo":               c.Update.Repo,
 			"include_prerelease": c.UpdatePrerelease(),
 			"auto_download":      c.UpdateAutoDownload(),
+			"auto_install":       c.UpdateAutoInstall(),
+			"download_mirror":    c.UpdateDownloadMirror(),
 			"token_set":          c.UpdateToken() != "",
 		},
 

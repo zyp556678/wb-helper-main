@@ -112,6 +112,18 @@ const (
 // 自动下载在后台跑，等得起慢网络，而失败要再等一个检查周期才有下一次机会。
 const autoDownloadTimeout = 20 * time.Minute
 
+// installTimeout 是一次自动安装的时限（提权框 + dpkg/ditto 都在秒级，留足余量）。
+const installTimeout = 10 * time.Minute
+
+// restartHookDelay 是「安装完成 → 触发重启/退出钩子」之间的等待，让事件日志
+// 先落一条（重启会把进程换掉，之后的日志就属于新进程了）。
+const restartHookDelay = 300 * time.Millisecond
+
+// SetRestartHook / SetExitHook 注入自动安装完成后的重启 / 退出动作。
+// server 装配时调用（main 把同一对优雅关闭回调给它，见 main.go）。
+func (c *Checker) SetRestartHook(fn func()) { c.onRestart = fn }
+func (c *Checker) SetExitHook(fn func())    { c.onExit = fn }
+
 // State 是一次检查的结果快照，也是面板那张卡片的全部数据来源。
 //
 // 字段名直接用 snake_case：面板的其它端点（autostart / stats / config）都是这个口径。
@@ -149,6 +161,18 @@ type State struct {
 	TokenSet      bool `json:"token_set"`
 	// AutoDownload 来自配置：发现新版本后是否自动把安装包下到数据目录（默认 true）。
 	AutoDownload bool `json:"auto_download"`
+	// AutoInstall 来自配置：安装包下好之后是否自动安装（默认 false，见 config.UpdateSection）。
+	AutoInstall bool `json:"auto_install"`
+	// DownloadMirror 是生效中的下载加速前缀（空串 = 直连），面板据此显示当前走哪条路。
+	DownloadMirror string `json:"download_mirror,omitempty"`
+	// Downloading / Downloaded / DownloadTotal 是**下载进度**：面板据此画进度条。
+	// 只在 Downloading 为真时有意义（下载结束就清零）。
+	Downloading   bool  `json:"downloading"`
+	Downloaded    int64 `json:"downloaded_bytes,omitempty"`
+	DownloadTotal int64 `json:"download_total_bytes,omitempty"`
+	// Installing 表示此刻有一次自动安装在进行（面板据此显示「正在安装」，
+	// 并把安装按钮置灰，避免连点）。
+	Installing bool `json:"installing,omitempty"`
 	// LocalPath / LocalBytes 是**本地已就绪**的安装包（不存在或大小不符时为空）。
 	// 面板据此把「下载安装包」换成「安装并重启」，刷新页面也不必重新下载。
 	LocalPath  string `json:"local_path,omitempty"`
@@ -214,6 +238,18 @@ type Checker struct {
 	// 后一个的 rename 就会失败 —— 实测踩到过「rename ... .part ... no such file」。
 	// 串行化之后第二个请求看到文件已存在，直接返回 skipped。
 	dlMu sync.Mutex
+	// dlActive/dlDone/dlTotal 是下载进度（面板的进度条）。用原子量而不是加锁：
+	// io.Copy 的每个 chunk 都要更新一次，加锁会把写盘的快路径拖慢。
+	dlActive atomic.Bool
+	dlDone   atomic.Int64
+	dlTotal  atomic.Int64
+	// installing 表示有一次自动安装在跑（面板据此置灰安装按钮、显示「正在安装」）。
+	installing atomic.Bool
+	// onRestart / onExit 由 server 注入（见 SetRestartHook / SetExitHook）：
+	// 自动安装完成后触发。nil 表示没接（自动安装会完成但进程不重启 ——
+	// 只发生在没有装配 server 的场景，测试里常见）。
+	onRestart func()
+	onExit    func()
 	// inflight 非 nil 表示此刻有一次真实的检查在跑；并发的第二次请求等它，
 	// 而不是再打一次上游（见 Check 的说明）。
 	inflight chan struct{}
@@ -281,12 +317,14 @@ func (c *Checker) DownloadDir() string { return c.downloadDir }
 
 // settings 从当前配置快照里取本次检查所需的参数（每次现读，改完即生效）。
 type settings struct {
-	repo         string
-	token        string
-	prerelease   bool
-	enabled      bool
-	autoDownload bool
-	hours        int
+	repo           string
+	token          string
+	prerelease     bool
+	enabled        bool
+	autoDownload   bool
+	autoInstall    bool
+	downloadMirror string
+	hours          int
 }
 
 func (c *Checker) settings() settings {
@@ -299,6 +337,8 @@ func (c *Checker) settings() settings {
 	s.prerelease = cfg.UpdatePrerelease()
 	s.token = cfg.UpdateToken()
 	s.autoDownload = cfg.UpdateAutoDownload()
+	s.autoInstall = cfg.UpdateAutoInstall()
+	s.downloadMirror = cfg.UpdateDownloadMirror()
 	if r := strings.TrimSpace(cfg.Update.Repo); r != "" {
 		s.repo = r
 	}
@@ -329,6 +369,16 @@ func (c *Checker) State() State {
 	st.IntervalHours = s.hours
 	st.TokenSet = s.token != ""
 	st.AutoDownload = s.autoDownload
+	st.AutoInstall = s.autoInstall
+	st.DownloadMirror = s.downloadMirror
+	// 下载进度（面板的进度条）：原子读，不用加锁 —— 每写一个 chunk 都会更新。
+	st.Downloading = c.dlActive.Load()
+	st.Downloaded, st.DownloadTotal = 0, 0
+	if st.Downloading {
+		st.Downloaded = c.dlDone.Load()
+		st.DownloadTotal = c.dlTotal.Load()
+	}
+	st.Installing = c.installing.Load()
 	if strings.TrimSpace(st.Repo) == "" {
 		st.Repo = s.repo
 	}
@@ -466,7 +516,61 @@ func (c *Checker) autoDownload() {
 			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
 		debuglog.Event(nil, "info", "update_auto_downloaded",
 			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
+		// 开了「自动安装」就接着装。这是这个功能的终点，也是风险最大的一步 ——
+		// 所以默认关、且必须由用户显式打开（面板上打开时会确认一次）。
+		if c.settings().autoInstall {
+			c.autoInstall()
+		}
 	}()
+}
+
+// autoInstall 在后台把**刚下好**的安装包装上（update.auto_install = true 时）。
+//
+// 安装的入口与手动按钮完全同一条（c.Install），因此防呆（路径推导、大小校验、
+// 提权确认）一个不少。安装涉及提权框与向导，跑完的结局有三类，都体现在状态里：
+//
+//   - restart（Linux/macOS）：网关自己 exec 到新版本，面板等它回来；
+//   - exit（Windows）：网关退出让出文件锁，由安装向导把应用拉起来；
+//   - 失败：记事件，状态里带错误 —— 用户还能手动点一次。
+func (c *Checker) autoInstall() {
+	// CAS 防并发：两个下载同时完成（不该发生，dlMu 已串行化）或手动/自动撞车时，
+	// 只有第一个能进。
+	if !c.installing.CompareAndSwap(false, true) {
+		c.logf("[更新] 已有一次安装在跑，跳过自动安装")
+		return
+	}
+	c.installing.Store(true)
+	defer c.installing.Store(false)
+	c.events.Info(eventlog.ChannelSystem, "update_auto_install", "开始自动安装新版本", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
+	defer cancel()
+	res, err := c.Install(ctx)
+	if err != nil {
+		c.logf("[更新] 自动安装失败: %v", err)
+		c.events.Warn(eventlog.ChannelSystem, "update_auto_install_failed",
+			"自动安装失败："+err.Error(), nil)
+		return
+	}
+	c.events.Info(eventlog.ChannelSystem, "update_installed", "自动安装完成", map[string]any{
+		"restart": res.Restart, "exit": res.Exit,
+	})
+
+	switch {
+	case res.Restart:
+		// 让 HTTP 响应先写完（虽然这里没有面板在等，但顺序保持一致），再触发重启。
+		time.AfterFunc(restartHookDelay, func() {
+			if c.onRestart != nil {
+				c.onRestart()
+			}
+		})
+	case res.Exit:
+		time.AfterFunc(restartHookDelay, func() {
+			if c.onExit != nil {
+				c.onExit()
+			}
+		})
+	}
 }
 
 func (c *Checker) runCheck(ctx context.Context, prev State) State {
@@ -811,6 +915,18 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	target := st.DownloadURL
 	if s := c.settings(); s.token != "" && strings.TrimSpace(st.assetAPIURL) != "" {
 		target = st.assetAPIURL
+	} else if s.downloadMirror != "" {
+		// 公开仓库才套加速前缀：私有附件必须带令牌，而加速服务拿不到我们的令牌，
+		// 硬走它只会得到 404（见 config.UpdateSection.DownloadMirror 的说明）。
+		mirrored, err := ApplyDownloadMirror(s.downloadMirror, target)
+		if err != nil {
+			// 前缀配错（少了协议、写成了 URL 片段……）不该让下载彻底不可用：
+			// 退回直连并说明原因，用户至少还能装上。
+			c.logf("[更新] 下载加速前缀不可用（%v），本次改为直连", err)
+		} else {
+			target = mirrored
+			c.logf("[更新] 安装包走加速下载：%s", target)
+		}
 	}
 	if err := os.MkdirAll(c.downloadDir, 0o755); err != nil {
 		return DownloadResult{}, err
@@ -826,6 +942,11 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	// 下载要能重试。安装包几十 MB，慢网络下断在 90% 是常事 —— 而断了就从头再来
 	// 是用户唯一能做的动作，不如替他做。只重试**瞬时**故障（连接被重置、响应体
 	// 提前结束），HTTP 404/403 这类确定性失败重试没有意义。
+	//
+	// 进度从这里开始记：上面那条幂等分支没下东西，不该让面板闪一下进度条。
+	c.beginProgress(st.AssetSize)
+	defer c.endProgress()
+
 	var written int64
 	var lastErr error
 	for attempt := 0; attempt <= transientRetries; attempt++ {
@@ -851,6 +972,67 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 
 	c.logf("[更新] 安装包已下载: %s（%.1f MiB）", dest, float64(written)/(1<<20))
 	return DownloadResult{Path: dest, Name: name, Bytes: written, Version: st.Latest, Dir: c.downloadDir}, nil
+}
+
+// beginProgress / endProgress 标记一次真实下载的起止（面板的进度条）。
+// total=0 表示服务器没给 Content-Length（罕见）——面板会退化为「转圈」而不是画条。
+func (c *Checker) beginProgress(total int64) {
+	c.dlDone.Store(0)
+	if total > 0 {
+		c.dlTotal.Store(total)
+	} else {
+		c.dlTotal.Store(0)
+	}
+	c.dlActive.Store(true)
+}
+
+func (c *Checker) endProgress() {
+	c.dlActive.Store(false)
+	c.dlDone.Store(0)
+	c.dlTotal.Store(0)
+}
+
+// countingWriter 把写入的字节数累计到进度计数器里（每个 chunk 一次原子加）。
+type countingWriter struct {
+	w   io.Writer
+	got *atomic.Int64
+}
+
+func (cw countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	if n > 0 {
+		cw.got.Add(int64(n))
+	}
+	return n, err
+}
+
+// applyDownloadMirror 把 Release 附件地址套上加速前缀，返回可请求的 URL。
+//
+// 前缀的形态是「服务 origin」：`https://ghfast.top/`（结尾斜杠可有可无），
+// 拼接结果是 `https://ghfast.top/https://github.com/...`—— 这是这类服务的约定。
+// 严格校验而不是随手拼：这个值来自用户手写的 config.json，而它**决定请求发去哪**，
+// 拼错（比如写成相对路径）会产生一个难懂的请求失败，不如在配置层就报清楚。
+func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
+	m := strings.TrimSpace(mirror)
+	if m == "" {
+		return rawURL, nil
+	}
+	// 只接 origin（或 origin+`/`）：不许带路径与 query，避免「半截 URL」被拼出意外形态。
+	if !strings.HasPrefix(m, "https://") && !strings.HasPrefix(m, "http://") {
+		return "", fmt.Errorf("加速前缀必须以 https:// 开头（当前值 %q）", m)
+	}
+	// 解析后只允许 host（允许显式端口，如 :8080）；结尾斜杠视为「就这一个 origin」，
+	// 先剥掉再判 —— 拼接时无论如何都会补一个。
+	u, err := url.Parse(m)
+	if err != nil || u.Host == "" || strings.TrimSuffix(u.Path, "/") != "" || u.RawQuery != "" {
+		return "", fmt.Errorf("加速前缀只能是主机地址（如 https://ghfast.top），不能带路径（当前值 %q）", m)
+	}
+	// 原始地址必须是 http(s)，且知道要加速的是谁（拼接形态要求它是完整 URL）。
+	raw, err := url.Parse(rawURL)
+	if err != nil || raw.Scheme != "https" && raw.Scheme != "http" {
+		return "", fmt.Errorf("安装包地址不是有效的 http(s) URL：%q", rawURL)
+	}
+	return strings.TrimSuffix(m, "/") + "/" + rawURL, nil
 }
 
 // downloadOnce 下载一次并落盘，返回写入的字节数。
@@ -903,7 +1085,11 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest string) (int64,
 	if err != nil {
 		return 0, err
 	}
-	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxAssetBytes+1))
+	// 边写边记进度：面板的进度条读 dlDone/dlTotal。重试时从当前重试的那一轮重新计数
+	//（断点续传没做，作者判断不值得 —— 重下一次几秒钟，而 Range 请求会让「临时文件
+	// 可能是半截」这种状态多出一层）。
+	c.dlDone.Store(0)
+	written, copyErr := io.Copy(countingWriter{w: f, got: &c.dlDone}, io.LimitReader(resp.Body, maxAssetBytes+1))
 	closeErr := f.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)

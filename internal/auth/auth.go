@@ -237,8 +237,13 @@ func IsCredentialFile(name string) bool {
 
 // Discover 汇总应加载的凭据路径：
 //  1. authDir 非空 → 目录下所有凭据文件（排序，保证轮询顺序稳定）
-//  2. explicit 为真 → 按逗号切分 authFile
-//  3. 否则 → 扫描工作目录；一个都没有时回退 authFile 以便给出「请先登录」的提示
+//  2. explicit 为真 → 按逗号切分 authFile（用户指明了文件，读不到就该报错）
+//  3. 否则 → 扫描工作目录里的 workbuddy*.json；一个都没有时返回空列表
+//
+// 第 3 条**不回落到默认文件名**：那会让「全新安装、还没登录」变成一条
+// 「读取凭据文件失败 (…/workbuddy.json): no such file or directory」，
+// 面板据此把整页渲染成「状态快照暂不可用」（见 server.overview 的 503 判据）——
+// 新手看到的是「坏了」，而他只是还没加账号。文件确实存在时已由扫描收进 paths。
 func Discover(workDir, authFile, authDir string, explicit bool) []string {
 	var paths []string
 	if strings.TrimSpace(authDir) != "" {
@@ -283,13 +288,15 @@ func Discover(workDir, authFile, authDir string, explicit bool) []string {
 		}
 		sort.Strings(paths)
 	}
-	if len(paths) == 0 {
-		if filepath.IsAbs(authFile) {
-			paths = append(paths, authFile)
-		} else {
-			paths = append(paths, filepath.Join(workDir, authFile))
-		}
-	}
+	// 一个凭据文件都没有时返回**空列表**，不要回落到默认文件名。
+	//
+	// 回落过一次，代价很实在：全新安装（桌面壳刚装好、还没走登录）时，那个默认文件
+	// 当然不存在，于是账号池记下一条「读取凭据文件失败 (…/workbuddy.json): no such file
+	// or directory」——面板据此把整页渲染成「状态快照暂不可用」，用户看到的是「坏了」，
+	// 而他只是还没加账号（见 internal/server/server.go 里 overview 的 503 判据）。
+	//
+	// 显式指定（`-auth`/`-auth-dir`）的路径仍然照常返回：那是用户**指明**要读的文件，
+	// 读不到必须报错（上面两个分支已提前 return）。
 	return paths
 }
 
