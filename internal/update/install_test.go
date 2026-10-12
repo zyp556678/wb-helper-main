@@ -247,3 +247,15 @@ func TestCheckAutoDownloadDisabled(t *testing.T) {
 		t.Fatalf("手动下载不该受开关影响: %v", err)
 	}
 }
+
+// TestPlanWarnsNpmInstalls 三个平台的方案都要提醒 npm 安装的实例别用系统安装包。
+//
+// 面板里下到的是 deb / dmg / setup.exe，而 npm 全局安装的实例该走 npm 自己那条路：
+// 两者装的是同一份网关但落点不同，混着装会出现「装完还显示旧版本」的困惑。
+func TestPlanWarnsNpmInstalls(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if got := planFor(goos, "/tmp/pkg"); !strings.Contains(got.Note, "npm i -g") {
+			t.Fatalf("%s 的方案没有提醒 npm 安装的实例：%q", goos, got.Note)
+		}
+	}
+}

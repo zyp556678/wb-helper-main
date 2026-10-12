@@ -72,14 +72,20 @@ type InstallResult struct {
 // 这个名字会被拼进命令行交给 pkexec 执行，任何引号/空格/换行都是注入面。
 var assetNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 
+// commonInstallHint 是所有平台都要说的一句提醒：本页下到的是**系统级安装包**
+// （deb / dmg / setup.exe），而 npm 全局安装的实例该走 npm 自己的升级路径。
+// 两者装的是同一份网关，但落点不同 —— 混着装会出现「装完还显示旧版本」的困惑。
+const commonInstallHint = "若这个网关是用 npm 全局安装的，请改用 npm i -g workbuddy-gateway@latest 升级，不要用这个安装包。"
+
 // planFor 返回在 goos 上安装 path 的方案。纯函数（不碰文件系统），便于测试三个平台。
 func planFor(goos, path string) InstallPlan {
 	if strings.TrimSpace(path) == "" {
 		path = "<安装包路径>"
 	}
+	var plan InstallPlan
 	switch goos {
 	case "linux":
-		return InstallPlan{
+		plan = InstallPlan{
 			Supported: true,
 			Command:   "pkexec dpkg -i " + path,
 			NeedsAuth: true,
@@ -87,7 +93,7 @@ func planFor(goos, path string) InstallPlan {
 			Note:      "会弹系统授权框（polkit）临时提权；装完网关自动重启到新版本，面板会在几秒内重连。",
 		}
 	case "darwin":
-		return InstallPlan{
+		plan = InstallPlan{
 			Supported: true,
 			Command: "hdiutil attach -nobrowse -readonly -mountpoint <临时目录> " + path +
 				"\nditto <挂载点>/*.app /Applications/" +
@@ -96,14 +102,17 @@ func planFor(goos, path string) InstallPlan {
 			Note:    "安装包未做代码签名：装好后首次打开可能要在「应用程序」里右键 →「打开」。装完网关自动重启。",
 		}
 	case "windows":
-		return InstallPlan{
+		plan = InstallPlan{
 			Supported: true,
 			Command:   path,
 			Restart:   false,
 			Note:      "会打开安装向导：它需要先结束正在运行的网关与桌面窗口才能覆盖文件，装完请在向导最后一页确认「运行」。",
 		}
+	default:
+		return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
 	}
-	return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
+	plan.Note = plan.Note + commonInstallHint
+	return plan
 }
 
 // Plan 返回本机当前的安装方案（path 为空时用占位符，便于面板在下载前就展示会执行什么）。
