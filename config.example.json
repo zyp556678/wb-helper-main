@@ -1,4 +1,5 @@
 {
+  "_说明": "本文件是 config.json 的示例。网关**热加载**它：保存后 1 秒内自动生效（read_timeout 与 debug 需重启）。",
   "upstream": {
     "headerTimeoutSeconds": 300,
     "idleTimeoutSeconds": 120,

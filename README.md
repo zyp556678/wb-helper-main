@@ -201,7 +201,8 @@ print(resp.choices[0].message.content)
 ## 配置
 
 运行时配置见 [CONFIG.md](CONFIG.md)。工作目录下的 `config.json` 覆盖运行层字段，
-可复制 `config.example.json` 起步。
+可复制 `config.example.json` 起步。**改完保存即生效（1 秒内自动热加载，不需要重启）**，
+只有 `server.read_timeout` 与 `debug.enabled` 例外。
 
 ## 安全提示
 
@@ -214,7 +215,7 @@ print(resp.choices[0].message.content)
 ```
 main.go                      CLI 入口（serve / status / version / help）
 cmd/wb-local-agent/          本机代理（可选产物，只读地读本机客户端数据）
-internal/config              配置加载（命令行 + config.json，支持分段热改补丁）
+internal/config              配置加载（命令行 + config.json，支持分段热改补丁与文件监听热加载）
 internal/auth                统一凭据模型（edition / realm 双格式兼容）
 internal/pool                账号池（加权选号、治理、令牌刷新、热加载）
 internal/upstream            反代层（站点 Profile、对话转发、令牌刷新、错误分类、成长域、官方用量）
