@@ -513,3 +513,53 @@ func TestKeepaliveParamsClamp(t *testing.T) {
 		t.Fatalf("非正惰性窗口应回落 24，实际 %d", got)
 	}
 }
+
+// TestPartialModelsPatchKeepsOtherList 验证只提交一个名单时不会把另一个清空。
+//
+// 这条对应一个真实缺陷（对照上游 v1.14.0 时查出）：applyTo 对 models 段是**整段覆盖**，
+// 而面板的模型页切换单个模型的禁用只提交 `{"models":{"blocklist":[...]}}` —— 没提交的
+// 白名单被清成 nil，磁盘上的 config.json 却因 deepMerge 保留着它。
+// 后果是「内存里白名单没了、被封的模型重新可用，重启后白名单又回来」，且全程无提示。
+func TestPartialModelsPatchKeepsOtherList(t *testing.T) {
+	c := newTestConfig(t)
+	save(t, c, `{"models":{"allowlist":["hy3","glm-5.2"]}}`)
+	save(t, c, `{"models":{"blocklist":["old-model"]}}`)
+
+	if len(c.ModelAllow) != 2 {
+		t.Fatalf("只提交黑名单后白名单被清空: %#v", c.ModelAllow)
+	}
+	if len(c.ModelBlock) != 1 || c.ModelBlock[0] != "old-model" {
+		t.Fatalf("黑名单未生效: %#v", c.ModelBlock)
+	}
+	// 反向：只提交白名单时不能把黑名单清掉。
+	save(t, c, `{"models":{"allowlist":["hy3"]}}`)
+	if len(c.ModelBlock) != 1 || c.ModelBlock[0] != "old-model" {
+		t.Fatalf("只提交白名单后黑名单被清空: %#v", c.ModelBlock)
+	}
+	// 落盘内容同样不能被改写（内存与磁盘必须一致）。
+	raw := readConfigJSON(t, c)
+	models, _ := raw["models"].(map[string]any)
+	if got, _ := models["blocklist"].([]any); len(got) != 1 {
+		t.Fatalf("磁盘上的黑名单被改写: %#v", models["blocklist"])
+	}
+	if got, _ := models["allowlist"].([]any); len(got) != 1 || got[0] != "hy3" {
+		t.Fatalf("磁盘上的白名单被改写: %#v", models["allowlist"])
+	}
+}
+
+// TestEmptyModelsListClearsList 验证显式提交空数组仍然表示「清空该名单」。
+//
+// present 命中即整体覆盖，所以「清空」不需要额外的语义区分 —— 但不能因为
+// 上面那条修复就把清空也变成「未提交」。
+func TestEmptyModelsListClearsList(t *testing.T) {
+	c := newTestConfig(t)
+	save(t, c, `{"models":{"blocklist":["a","b"],"allowlist":["c"]}}`)
+	save(t, c, `{"models":{"blocklist":[]}}`)
+
+	if len(c.ModelBlock) != 0 {
+		t.Fatalf("显式空数组应清空黑名单，实际 %#v", c.ModelBlock)
+	}
+	if len(c.ModelAllow) != 1 || c.ModelAllow[0] != "c" {
+		t.Fatalf("同一次提交里未涉及的白名单不应被改动，实际 %#v", c.ModelAllow)
+	}
+}

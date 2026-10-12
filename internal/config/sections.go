@@ -942,10 +942,21 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 		c.Local.DataDir = p.Local.DataDir
 	}
 	if p.Models != nil {
-		// 黑白名单按整体覆盖：空数组表示清空该名单（而不是「未提交」），
-		// 因为面板提交的是名单全量而非增量。
-		c.ModelBlock = p.Models.Blocklist
-		c.ModelAllow = p.Models.Allowlist
+		// 按 present **逐名单**覆盖，而不是整段覆盖。
+		//
+		// 为什么不能整段覆盖：面板的模型页切换单个模型的禁用时只提交
+		// `{"models":{"blocklist":[...]}}`，此时 Allowlist 是 nil 而非「空名单」——
+		// 整段覆盖会把内存里的白名单清空，而磁盘上的 config.json 因 deepMerge 还留着它，
+		// 于是「内存里白名单没了、账户权限全开，重启后白名单又回来了」，两边不一致。
+		//
+		// present 命中仍然按整体覆盖（提交空数组 = 清空该名单）：面板提交的是名单全量，
+		// 所以这里不需要区分「清空」与「未提交」之外的第三种情况。
+		if present["models.blocklist"] {
+			c.ModelBlock = p.Models.Blocklist
+		}
+		if present["models.allowlist"] {
+			c.ModelAllow = p.Models.Allowlist
+		}
 	}
 	if p.Schedule != nil {
 		// 逐字段覆盖（靠 present 判断是否提交），不要整段覆盖：
