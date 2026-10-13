@@ -143,7 +143,7 @@ func (s *Server) setUpdateAutoCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.updateState(false))
 }
 
-// setUpdateMirror 处理 `{"mirror": "https://ghfast.top" | ""}`：下载加速前缀写进 config.json。
+// setUpdateMirror 处理 `{"mirror": "https://gh-proxy.org" | ""}`：下载加速前缀写进 config.json。
 //
 // 单独一条端点而不是并进 /update/auto：auto 那条全是布尔开关（按钮点击语义），
 // 这里是**文本输入 + 保存**语义，失败提示也不一样（前缀格式错要说明怎么改）。
@@ -162,7 +162,7 @@ func (s *Server) setUpdateMirror(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeBody(r, &payload); err != nil || payload.Mirror == nil {
 		writeJSON(w, http.StatusBadRequest,
-			errBody(`缺少 mirror 字段（应为 {"mirror": "https://ghfast.top"}，空串表示直连）`))
+			errBody(`缺少 mirror 字段（应为 {"mirror": "https://gh-proxy.org"}，空串表示直连）`))
 		return
 	}
 
@@ -194,6 +194,62 @@ func (s *Server) setUpdateMirror(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"mirror": value,
+		"detail": detail,
+	})
+}
+
+// setUpdateProxy 处理 `{"proxy": "http://127.0.0.1:7897" | ""}`：更新代理写进 config.json。
+//
+// 与 setUpdateMirror 是两条正交通路：mirror 服务「没代理、靠第三方加速站转发」的用户，
+// proxy 服务「本机有 Clash / v2ray」的用户。两者可同时配置，下载时**代理优先**
+// （见 internal/update 的 Download：代理生效就不套加速前缀）。
+//
+// 单独一条端点而不是并进 /update/auto：那条全是布尔开关（按钮点击语义），
+// 这里是**文本输入 + 保存**语义，且失败提示要说明正确写法。
+func (s *Server) setUpdateProxy(w http.ResponseWriter, r *http.Request) {
+	if s.updates == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("本实例未启用更新检查"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errBody("仅支持 POST"))
+		return
+	}
+	var payload struct {
+		Proxy *string `json:"proxy"`
+	}
+	if err := decodeBody(r, &payload); err != nil || payload.Proxy == nil {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`缺少 proxy 字段（应为 {"proxy": "http://127.0.0.1:7897"}，空串表示不走代理）`))
+		return
+	}
+
+	// 先按**提交值**校验形态（空串合法 = 不走代理）。不合法直接 400，让用户当场改，
+	// 而不是存进去之后每次下载都悄悄回落 —— 那会让「我明明填了代理却还是超时」很难排查。
+	value := strings.TrimSpace(*payload.Proxy)
+	if err := update.ValidateUpdateProxy(value); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		return
+	}
+	patch, err := json.Marshal(map[string]any{"update": map[string]any{"proxy": value}})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("构造配置补丁失败："+err.Error()))
+		return
+	}
+	next := s.config().Clone()
+	if _, _, err := next.SavePatch(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("保存更新代理失败："+err.Error()))
+		return
+	}
+	s.storeConfig(next)
+	detail := "已关闭更新代理（直连 GitHub）"
+	if value != "" {
+		detail = "已启用更新代理：" + value
+	}
+	s.logf("[更新] %s", detail)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"proxy":  value,
 		"detail": detail,
 	})
 }

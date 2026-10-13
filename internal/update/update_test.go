@@ -912,3 +912,37 @@ func TestDownloadCleansStaleTempFiles(t *testing.T) {
 		t.Errorf("陈旧的临时文件应当被清掉，实际仍在: %v", err)
 	}
 }
+
+// TestValidateUpdateProxy 代理地址校验的边界（与面板保存路径同一函数）。
+//
+// 只接受 http/https 是刻意的：用户最容易把 "127.0.0.1:7897"（少协议）当成能用的值，
+// 那种地址存进去之后请求会报一个难懂的错误，不如在保存时当场说明正确写法。
+func TestValidateUpdateProxy(t *testing.T) {
+	ok := []string{
+		"",
+		"   ",
+		"http://127.0.0.1:7897",
+		"https://proxy.example.com:8080",
+		"http://user:pass@127.0.0.1:7897",
+	}
+	for _, v := range ok {
+		if err := ValidateUpdateProxy(v); err != nil {
+			t.Errorf("%q 应被接受，却报错: %v", v, err)
+		}
+	}
+
+	bad := []string{
+		"127.0.0.1:7897",          // 少协议
+		"127.0.0.1",               // 少协议
+		"socks5://127.0.0.1:1080", // 非 http(s)
+		"ftp://127.0.0.1:21",
+		"http://", // 缺主机
+		"://127.0.0.1:7897",
+		"http:///path", // 缺主机、只有路径
+	}
+	for _, v := range bad {
+		if err := ValidateUpdateProxy(v); err == nil {
+			t.Errorf("%q 应被拒绝，却通过了", v)
+		}
+	}
+}

@@ -2443,6 +2443,8 @@ export interface UpdateStatus {
   interval_hours: number;
   /** 生效中的下载加速前缀（空串 = 直连）。 */
   download_mirror?: string;
+  /** 生效中的更新代理（空串 = 不走代理）。 */
+  proxy?: string;
   /** 是否配了私有仓库令牌（不回令牌原文）。 */
   token_set: boolean;
   /** 发现新版本后是否自动下载安装包（config.json 的 update.auto_download，默认开）。 */

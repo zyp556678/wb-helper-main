@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -735,5 +736,103 @@ func TestModelsNPMStillDefaultsOn(t *testing.T) {
 	c := newTestConfig(t)
 	if !c.ModelsNPMEnabled() {
 		t.Fatal("npm 目录兜底应默认开启（它不消耗积分）")
+	}
+}
+
+// TestUpdateProxyValidateAndPersist 更新代理的校验与持久化。
+//
+// 代理是「国内直连 GitHub 不通」时唯一可靠的正路（加速站会挂，代理是本机的）。
+// 这条断言防两类回归：非法值被存进去（之后每次下载都悄悄失败）、
+// 以及合法值没落盘（重启后用户得重填）。
+func TestUpdateProxyValidateAndPersist(t *testing.T) {
+	c := newTestConfig(t)
+
+	// 一、默认未配置 → 空串。
+	if got := c.Update.Proxy; got != "" {
+		t.Fatalf("未配置时代理应为空，得到 %q", got)
+	}
+
+	// 二、保存合法代理并落盘。
+	save(t, c, `{"update":{"proxy":"http://127.0.0.1:7897"}}`)
+	if got := c.Update.Proxy; got != "http://127.0.0.1:7897" {
+		t.Fatalf("代理未生效: %q", got)
+	}
+	raw, err := os.ReadFile(c.ConfigFile)
+	if err != nil {
+		t.Fatalf("读回配置失败: %v", err)
+	}
+	if !strings.Contains(string(raw), `"proxy": "http://127.0.0.1:7897"`) {
+		t.Fatalf("代理未写入 config.json：%s", raw)
+	}
+
+	// 三、只改同段其它字段不能把代理清掉（applyPresent 逐字段覆盖）。
+	save(t, c, `{"update":{"check_hours":12}}`)
+	if got := c.Update.Proxy; got != "http://127.0.0.1:7897" {
+		t.Fatalf("局部提交不该重置代理，得到 %q", got)
+	}
+
+	// 四、清空 = 不走代理（显式语义）。
+	save(t, c, `{"update":{"proxy":""}}`)
+	if got := c.Update.Proxy; got != "" {
+		t.Fatalf("清空后应不走代理，得到 %q", got)
+	}
+}
+
+// TestUpdateProxySurvivesReload 重启后代理设置仍在。
+func TestUpdateProxySurvivesReload(t *testing.T) {
+	c := newTestConfig(t)
+	save(t, c, `{"update":{"proxy":"http://127.0.0.1:1080"}}`)
+
+	reloaded, err := Load(&Config{ConfigFile: c.ConfigFile, WorkDir: c.WorkDir})
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if got := reloaded.Update.Proxy; got != "http://127.0.0.1:1080" {
+		t.Fatalf("重新加载后代理丢失，得到 %q", got)
+	}
+}
+
+// TestUpdateProxyConfigured 三个来源任一命中都算「会走代理」。
+func TestUpdateProxyConfigured(t *testing.T) {
+	// 没配任何代理 → 假。清掉可能存在的环境变量代理，避免测试机上的设置影响结果。
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("all_proxy", "")
+
+	c := newTestConfig(t)
+	if c.UpdateProxyConfigured() {
+		t.Fatal("没配代理时应为假")
+	}
+
+	// 面板配的代理 → 真。
+	c.Update.Proxy = "http://127.0.0.1:7897"
+	if !c.UpdateProxyConfigured() {
+		t.Fatal("配了 update.proxy 时应为真")
+	}
+
+	// 非法值不算数（不能因为存了垃圾就跳过加速前缀）。
+	c.Update.Proxy = "127.0.0.1:7897"
+	if c.UpdateProxyConfigured() {
+		t.Fatal("非法代理值不该被当作已生效")
+	}
+
+	// 显式 -proxy → 真。
+	c.Update.Proxy = ""
+	c.ProxyURL = "http://127.0.0.1:7890"
+	if !c.UpdateProxyConfigured() {
+		t.Fatal("配了 -proxy 时应为真")
+	}
+}
+
+// TestDefaultDownloadMirrorPointsAtLiveHost 默认加速前缀必须是**能连上**的那个。
+//
+// 这条不测网络（单测不打外网），只钉住「不许改回已失效的 ghfast.top」这个事实：
+// 该站在 2026-10 实测直连 TLS 握手无响应，默认值指向它会让新用户的下载永远转圈。
+func TestDefaultDownloadMirrorPointsAtLiveHost(t *testing.T) {
+	if DefaultDownloadMirror != "https://gh-proxy.org" {
+		t.Fatalf("默认加速前缀应是实测可用的 gh-proxy.org，得到 %q", DefaultDownloadMirror)
 	}
 }

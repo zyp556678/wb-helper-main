@@ -272,11 +272,13 @@ type UpdateSection struct {
 	// 国内直连 github.com 下几十 MB 的安装包经常只有几十 KB/s 甚至超时，而这恰好是
 	// 升级路上最贵的一步 —— 很多人卡在这里就放弃了升级。填社区常见的加速服务前缀即可：
 	//
-	//	"https://ghfast.top"   →  实际请求 https://ghfast.top/https://github.com/...
+	//	"https://gh-proxy.org"   →  实际请求 https://gh-proxy.org/https://github.com/...
 	//
 	// 只影响**安装包下载**，不影响版本检查（那是 api.github.com 的一次小请求，
 	// 本来就不慢）。配了 update.token（私有仓库）时**不加速**：加速服务拿不到
 	// 我们的令牌，而私有附件必须带令牌 —— 硬走加速只会得到 404。
+	// 配了代理（Proxy / `-proxy` / 环境变量）时也**不加速**：走代理已经能到 GitHub，
+	// 再套一层第三方转发只是多一跳，还让那家看到你的下载。
 	//
 	// 三态语义（空串有含义，所以不能用「空 = 用默认」的两态写法）：
 	//
@@ -288,6 +290,21 @@ type UpdateSection struct {
 	// 看不到明文内容，但它能决定给你哪一份文件（本项目没有代码签名，也就没有
 	// 本地校验环节）。在意这条链路的人必须能退回直连，而不是被默认值一直填回来。
 	DownloadMirror string `json:"download_mirror"`
+	// Proxy 是**专供更新检查和安装包下载**的 HTTP/HTTPS 代理地址，默认空 = 不走代理。
+	//
+	// 与 download_mirror 是两条正交通路，各自覆盖一类用户：
+	//
+	//	download_mirror  没有代理、只能靠第三方加速站转发的用户
+	//	proxy            本机开着 Clash / v2ray 之类代理的用户
+	//
+	// 为什么需要它：国内直连 github.com 与多数加速站都不通，而用户本机往往**已经**
+	// 有个能用的代理（只是网关进程读不到 —— 桌面壳启动网关时不传代理环境变量）。
+	// 让用户在面板里填一次，比要求他改环境变量或加 CLI 参数可靠得多。
+	//
+	// 为什么不与对话流量共用 `-proxy`：对话出口 IP 会影响上游风控，本项目刻意
+	// 让对话流量只认显式配置；而查 GitHub 是标准公共服务访问，两件事的取舍不同。
+	// 优先级：`-proxy`（显式，与对话同出口）> 本字段 > 环境变量代理 > 直连。
+	Proxy string `json:"proxy"`
 }
 
 // ApplyDefaults 填充未配置字段的默认值（口径与 wb2api-panel 一致）。
@@ -748,7 +765,7 @@ func (c *Config) UpdateAutoInstall() bool {
 // 为什么仍然允许留空：加速意味着安装包经由第三方转发（HTTPS 保证它看不到明文内容，
 // 但它能决定给你哪一份文件，而本项目没有代码签名可做本地校验），
 // 在意这条链路的人可以显式清空它退回直连 —— 面板上是同一个输入框。
-const DefaultDownloadMirror = "https://ghfast.top"
+const DefaultDownloadMirror = "https://gh-proxy.org"
 
 // UpdateDownloadMirror 取 Release 附件的下载加速前缀。
 //

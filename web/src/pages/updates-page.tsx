@@ -8,6 +8,7 @@ import {
   HardDriveDownload,
   Info,
   Loader2,
+  Network,
   RefreshCw,
   Save,
   Sparkles,
@@ -42,6 +43,7 @@ import {
   setUpdateAutoDownload,
   setUpdateAutoInstall,
   setUpdateMirror,
+  setUpdateProxy,
 } from "@/lib/api";
 import { formatBytes, formatRelativeTime, nowSeconds } from "@/lib/format";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -73,7 +75,7 @@ const RESTART_POLL_MS = 1500;
 export function UpdatesPage() {
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
   const [loading, setLoading] = React.useState(true);
-  const [busy, setBusy] = React.useState<"" | "check" | "download" | "install" | "switch" | "mirror">("");
+  const [busy, setBusy] = React.useState<"" | "check" | "download" | "install" | "switch" | "mirror" | "proxy">("");
   const [error, setError] = React.useState("");
   /**
    * 点了安装之后网关的去向：`restart`（Unix：换上新二进制继续服务）或
@@ -204,6 +206,24 @@ export function UpdatesPage() {
       setMirrorInput(null);
     }
   }, [mirrorDraft]);
+
+  // 更新代理：与镜像前缀同样「失焦/回车才提交」的文本输入语义。
+  const [proxyInput, setProxyInput] = React.useState<string | null>(null);
+  const proxyDraft = proxyInput ?? (status?.proxy ?? "");
+  const handleProxySave = React.useCallback(async () => {
+    setBusy("proxy");
+    setError("");
+    try {
+      const res = await setUpdateProxy(proxyDraft.trim());
+      setStatus((prev) => (prev ? { ...prev, proxy: res.proxy } : prev));
+      notifySuccess(res.detail || "更新代理设置已保存");
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy("");
+      setProxyInput(null);
+    }
+  }, [proxyDraft]);
 
   const handleDownload = React.useCallback(async () => {
     setBusy("download");
@@ -623,13 +643,54 @@ export function UpdatesPage() {
 
           <div className="space-y-1.5 border-t pt-4">
             <div className="flex items-center gap-2 text-sm font-medium">
+              <Network className="size-4 text-muted-foreground" aria-hidden="true" />
+              更新代理
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              仅用于<strong className="font-medium text-foreground">检查更新</strong>和
+              <strong className="font-medium text-foreground">下载安装包</strong>
+              ，不影响对话流量。国内直连 GitHub 不通时，填上你本机的代理即可
+              （Clash / v2ray 之类）。<strong className="font-medium text-foreground">配了代理就不会再走下面的加速前缀</strong>
+              —— 走代理已经能到 GitHub，不必再经第三方转发。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={proxyDraft}
+                onChange={(e) => setProxyInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleProxySave();
+                }}
+                placeholder="例如 127.0.0.1:7897，需带 http://（清空 = 不走代理）"
+                spellCheck={false}
+                className="h-8 max-w-md font-mono text-xs"
+                aria-label="更新代理地址"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy === "proxy" || proxyDraft.trim() === (status?.proxy ?? "")}
+                onClick={() => void handleProxySave()}
+              >
+                {busy === "proxy" ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Save className="size-3.5" aria-hidden="true" />
+                )}
+                保存
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5 border-t pt-4">
+            <div className="flex items-center gap-2 text-sm font-medium">
               <Globe className="size-4 text-muted-foreground" aria-hidden="true" />
               下载加速
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
               <strong className="font-medium text-foreground">默认开启</strong>
               ：直连 github.com 下安装包慢，实际请求会变成 前缀 + 原地址。只影响安装包下载，
-              不影响版本检查；配了访问令牌（私有仓库）时不加速。
+              不影响版本检查；配了访问令牌（私有仓库）或上面的更新代理时不加速。
               <strong className="font-medium text-foreground">清空并保存 = 退回直连</strong>
               （安装包将不经第三方转发）。
             </p>
@@ -640,7 +701,7 @@ export function UpdatesPage() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void handleMirrorSave();
                 }}
-                placeholder="https://ghfast.top（清空 = 直连）"
+                placeholder="https://gh-proxy.org（清空 = 直连）"
                 spellCheck={false}
                 className="h-8 max-w-md font-mono text-xs"
                 aria-label="下载加速前缀"

@@ -165,6 +165,8 @@ type State struct {
 	AutoInstall bool `json:"auto_install"`
 	// DownloadMirror 是生效中的下载加速前缀（空串 = 直连），面板据此显示当前走哪条路。
 	DownloadMirror string `json:"download_mirror,omitempty"`
+	// Proxy 是生效中的**更新代理**（空串 = 不走代理），面板据此回显输入框。
+	Proxy string `json:"proxy,omitempty"`
 	// Downloading / Downloaded / DownloadTotal 是**下载进度**：面板据此画进度条。
 	// 只在 Downloading 为真时有意义（下载结束就清零）。
 	Downloading   bool  `json:"downloading"`
@@ -324,7 +326,11 @@ type settings struct {
 	autoDownload   bool
 	autoInstall    bool
 	downloadMirror string
-	hours          int
+	proxy          string
+	// proxyConfigured 表示更新请求会经代理出去（`-proxy` / update.proxy / 环境变量
+	// 任一命中）。下载决策据此跳过加速前缀，见 Download。
+	proxyConfigured bool
+	hours           int
 }
 
 func (c *Checker) settings() settings {
@@ -339,6 +345,8 @@ func (c *Checker) settings() settings {
 	s.autoDownload = cfg.UpdateAutoDownload()
 	s.autoInstall = cfg.UpdateAutoInstall()
 	s.downloadMirror = cfg.UpdateDownloadMirror()
+	s.proxy = strings.TrimSpace(cfg.Update.Proxy)
+	s.proxyConfigured = cfg.UpdateProxyConfigured()
 	if r := strings.TrimSpace(cfg.Update.Repo); r != "" {
 		s.repo = r
 	}
@@ -371,6 +379,7 @@ func (c *Checker) State() State {
 	st.AutoDownload = s.autoDownload
 	st.AutoInstall = s.autoInstall
 	st.DownloadMirror = s.downloadMirror
+	st.Proxy = s.proxy
 	// 下载进度（面板的进度条）：原子读，不用加锁 —— 每写一个 chunk 都会更新。
 	st.Downloading = c.dlActive.Load()
 	st.Downloaded, st.DownloadTotal = 0, 0
@@ -915,9 +924,12 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	target := st.DownloadURL
 	if s := c.settings(); s.token != "" && strings.TrimSpace(st.assetAPIURL) != "" {
 		target = st.assetAPIURL
-	} else if s.downloadMirror != "" {
+	} else if s.downloadMirror != "" && !s.proxyConfigured {
 		// 公开仓库才套加速前缀：私有附件必须带令牌，而加速服务拿不到我们的令牌，
 		// 硬走它只会得到 404（见 config.UpdateSection.DownloadMirror 的说明）。
+		//
+		// 代理已生效时也不套：走代理已经能到 GitHub，再套一层第三方转发只是多一跳，
+		// 还让那家看到你的下载（见 config.UpdateProxyConfigured）。
 		mirrored, err := ApplyDownloadMirror(s.downloadMirror, target)
 		if err != nil {
 			// 前缀配错（少了协议、写成了 URL 片段……）不该让下载彻底不可用：
@@ -927,6 +939,8 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 			target = mirrored
 			c.logf("[更新] 安装包走加速下载：%s", target)
 		}
+	} else if s.downloadMirror != "" {
+		c.logf("[更新] 已配代理，安装包直连 GitHub 下载（不套加速前缀）")
 	}
 	if err := os.MkdirAll(c.downloadDir, 0o755); err != nil {
 		return DownloadResult{}, err
@@ -1008,8 +1022,8 @@ func (cw countingWriter) Write(p []byte) (int, error) {
 
 // applyDownloadMirror 把 Release 附件地址套上加速前缀，返回可请求的 URL。
 //
-// 前缀的形态是「服务 origin」：`https://ghfast.top/`（结尾斜杠可有可无），
-// 拼接结果是 `https://ghfast.top/https://github.com/...`—— 这是这类服务的约定。
+// 前缀的形态是「服务 origin」：`https://gh-proxy.org/`（结尾斜杠可有可无），
+// 拼接结果是 `https://gh-proxy.org/https://github.com/...`—— 这是这类服务的约定。
 // 严格校验而不是随手拼：这个值来自用户手写的 config.json，而它**决定请求发去哪**，
 // 拼错（比如写成相对路径）会产生一个难懂的请求失败，不如在配置层就报清楚。
 func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
@@ -1025,7 +1039,7 @@ func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
 	// 先剥掉再判 —— 拼接时无论如何都会补一个。
 	u, err := url.Parse(m)
 	if err != nil || u.Host == "" || strings.TrimSuffix(u.Path, "/") != "" || u.RawQuery != "" {
-		return "", fmt.Errorf("加速前缀只能是主机地址（如 https://ghfast.top），不能带路径（当前值 %q）", m)
+		return "", fmt.Errorf("加速前缀只能是主机地址（如 https://gh-proxy.org），不能带路径（当前值 %q）", m)
 	}
 	// 原始地址必须是 http(s)，且知道要加速的是谁（拼接形态要求它是完整 URL）。
 	raw, err := url.Parse(rawURL)
@@ -1033,6 +1047,29 @@ func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
 		return "", fmt.Errorf("安装包地址不是有效的 http(s) URL：%q", rawURL)
 	}
 	return strings.TrimSuffix(m, "/") + "/" + rawURL, nil
+}
+
+// ValidateUpdateProxy 校验「更新代理」地址，空串表示不走代理（合法）。
+//
+// 只接受 http / https 代理（与 switch 的设置页同规则）：socks5 之类的地址 Go 的
+// ProxyURL 也认，但用户手写时最容易把 "127.0.0.1:7897"（少协议）当成能用的值 ——
+// 那会让请求报一个难懂的错误。这里当场拒绝并说明正确写法，比存进去之后再失败好。
+func ValidateUpdateProxy(proxy string) error {
+	p := strings.TrimSpace(proxy)
+	if p == "" {
+		return nil
+	}
+	u, err := url.Parse(p)
+	if err != nil {
+		return fmt.Errorf("代理地址无法解析（%q）：%v", p, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("代理地址必须以 http:// 或 https:// 开头（当前值 %q，正确写法如 http://127.0.0.1:7897）", p)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("代理地址缺少主机名（当前值 %q，正确写法如 http://127.0.0.1:7897）", p)
+	}
+	return nil
 }
 
 // downloadOnce 下载一次并落盘，返回写入的字节数。
