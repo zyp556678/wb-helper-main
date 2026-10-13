@@ -198,6 +198,10 @@ export function MetricRow({
  *
  * switch 全站有三种实现（Radix Tabs、手写 aria-pressed、手写 role=tablist），
  * 视觉相同而代码三份；这里统一成一个原语，避免以后新增一处又抄一遍。
+ *
+ * `w-fit` 不能省：它多数时候作为 flex 行里的子项（宽度本来就按内容），
+ * 但一旦放进块级父容器就会被拉满整行 —— 灰底比按钮宽出一截（账号管理页
+ * 曾如此，父容器宽度由同栏的长副标题决定）。`max-w-full` 保留窄屏收缩能力。
  */
 export function PillGroup<T extends string>({
   value,
@@ -215,7 +219,7 @@ export function PillGroup<T extends string>({
 }) {
   return (
     <div
-      className={cn("flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1", className)}
+      className={cn("flex w-fit max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1", className)}
       aria-label={ariaLabel}
     >
       {options.map((option) => (

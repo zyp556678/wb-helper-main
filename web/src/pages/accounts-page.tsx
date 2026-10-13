@@ -545,7 +545,7 @@ export function AccountsPage({
           </div>
           <Button type="button" onClick={() => setAddOpen(true)}>
             <QrCode className="size-3.5" aria-hidden="true" />
-            OAuth 扫码添加
+            登录账号
           </Button>
           <div className="flex items-center gap-1">
             <Button
@@ -687,11 +687,11 @@ export function AccountsPage({
           <Card className="items-center gap-3 py-14 text-center">
             <div className="text-sm font-medium">暂无账号</div>
             <p className="max-w-lg text-xs leading-5 text-muted-foreground">
-              暂无账号。点击上方「OAuth 扫码添加」接入账号；本机已登录的账号也请一并添加，以便随时切回。
+              暂无账号。点击上方「登录账号」接入账号；本机已登录的账号也请一并添加，以便随时切回。
             </p>
             <Button type="button" size="sm" onClick={() => setAddOpen(true)}>
               <QrCode className="size-3.5" aria-hidden="true" />
-              OAuth 扫码添加
+              登录账号
             </Button>
           </Card>
         ) : visibleAccounts.length === 0 ? (
