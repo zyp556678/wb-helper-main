@@ -468,6 +468,7 @@ func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp
 	// 聚合路径等聚合完成（上游无 error 帧才会走到这里）才记账号成功并绑粘性。
 	s.markHopSuccess(acc)
 	s.sticky.Bind(sessionKey, acc.Cred.AccountID())
+	s.observeModelPrice(acc, modelName, usage)
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),
@@ -879,6 +880,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 	}
 
 	inputTokens, outputTokens := splitTokensFromUsage(usage)
+	s.observeModelPrice(acc, modelName, usage)
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),

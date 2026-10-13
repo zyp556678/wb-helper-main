@@ -703,6 +703,7 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 	total := tokensFromUsage(usage)
 	s.metrics.RecordTokens(modelName, total)
 	s.metrics.RecordLatency(modelName, time.Since(started))
+	s.observeModelPrice(acc, modelName, usage)
 	// 只有确认这一跳成功（读到完整 finish_reason 且上游没报 error 帧）才记成功、
 	// 记账号成功、把会话钉在该账号上；中断时上面已解绑，避免把会话钉在坏账号上。
 	if !interrupted {
@@ -766,6 +767,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 	s.metrics.RecordTokens(modelName, total)
 	s.metrics.RecordLatency(modelName, time.Since(started))
 	s.metrics.RecordSuccess(modelName)
+	s.observeModelPrice(acc, modelName, usage)
 	// 聚合路径同样等聚合完成（上游若无 error 帧才会走到这里，见 aggregateCompletion）
 	// 才记账号成功并绑粘性。
 	s.markHopSuccess(acc)

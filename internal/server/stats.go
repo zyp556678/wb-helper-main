@@ -524,3 +524,26 @@ func (s *Server) logRequest(r *http.Request, model, account, mode string, ttft, 
 	}
 	s.events.Add(level, eventlog.ChannelRequest, "request_done", msg, fields)
 }
+
+// observeModelPrice 用一次真实请求的 usage 被动学习模型价格（免费/收费）。
+//
+// 挂在这里而不是塞进 logRequest 的参数表：logRequest 有 8 个调用点，其中只有 5 个
+// 拿得到 usage，为它们再加一个参数会把签名撑得更长、且逼着另外 3 个传 nil。
+// 单独一个方法让「哪里真的能学到价格」在代码里一眼可见。
+//
+// 失败不向外传播：价格学习是**尽力而为**的旁路，它出问题绝不该影响请求本身的返回。
+func (s *Server) observeModelPrice(acc *pool.Account, modelName string, usage map[string]any) {
+	if s.cat == nil || acc == nil || modelName == "" || acc.Site() == "" {
+		return
+	}
+	verdict, credit, ok := creditVerdictFromUsage(usage)
+	if !ok {
+		return
+	}
+	tokens := tokensFromUsage(usage)
+	if !s.cat.Observe(acc.Site(), modelName, verdict, credit, tokens) {
+		return
+	}
+	s.logf("[价格学习] %s / %s → %s（真实请求 usage.credit=%.4f，样本 %d tokens）",
+		acc.SiteLabel(), modelName, verdict, credit, tokens)
+}

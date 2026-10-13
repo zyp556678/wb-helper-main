@@ -406,6 +406,58 @@ func (c *Catalog) ProbeOf(site, model string) (Probe, bool) {
 	return p, ok
 }
 
+// Observe 用一次**真实请求**的 usage 被动学习模型的免费/收费属性。
+//
+// 为什么需要它：价格探测默认关闭（它消耗积分），若只有探测这一个结论来源，
+// 关掉之后价格列会永远停在「未知」、「免费站优先」也不倾斜。而正常流量其实
+// 一直在携带证据 —— usage.credit 就是上游对这次请求的实际扣费，读它不需要
+// 任何额外请求。这条路径让「探测关闭」只损失边角覆盖，不损失主干结论。
+//
+// 三条写入规矩：
+//
+//  1. **只有未定论才写**。被动证据弱于余额差分：credit 实测遇到过「=0 但余额
+//     确实下降」的模型，据此把已确认收费的模型改回免费代价很大（流量会全压过去）。
+//     所以只填补空白，绝不覆盖已有结论。真正要重判时走 ProbeOne（那条有余额证据）。
+//  2. **只认 free / paid**。空串（样本不足等）直接跳过。
+//  3. **写盘但不刷屏**。台账要落缓存，免得重启丢光；日志只在结论变化时打一行。
+//
+// 返回是否写入了新结论（供调用方决定要不要记日志）。
+func (c *Catalog) Observe(site, model, verdict string, credit float64, tokens int64) bool {
+	site = strings.TrimSpace(site)
+	model = strings.TrimSpace(model)
+	if site == "" || model == "" || (verdict != "free" && verdict != "paid") {
+		return false
+	}
+
+	c.mu.Lock()
+	if c.probes == nil {
+		c.probes = map[string]Probe{}
+	}
+	key := probeKey(site, model)
+	if old, exists := c.probes[key]; exists && old.Verdict != "" {
+		// 已有定论：被动证据不覆盖它（见上方规矩 1）。
+		c.mu.Unlock()
+		return false
+	}
+	detail := "由真实请求的 usage.credit 学习"
+	if verdict == "free" {
+		detail = fmt.Sprintf("真实请求 usage.credit=0（样本 %d tokens），学习为免费", tokens)
+	} else {
+		detail = fmt.Sprintf("真实请求 usage.credit=%.4f，学习为收费", credit)
+	}
+	c.probes[key] = Probe{
+		LastProbeAt: time.Now().Unix(),
+		Verdict:     verdict,
+		Credit:      credit,
+		Tokens:      tokens,
+		Detail:      detail,
+	}
+	c.mu.Unlock()
+
+	c.saveCache()
+	return true
+}
+
 // Probes 返回探测台账快照。
 func (c *Catalog) Probes() map[string]Probe {
 	c.mu.RLock()

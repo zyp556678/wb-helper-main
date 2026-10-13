@@ -1073,6 +1073,8 @@ func (s *Server) recordMessagesRequest(r *http.Request, mode, modelName string, 
 		accountLabel = accountLogLabel(acc)
 		accountID = acc.Cred.AccountID()
 	}
+	// 价格学习也是尽力而为：acc 为 nil（早期失败）时 observeModelPrice 自己会跳过。
+	s.observeModelPrice(acc, modelName, usage)
 
 	s.logRequest(r, modelName, accountLabel, mode, ttft, time.Since(started), total, outputTokens, failed)
 	s.stats.Record(stats.RecordInput{

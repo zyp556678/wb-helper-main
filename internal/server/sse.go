@@ -248,6 +248,65 @@ func numField(m map[string]any, key string) (int64, bool) {
 	}
 }
 
+// creditField 取 usage 里的浮点数字段（token 计数是整数，credit 不是）。
+func creditField(m map[string]any, key string) (float64, bool) {
+	if m == nil {
+		return 0, false
+	}
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// freeMinTokens 是判定「免费」所需的最小样本量。
+//
+// 与 catalog 包里的同名常量**必须保持一致**（那边用于主动探测，这边用于被动学习）：
+// 同一个模型不该因为「结论是哪条路径学来的」而得到不同判定。
+// 不导出、不跨包引用的理由是包方向（server → catalog）不允许反向依赖，
+// 而这个值小且稳定，重复一处比造一个共享常量包更划算。
+const freeMinTokens = 100
+
+// creditVerdictFromUsage 按「上游是否真的扣了这次请求的钱」判定模型的免费/收费属性。
+//
+// 这是价格学习里**唯一不需要额外请求**的证据来源：normal 请求的 usage 里就带着
+// credit，随手读掉即可。对齐 wb-gateway 的 observeModelCredit：
+//
+//	credit > 0                        → paid（最硬：上游真扣了钱）
+//	credit == 0 且 total_tokens 足够大 → free
+//	credit == 0 但样本过小             → 不判定（小请求上游也可能记 0）
+//
+// 第三条是防误判的关键：探针、极短补全这类请求的 credit 常常就是 0，
+// 据此把收费模型记成免费，会让调度把流量全压到它上面。
+func creditVerdictFromUsage(usage map[string]any) (verdict string, credit float64, ok bool) {
+	c, hasCredit := creditField(usage, "credit")
+	if !hasCredit {
+		return "", 0, false
+	}
+	if c > 0 {
+		return "paid", c, true
+	}
+	if tokensFromUsage(usage) < freeMinTokens {
+		return "", c, false
+	}
+	return "free", c, true
+}
+
 // mergedToolCall 按 index 累积工具调用增量。
 type mergedToolCall struct {
 	id   string
