@@ -150,6 +150,14 @@ func newTestServer(t *testing.T, upstreamURL string) *Server {
 	// 目录首拉会打网络，测试里不需要模型目录，保持为空即可。
 	cfg.ReloadInterval = 0
 	cfg.ModelsRefresh = 0
+	// 关掉下载加速：加速前缀默认开启（config.DefaultDownloadMirror），而更新类
+	// 测试的「上游」是本地 httptest 假服务器，启用加速会把请求拼成
+	// https://ghfast.top/http://127.0.0.1:... 发往真实互联网 ——
+	// 用例从毫秒级变成分钟级，整包还会被拖到超时（实测踩到）。
+	// 写法与用户在面板里「清空并保存」等价：真的走一遍配置保存。
+	if _, _, err := cfg.SavePatch([]byte(`{"update":{"download_mirror":""}}`)); err != nil {
+		t.Fatalf("关闭测试用下载加速失败: %v", err)
+	}
 
 	client := &upstream.Client{
 		Control:     cfg.Control,

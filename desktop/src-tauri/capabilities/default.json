@@ -1,8 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "桌面壳主窗口的默认能力。面板与 API 同源，业务一律走 HTTP，不使用 IPC，故只保留核心权限，另加「自绘标题栏」需要的窗口操作。",
+  "description": "桌面壳主窗口的默认能力。面板与 API 同源，业务一律走 HTTP，但自绘标题栏的拖拽与窗口按钮要走 IPC，故保留对应的窗口权限。窗口加载的是本机网关的面板（http://127.0.0.1:<动态端口>/panel/），在 Tauri 的 ACL 里是远程 URL —— 不带 remote 声明时这些权限只对本地资源生效，面板里按拖拽区会被静默拒绝（表现为无边框窗口拖不动）。",
   "windows": ["main"],
+  "local": true,
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*"]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

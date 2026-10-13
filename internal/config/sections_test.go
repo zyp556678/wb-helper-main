@@ -598,3 +598,61 @@ func TestUpdateAutoDownloadRoundTrip(t *testing.T) {
 		t.Fatalf("config.json 里的键不对: %#v", upd)
 	}
 }
+
+// TestUpdateDownloadMirrorDefaultAndOptOut 下载加速前缀的三态语义。
+//
+//	键不存在      → 默认加速（DefaultDownloadMirror）
+//	键存在且非空  → 用填的值
+//	键存在且为空  → 显式关闭加速，退回直连
+//
+// 空串必须有确切的含义，否则「清空并保存 = 退回直连」这条操作走不通：
+// 会被当成「没配」而让默认值又把它填回来，变成一个关不掉的开关。
+func TestUpdateDownloadMirrorDefaultAndOptOut(t *testing.T) {
+	c := newTestConfig(t)
+
+	// 一、未配置 → 默认开启加速。
+	if got := c.UpdateDownloadMirror(); got != DefaultDownloadMirror {
+		t.Fatalf("未配置时应默认开启加速（%q），得到 %q", DefaultDownloadMirror, got)
+	}
+
+	// 二、填了自定义前缀 → 用它。
+	save(t, c, `{"update":{"download_mirror":"https://mirror.example.com"}}`)
+	if got := c.UpdateDownloadMirror(); got != "https://mirror.example.com" {
+		t.Fatalf("自定义前缀没生效: %q", got)
+	}
+
+	// 三、清空并保存 → 退回直连，且**不会**被默认值重新填上。
+	save(t, c, `{"update":{"download_mirror":""}}`)
+	if got := c.UpdateDownloadMirror(); got != "" {
+		t.Fatalf("显式清空应退回直连（空串），得到 %q —— 默认值把它填回来了，开关关不掉", got)
+	}
+
+	// 四、之后改别的 update 字段，不能把「已关闭」重置回默认值。
+	save(t, c, `{"update":{"check_hours":12}}`)
+	if got := c.UpdateDownloadMirror(); got != "" {
+		t.Fatalf("局部提交不该重置下载加速设置，得到 %q", got)
+	}
+
+	// 五、重新填写能再打开。
+	save(t, c, `{"update":{"download_mirror":"https://ghfast.top"}}`)
+	if got := c.UpdateDownloadMirror(); got != "https://ghfast.top" {
+		t.Fatalf("重新填写后应生效: %q", got)
+	}
+}
+
+// TestUpdateDownloadMirrorSurvivesReload 重启后三态语义仍然成立。
+//
+// 内存里的 updateMirrorPresent 来自加载期，而「键存在且为空」必须能在
+// 重新读盘后依旧被认出来 —— 否则重启一次就把用户的「退回直连」抹掉了。
+func TestUpdateDownloadMirrorSurvivesReload(t *testing.T) {
+	c := newTestConfig(t)
+	save(t, c, `{"update":{"download_mirror":""}}`)
+
+	reloaded, err := Load(&Config{ConfigFile: c.ConfigFile, WorkDir: c.WorkDir})
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if got := reloaded.UpdateDownloadMirror(); got != "" {
+		t.Fatalf("重启后应保持「已退回直连」，得到 %q", got)
+	}
+}

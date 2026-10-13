@@ -23,9 +23,30 @@ import (
 //
 // 不调 config.Load：那会去读工作目录里的 config.json，测试结果就会随开发机上的
 // 配置变化 —— 而这里的每条断言都只该取决于测试自己写下的输入。
+//
+// **默认关掉下载加速**：加速前缀默认开启（config.DefaultDownloadMirror），
+// 而这些测试的「上游」是本地 httptest 假服务器（http://127.0.0.1:<随机端口>/dl/...）。
+// 不关的话每个下载用例都会去请求 https://ghfast.top/http://127.0.0.1:... ——
+// 跑真实互联网、等真实超时，用例从毫秒级变成分钟级，最后一个还会把整包拖到
+// 10 分钟超时（实测踩到）。本地测试指向本地服务，本就该直连。
+//
+// 关的方式是**真的走一遍配置保存**（写空串到 config.json 再重新加载），
+// 与用户在面板里「清空并保存」完全等价 —— 这样就不需要为测试造一个
+// 绕过 present 判定的后门，测的也仍是真实取值路径。
+// 需要验证加速拼接的用例自己显式打开（见 TestApplyDownloadMirror 与
+// install_test.go 的加速相关断言）。
 func testConfig(t *testing.T, sec config.UpdateSection) *config.Config {
 	t.Helper()
-	cfg := &config.Config{WorkDir: t.TempDir(), Update: sec}
+	dir := t.TempDir()
+	cfg := &config.Config{WorkDir: dir, ConfigFile: filepath.Join(dir, "config.json")}
+	cfg.ApplyDefaults()
+	// 显式关闭加速（空串 + 落盘，于是 updateMirrorPresent 为真）。
+	if _, _, err := cfg.SavePatch([]byte(`{"update":{"download_mirror":""}}`)); err != nil {
+		t.Fatalf("准备测试配置失败: %v", err)
+	}
+	// 再用调用方给的 update 段覆盖（加速仍是显式关闭，不会被默认值顶回来）。
+	cfg.Update = sec
+	cfg.Update.DownloadMirror = ""
 	return cfg
 }
 

@@ -264,6 +264,11 @@ type Config struct {
 	scheduleErr error
 	serverErr   error
 	poolPresent bool
+	// updateMirrorPresent 记录 config.json 里是否出现过 update.download_mirror 这个键。
+	// 与 poolPresent 同一个理由：空串是合法值（表示**显式关闭加速**、退回直连），
+	// 必须与「从未配置」区分开，否则用户清空输入框想退回直连时会被默认值重新填上，
+	// 变成一个关不掉的开关。
+	updateMirrorPresent bool
 	// ModelsNPM / ModelsProbe 控制目录的两项可选行为（nil = 默认启用）。
 	ModelsNPM   *bool
 	ModelsProbe *bool
@@ -374,6 +379,7 @@ func (cfg *Config) resetRuntimeDefaults() {
 	cfg.ModelsNPM = nil
 	cfg.ModelsProbe = nil
 	cfg.poolPresent = false
+	cfg.updateMirrorPresent = false
 }
 
 // loadRuntimeFile 以「默认值 + config.json」重建运行层，并做一次完整校验。
@@ -391,6 +397,7 @@ func (cfg *Config) loadRuntimeFile() error {
 		var rawMap map[string]any
 		_ = json.Unmarshal(raw, &rawMap)
 		cfg.poolPresent = hasNestedKey(rawMap, "pool", "max_in_flight")
+		cfg.updateMirrorPresent = hasNestedKey(rawMap, "update", "download_mirror")
 		if sec := firstPositive(f.Upstream.HeaderTimeoutSecondsSnake, f.Upstream.HeaderTimeoutSeconds); sec > 0 {
 			cfg.HeaderTimeout = time.Duration(sec) * time.Second
 		}

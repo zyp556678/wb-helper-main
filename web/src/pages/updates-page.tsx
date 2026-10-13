@@ -627,10 +627,11 @@ export function UpdatesPage() {
               下载加速
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
-              直连 github.com 下安装包慢时可填加速服务前缀（如{" "}
-              <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">https://ghfast.top</code>），
-              实际请求会变成 前缀 + 原地址。只影响安装包下载，不影响版本检查；
-              配了访问令牌（私有仓库）时不加速。留空 = 直连。
+              <strong className="font-medium text-foreground">默认开启</strong>
+              ：直连 github.com 下安装包慢，实际请求会变成 前缀 + 原地址。只影响安装包下载，
+              不影响版本检查；配了访问令牌（私有仓库）时不加速。
+              <strong className="font-medium text-foreground">清空并保存 = 退回直连</strong>
+              （安装包将不经第三方转发）。
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <Input
@@ -639,7 +640,7 @@ export function UpdatesPage() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void handleMirrorSave();
                 }}
-                placeholder="https://ghfast.top（留空 = 直连）"
+                placeholder="https://ghfast.top（清空 = 直连）"
                 spellCheck={false}
                 className="h-8 max-w-md font-mono text-xs"
                 aria-label="下载加速前缀"

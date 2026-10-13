@@ -17,6 +17,15 @@
     <!--
       首屏兜底样式：纯内联，跟随系统主题上色，避免深色模式下挂载前闪白。
       React 挂载后清空 #root，占位自然消失。
+
+      **只设 background，不设 color** —— 这一段不在 @layer 里，而未分层样式
+      永远压过 Tailwind 的 @layer base。此处一旦写 color，无论写成系统深色值
+      还是浅色值，都会盖掉挂载后 body 上的 text-foreground：面板主题是**用户选的**
+      （默认跟随系统，但可以手动切），与内联样式看的 prefers-color-scheme 是两个来源，
+      二者相反时（系统深色 + 面板浅色）标题等「继承 body 颜色」的文字就会变成
+      对白底几乎不可见的浅灰，而副标题、卡片这些**显式**用令牌的元素看着正常 ——
+      症状是「每页只有主标题淡了」，极难联想到首屏兜底样式。
+      文字颜色交给令牌；首屏那一瞬间的 body 颜色由 .wb-boot 自己指定。
     -->
     <style>
       html,
@@ -26,7 +35,6 @@
       }
       body {
         background: #ffffff;
-        color: #1b1b21;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
           "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
       }
@@ -41,7 +49,6 @@
       @media (prefers-color-scheme: dark) {
         body {
           background: #1e293b;
-          color: #e8eaf2;
         }
         .wb-boot {
           color: #9aa4b8;

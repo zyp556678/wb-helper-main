@@ -267,20 +267,26 @@ type UpdateSection struct {
 	// 回退版本的现场。所以默认关，由用户显式打开（面板上打开时会再确认一次）。
 	// 打开之后：下好 → 装 → 网关重启（Windows 上是退出，装完由向导拉起）。
 	AutoInstall *bool `json:"auto_install"`
-	// DownloadMirror 是 Release 附件的**下载加速前缀**，留空表示直连 github.com。
+	// DownloadMirror 是 Release 附件的**下载加速前缀**。默认 **开启**（DefaultDownloadMirror）。
 	//
 	// 国内直连 github.com 下几十 MB 的安装包经常只有几十 KB/s 甚至超时，而这恰好是
-	// 升级路上最贵的一步。填社区常见的加速服务前缀即可，例如：
+	// 升级路上最贵的一步 —— 很多人卡在这里就放弃了升级。填社区常见的加速服务前缀即可：
 	//
-	//	"https://ghfast.top/"   →  实际请求 https://ghfast.top/https://github.com/...
+	//	"https://ghfast.top"   →  实际请求 https://ghfast.top/https://github.com/...
 	//
 	// 只影响**安装包下载**，不影响版本检查（那是 api.github.com 的一次小请求，
 	// 本来就不慢）。配了 update.token（私有仓库）时**不加速**：加速服务拿不到
 	// 我们的令牌，而私有附件必须带令牌 —— 硬走加速只会得到 404。
 	//
-	// 用第三方加速意味着安装包经由它转发。HTTPS 保证它看不到明文内容，
-	// 但它能决定给你哪一份文件（本项目没有代码签名，也就没有本地校验环节）——
-	// 所以这里**默认留空**，用不用、用哪家由用户自己决定。
+	// 三态语义（空串有含义，所以不能用「空 = 用默认」的两态写法）：
+	//
+	//	键不存在      → 用 DefaultDownloadMirror（默认加速）
+	//	键存在且非空  → 用填的值
+	//	键存在且为空  → 显式关闭加速，退回直连 github.com
+	//
+	// 保留「关掉」这条路是必要的：加速意味着安装包经由第三方转发。HTTPS 保证它
+	// 看不到明文内容，但它能决定给你哪一份文件（本项目没有代码签名，也就没有
+	// 本地校验环节）。在意这条链路的人必须能退回直连，而不是被默认值一直填回来。
 	DownloadMirror string `json:"download_mirror"`
 }
 
@@ -733,9 +739,38 @@ func (c *Config) UpdateAutoInstall() bool {
 	return c.Update.AutoInstall != nil && *c.Update.AutoInstall
 }
 
-// UpdateDownloadMirror 取 Release 附件的下载加速前缀（留空 = 直连 github.com）。
+// DefaultDownloadMirror 是**默认启用**的下载加速前缀。
+//
+// 默认开而不是留空（直连），是因为本项目的主要使用者在国内：直连 github.com
+// 下几十 MB 的安装包经常只有几十 KB/s 甚至中途断流，而这是升级路上最贵的一步，
+// 很多人会卡在这里放弃升级。加速服务把这一步变成可用。
+//
+// 为什么仍然允许留空：加速意味着安装包经由第三方转发（HTTPS 保证它看不到明文内容，
+// 但它能决定给你哪一份文件，而本项目没有代码签名可做本地校验），
+// 在意这条链路的人可以显式清空它退回直连 —— 面板上是同一个输入框。
+const DefaultDownloadMirror = "https://ghfast.top"
+
+// UpdateDownloadMirror 取 Release 附件的下载加速前缀。
+//
+// 语义是**三态**，用一个字符串表达：
+//
+//	键不存在      → 用默认值（DefaultDownloadMirror，即默认开启加速）
+//	键存在且非空  → 用用户填的值
+//	键存在且为空  → **显式关闭加速**，退回直连 github.com
+//
+// 为什么不用「空串 = 用默认」的两态写法：那样用户就没法退回直连了 ——
+// 清空输入框会被当成「没配」，于是默认值又把它填回来，形成一个关不掉的开关。
+// 用户明确不想让安装包经由第三方转发时，必须有一条走得通的路。
 func (c *Config) UpdateDownloadMirror() string {
-	return strings.TrimSpace(c.Update.DownloadMirror)
+	v := strings.TrimSpace(c.Update.DownloadMirror)
+	if v == "" {
+		// 只有「从未写过这个键」才回落到默认值；写过空串 = 用户显式关掉加速。
+		if !c.updateMirrorPresent {
+			return DefaultDownloadMirror
+		}
+		return ""
+	}
+	return v
 }
 
 // UpdateToken 取更新源令牌：config.json 里的优先，其次环境变量 WB_UPDATE_TOKEN。
@@ -1107,6 +1142,8 @@ func (c *Config) SavePatch(body []byte) ([]string, []string, error) {
 	// 才该被默认值顶掉）。这里刚把 raw 写回磁盘，所以用 raw 重新判定最准确；
 	// 不更新的话，本次提交显式写的 0 会在下面的 ApplyDefaults 里被立刻改成默认 3。
 	c.poolPresent = hasNestedKey(raw, "pool", "max_in_flight")
+	// 同理：download_mirror 的空串是「显式关闭加速」，与「从未配置」必须区分。
+	c.updateMirrorPresent = hasNestedKey(raw, "update", "download_mirror")
 	c.ApplyDefaults()
 	if err := c.ScheduleErr(); err != nil {
 		return nil, nil, err

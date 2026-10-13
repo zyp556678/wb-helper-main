@@ -31,6 +31,8 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -129,8 +131,17 @@ func (s *Scheduler) Start(ctx context.Context) {
 	go s.balanceLoop(ctx)
 }
 
-// tickLoop 每次整分检查「当前小时是否命中某任务时点，且本小时尚未执行」。
+// tickLoop 每分钟检查一次「今天有没有到点的任务还没跑」。
+//
+// **启动后先立刻检查一次**（dayOpen=true），不等第一个 60 秒 tick：
+// 开机时刻若落在时点之后，这一刻就是补跑的时机 —— 让用户干等一分钟才看到
+// 签到发生没有任何意义。检查本身很轻（几次时间比较 + 内存里的 claim 判断）。
+//
+// 首次检查还会带上 dayOpen：当天首次运行、时点又都还没到时，把**最早那个时点**
+// 提前当成已到点（见 dayOpenSlot）。这样「打开软件就该把今天的签到做掉」成立，
+// 而不必恰好等到 9 点整。
 func (s *Scheduler) tickLoop(ctx context.Context) {
+	s.checkHourlyTasks(ctx, true)
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -138,63 +149,144 @@ func (s *Scheduler) tickLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.checkHourlyTasks(ctx)
+			s.checkHourlyTasks(ctx, false)
 		}
 	}
 }
 
-func (s *Scheduler) checkHourlyTasks(ctx context.Context) {
+// checkHourlyTasks 检查各任务今天有没有到点。
+//
+// dayOpen 表示「这是当天第一次运行此检查」（tickLoop 启动时先调一次）。
+func (s *Scheduler) checkHourlyTasks(ctx context.Context, dayOpen bool) {
 	now := time.Now()
-	stamp := now.Format("2006010215")
 	cfg := s.config()
 
-	if cfg.CheckinEnabled() && hourIn(now.Hour(), cfg.Schedule.CheckinHours) && s.claim("checkin", stamp) {
-		// 排程签到也遵守签到时间段（切片 18）：checkin_hours 说「几点跑」，
-		// 时间段说「允许的时间范围」，两者冲突时以时间段为准（它是更具体的约束）。
-		// 这里**会**记一条日志 —— 与面板批量签到的静默跳过不同：
-		// 排程跳过每天最多一条，说清楚为什么没签比让人以为漏跑更有用。
-		if !cfg.InCheckinWindow(now) {
-			start, end, _ := cfg.CheckinWindow()
-			s.logf("[调度] 到达签到时点（%02d:00），但当前不在签到时间段 %s-%s 内，已跳过",
-				now.Hour(), minutesToClock(start), minutesToClock(end))
-		} else {
-			s.logf("[调度] 到达签到时点（%02d:00），开始签到", now.Hour())
+	// 各任务的时点判定统一走 dueSlot：它返回「今天已到点、且当天还没跑过」的槽位。
+	// 槽位绑定**时点本身**而不是当前小时，所以补跑过后不会在下一个小时重复触发。
+	// 每个任务各自判、各自 claim —— 六个时点互相独立，某个配错或关掉不影响其它。
+	//
+	// 「补跑已过的时点」对所有任务生效（早上 9:30 开机，9 点那趟补上）——
+	// 旧实现只在整点那一小时才认，错过就整天不跑，这是「自启动了却没签到」的根因。
+
+	// 签到：**软件一跑就签**，不等时点。
+	//
+	// 语义（按用户要求，2026-10-13 定）：
+	//   · 已过时点 → 补跑最近那趟（9:30 开机补 9 点那趟）；
+	//   · 还没到任何时点 → 启动那次直接提前签（8:00 开机就签，不等 9 点）。
+	// 刻意**不看**签到时间段：那是面板里一个可选设置（默认空 = 不限制），
+	// 用户的诉求是「开了就签」，不该因为配了时间段而在窗口外整轮跳过。
+	//
+	// 顺序很重要：先问 dueSlot（已到点），再问 dayOpenSlot（提前）。
+	// 反过来写会重复签到 —— 22:00 启动时 dayOpenSlot 给出最早的 9 点槽位并签一次，
+	// 下一分钟 dueSlot 又给出 21 点槽位，于是同一分钟内签两趟。
+	//
+	// 去重靠槽位绑定当日日期：先到先占，当天同一槽位不会被签第二次。
+	// 于是常规一天最多两趟（9 点那趟 + 21 点那趟），启动早于所有时点时不额外多签。
+	dueCheckin := func() (string, bool) {
+		if slot, ok := dueSlot(now, cfg.Schedule.CheckinHours); ok {
+			return slot, true
+		}
+		if dayOpen {
+			return dayOpenSlot(now, cfg.Schedule.CheckinHours)
+		}
+		return "", false
+	}
+
+	if cfg.CheckinEnabled() {
+		if slot, ok := dueCheckin(); ok && s.claim("checkin", slot) {
+			s.logf("[调度] 到达签到时点（%02d:00），开始签到", slotHour(slot))
 			if _, err := s.RunCheckinNow(ctx); err != nil {
 				s.logf("[调度] 签到任务失败: %v", err)
 			}
 		}
 	}
-	if cfg.KeepaliveEnabled() && hourIn(now.Hour(), cfg.Schedule.KeepaliveHours) && s.claim("keepalive", stamp) {
-		s.logf("[调度] 到达保活时点（%02d:00），开始刷新令牌（阈值 %d 天 / 惰性窗口 %d 小时）",
-			now.Hour(), cfg.KeepaliveDays(), cfg.LazyRefreshHours())
-		if _, err := s.RunScheduledKeepalive(ctx); err != nil {
-			s.logf("[调度] 保活任务失败: %v", err)
+	if cfg.KeepaliveEnabled() {
+		if slot, ok := dueSlot(now, cfg.Schedule.KeepaliveHours); ok && s.claim("keepalive", slot) {
+			s.logf("[调度] 到达保活时点（%02d:00），开始刷新令牌（阈值 %d 天 / 惰性窗口 %d 小时）",
+				slotHour(slot), cfg.KeepaliveDays(), cfg.LazyRefreshHours())
+			if _, err := s.RunScheduledKeepalive(ctx); err != nil {
+				s.logf("[调度] 保活任务失败: %v", err)
+			}
 		}
 	}
-	if cfg.TasksEnabled() && hourIn(now.Hour(), cfg.Schedule.TasksHours) && s.claim("tasks", stamp) {
-		s.logf("[调度] 到达任务中心时点（%02d:00），开始执行成长任务", now.Hour())
-		if _, err := s.RunTasksNow(ctx); err != nil {
-			s.logf("[调度] 任务中心执行失败: %v", err)
+	if cfg.TasksEnabled() {
+		if slot, ok := dueSlot(now, cfg.Schedule.TasksHours); ok && s.claim("tasks", slot) {
+			s.logf("[调度] 到达任务中心时点（%02d:00），开始执行成长任务", slotHour(slot))
+			if _, err := s.RunTasksNow(ctx); err != nil {
+				s.logf("[调度] 任务中心执行失败: %v", err)
+			}
 		}
 	}
-	if cfg.BlackCatEnabled() && hourIn(now.Hour(), cfg.Schedule.BlackCatHours) && s.claim("blackcat", stamp) {
-		s.logf("[调度] 到达夜猫子时点（%02d:00），补报夜猫子任务", now.Hour())
-		if _, err := s.RunBlackCatNow(ctx); err != nil {
-			s.logf("[调度] 夜猫子任务失败: %v", err)
+	if cfg.BlackCatEnabled() {
+		if slot, ok := dueSlot(now, cfg.Schedule.BlackCatHours); ok && s.claim("blackcat", slot) {
+			// 夜猫子的计分窗口是 23:00-08:00，而它的时点默认 23 点。
+			// 补跑不会出问题：窗口外由任务中心自己拒绝并给出提示（见 RunBlackCatNow）。
+			s.logf("[调度] 到达夜猫子时点（%02d:00），补报夜猫子任务", slotHour(slot))
+			if _, err := s.RunBlackCatNow(ctx); err != nil {
+				s.logf("[调度] 夜猫子任务失败: %v", err)
+			}
 		}
 	}
-	if cfg.TravelEnabled() && hourIn(now.Hour(), cfg.Schedule.TravelHours) && s.claim("travel", stamp) {
-		s.logf("[调度] 到达旅行巡检时点（%02d:00），推进一趟猫猫旅行", now.Hour())
-		if _, err := s.RunTravelNow(ctx); err != nil {
-			s.logf("[调度] 旅行巡检失败: %v", err)
+	if cfg.TravelEnabled() {
+		if slot, ok := dueSlot(now, cfg.Schedule.TravelHours); ok && s.claim("travel", slot) {
+			s.logf("[调度] 到达旅行巡检时点（%02d:00），推进一趟猫猫旅行", slotHour(slot))
+			if _, err := s.RunTravelNow(ctx); err != nil {
+				s.logf("[调度] 旅行巡检失败: %v", err)
+			}
 		}
 	}
-	if cfg.ActivityEnabled() && hourIn(now.Hour(), cfg.Schedule.ActivityHours) && s.claim("activity", stamp) {
-		s.logf("[调度] 到达活跃上报时点（%02d:00），补报对话活跃事件", now.Hour())
-		if _, err := s.RunActivityNow(ctx); err != nil {
-			s.logf("[调度] 活跃上报失败: %v", err)
+	if cfg.ActivityEnabled() {
+		if slot, ok := dueSlot(now, cfg.Schedule.ActivityHours); ok && s.claim("activity", slot) {
+			s.logf("[调度] 到达活跃上报时点（%02d:00），补报对话活跃事件", slotHour(slot))
+			if _, err := s.RunActivityNow(ctx); err != nil {
+				s.logf("[调度] 活跃上报失败: %v", err)
+			}
 		}
 	}
+}
+
+// dayOpenSlot 用于「当天首次运行」这一时刻：时点都还没到时，把**最早那个时点**
+// 提前当成已到点，让当天第一次打开软件就把任务做掉。
+//
+// 为什么需要它：默认签到 / 任务时点是上午 9 点，而用户常常早上 8 点多开机 ——
+// 此时 dueSlot 返回「还没到点」，于是要干等到 9:00 整。用户看到的仍然是
+// 「软件开了，但今天还什么都没做」。把最早时点提前触发，符合
+// 「每天首次运行就跑一次」的直觉。
+//
+// 只提前**最早**那个时点，不是把当天所有时点都跑一遍：后者会让 9/21 两趟
+// 在早上一次性连发，而上游对同一账号的密集操作敏感（连发可能被判无效并回滚进度）。
+// 21 点那趟仍按真实时点执行。
+//
+// 返回的槽位仍绑**该时点自己**（不是当前小时），所以等到真正 9:00 时
+// dueSlot 给出的是同一个槽位，claim 会拦下重复执行。
+func dayOpenSlot(now time.Time, hours []int) (string, bool) {
+	earliest, found := 0, false
+	for _, h := range hours {
+		if h < 0 || h > 23 {
+			continue
+		}
+		if !found || h < earliest {
+			earliest, found = h, true
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return fmt.Sprintf("%s-%d", now.Format("20060102"), earliest), true
+}
+
+// slotHour 从槽位标识（"20060102-9"）里取回时点，供日志显示。
+// 与 dueSlot 是同一套格式的一对，改动要一起改。
+func slotHour(slot string) int {
+	i := strings.LastIndexByte(slot, '-')
+	if i < 0 {
+		return 0
+	}
+	h, err := strconv.Atoi(slot[i+1:])
+	if err != nil {
+		return 0
+	}
+	return h
 }
 
 // balanceLoop 按 balance_refresh_minutes 周期刷新额度。
@@ -670,12 +762,41 @@ func (s *Scheduler) RunBalanceNow(ctx context.Context) (string, error) {
 	return detail, nil
 }
 
-// hourIn 判断当前小时是否在配置的时点列表里。
-func hourIn(hour int, hours []int) bool {
+// dueSlot 返回「今天已到点、且本进程今天还没跑过」的时点槽位。
+//
+// 返回值是槽位标识（形如 "20261013-9"：当天日期 + 时点），claim 用它去重。
+// **不能拿「当前小时」当标识** —— 补跑的正是「当前小时 ≠ 时点」这种情况：
+// 10 点补跑了 9 点那趟，若标识记成 10，11 点时又会被判成"新槽位"再跑一遍。
+// 绑定时点本身，同一时点当天才真正只跑一次。
+//
+// 为什么需要补跑，而不是简单地 hourIn(now.Hour(), hours)：
+//
+// 后者要求「当前这一小时恰好等于时点」。而检查是每分钟一次，于是**开机时刻
+// 落在时点之后**（比如 9 点的签到、10 点才开机）时，当前小时永远等不到 `9`，
+// 当天的签到就整个漏掉，且没有任何提示 —— 用户看到的是「软件自启动了，
+// 但今天的签到没做」。真实踩到过：08:38 开机、签到时点 09/21，
+// 一直等到 09:00 那个整点才跑第一次；若 09:30 才开机则当天整趟不跑。
+//
+// 新判据：取今天所有 ≤ 当前小时的时点里最大的那个，看它今天跑过没有。
+// 于是 09:30 开机 → 立刻补跑 9 点那趟；21:00 整点 → 跑 21 点那趟。
+// **跨天不补**：昨天错过的时点不在候选内（now 已是新的一天）。
+//
+// 返回的 ok 为 false 表示「今天还没有任何时点到点」（比如时点配在 23 点、
+// 现在才 08:00），调用方跳过即可。
+func dueSlot(now time.Time, hours []int) (slot string, ok bool) {
+	best, found := 0, false
 	for _, h := range hours {
-		if h == hour {
-			return true
+		// 忽略越界时点：配置里打错一个数字不该让整个任务当天空转，
+		// 也不该被当成"0 点"去误触发。
+		if h < 0 || h > 23 {
+			continue
+		}
+		if h <= now.Hour() && (!found || h > best) {
+			best, found = h, true
 		}
 	}
-	return false
+	if !found {
+		return "", false
+	}
+	return fmt.Sprintf("%s-%d", now.Format("20060102"), best), true
 }

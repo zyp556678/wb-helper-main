@@ -526,17 +526,6 @@ export function AccountsPage({
               />
               刷新积分
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={reload}
-              disabled={loading}
-              aria-label="重新拉取账号列表"
-            >
-              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} aria-hidden="true" />
-              刷新
-            </Button>
           </div>
         </div>
       </header>
