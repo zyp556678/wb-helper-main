@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"workbuddy-gateway/internal/auth"
@@ -173,9 +174,15 @@ func TestEnterpriseCreditResourcesSnakeCaseFields(t *testing.T) {
 // TestPersonalCreditResourcesUnchanged 个人号仍走原来的三路端点，
 // 不被企业分流误伤。
 func TestPersonalCreditResourcesUnchanged(t *testing.T) {
+	// 三路端点是**并发**请求的，handler 会在多个 goroutine 里同时到 ——
+	// 裸 slice 会数据竞争，且 append 可能互相覆盖导致少记一条（表现为
+	// 偶发「实际 2 路」）。加锁收集。
+	var mu sync.Mutex
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		seen = append(seen, r.URL.Path)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"msg":"","data":{"Packages":[]}}`))
 	}))
@@ -188,6 +195,8 @@ func TestPersonalCreditResourcesUnchanged(t *testing.T) {
 		t.Fatalf("个人号资源明细查询失败: %v", err)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	for _, p := range seen {
 		if strings.Contains(p, "get-enterprise-user-usage") {
 			t.Errorf("个人号不该打企业端点，实际请求=%v", seen)
