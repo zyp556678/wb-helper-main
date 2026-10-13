@@ -218,3 +218,134 @@ func TestRepairUnknownFieldsBlockMerge(t *testing.T) {
 		t.Fatalf("带额外字段的消息不应被合并，拓扑=%s", topo)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 空 function.name 的剔除（对齐 wb2api-panel 535e19e）
+//
+// 事故形态：上游流式响应在工具调用 name 分片到达前异常结束（200 空流也算），
+// 聚合器按占位符产出 name:"" 的条目 → 客户端写进会话历史 → 下一轮原样转发 →
+// 上游判 400 code=11133「tool_calls[i].function.name must be a non-empty string」。
+// 这是**消息参数级**拒绝，换账号也无效，整条会话从此每轮 503。
+//
+// 关键是**两侧对称剔除**：只删调用不删结果，会留下「无 tool_calls 的 assistant +
+// 孤儿 tool」→ 上游判 11148，比原 bug 更糟。所以下面每个用例都同时断言
+// 最终拓扑与报告计数。
+// ---------------------------------------------------------------------------
+
+// badCallMsg 构造一条 name 为空（或缺失）的调用声明。
+// nameJSON 传裸 JSON 片段，便于区分「name 是空串」与「根本没有 name 字段」。
+func badCallMsg(id, nameJSON string) string {
+	return `{"role":"assistant","content":null,"tool_calls":[` +
+		`{"id":"` + id + `","type":"function","function":{` + nameJSON + `}}]}`
+}
+
+// TestRepairDropsEmptyNameCallWithResult 带配对结果的空 name 调用必须被剔除 ——
+// 这正是原 bug 的形态：按 id 对称裁剪对「配对齐全的脏条目」不设防，原样放行。
+func TestRepairDropsEmptyNameCallWithResult(t *testing.T) {
+	report, list, topo := repair(t, `[`+
+		badCallMsg("c1", `"name":"","arguments":"{}"`)+`,`+
+		toolMsg("c1")+`]`)
+
+	if topo != "" {
+		t.Fatalf("空 name 的调用与它的结果都应被剔除，拓扑=%q", topo)
+	}
+	if report.DroppedCalls != 1 || report.DroppedOutputs != 1 {
+		t.Errorf("两侧应各剔一条，实际 calls=%d outputs=%d",
+			report.DroppedCalls, report.DroppedOutputs)
+	}
+	if len(list) != 0 {
+		t.Errorf("剔除后不应留任何消息，实际 %d 条", len(list))
+	}
+}
+
+// TestRepairDropsEmptyNameCallLeavesNoOrphan 混合场景：一批里只有脏项该被剔除，
+// 干净项的调用与结果都原样保留、顺序不变。
+func TestRepairDropsEmptyNameCallLeavesNoOrphan(t *testing.T) {
+	report, _, topo := repair(t, `[`+
+		callMsg("c0")+`,`+
+		`{"role":"assistant","content":null,"tool_calls":[`+
+		`{"id":"c1","type":"function","function":{"name":"  ","arguments":"{}"}},`+
+		`{"id":"c2","type":"function","function":{"name":"f","arguments":"{}"}}]},`+
+		toolMsg("c0")+`,`+
+		toolMsg("c1")+`,`+
+		toolMsg("c2")+`]`)
+
+	// c1 被剔；剩 c0 与 c2 变成背靠背的空正文调用，被既有的「形态一」规则
+	// 合并成一个并行批次（两条都无正文，合并无语义损失），结果顺序不变。
+	if topo != "assistant[c0,c2] > tool[c0] > tool[c2]" {
+		t.Fatalf("只应剔掉 c1 及其结果，拓扑=%s", topo)
+	}
+	if report.DroppedCalls != 1 || report.DroppedOutputs != 1 {
+		t.Errorf("应恰好各剔一条，实际 calls=%d outputs=%d",
+			report.DroppedCalls, report.DroppedOutputs)
+	}
+}
+
+// TestRepairEmptyNameIsWhitespaceOnly 纯空白（空格、制表、换行）与空串同判：
+// 上游只要求「非空字符串」，纯空白同样被拒。
+func TestRepairEmptyNameIsWhitespaceOnly(t *testing.T) {
+	for _, name := range []string{`""`, `"   "`, `"\t\n"`} {
+		_, list, topo := repair(t, `[`+
+			badCallMsg("c1", `"name":`+name+`,"arguments":"{}"`)+`,`+
+			toolMsg("c1")+`]`)
+		if topo != "" {
+			t.Errorf("name=%s 应被判脏剔除，拓扑=%q", name, topo)
+		}
+		if len(list) != 0 {
+			t.Errorf("name=%s 剔除后不应留消息", name)
+		}
+	}
+}
+
+// TestRepairKeepsCallWithoutNameField 缺 name 字段的占位条目不判脏：
+// 上游不因缺字段拒参，这里**不扩大打击面**（与「空 id 双侧不识别」同口径）。
+func TestRepairKeepsCallWithoutNameField(t *testing.T) {
+	_, _, topo := repair(t, `[`+
+		badCallMsg("c1", `"arguments":"{}"`)+`,`+
+		toolMsg("c1")+`]`)
+
+	if topo != "assistant[c1] > tool[c1]" {
+		t.Fatalf("缺 name 字段不应被判脏，拓扑=%s", topo)
+	}
+}
+
+// TestRepairEmptyNameWithoutResultStillDropped 空 name 且**没有**配对结果的条目：
+// 走孤儿规则被删。此前若在收集阶段跳过登记，这种形态会漏出站。
+func TestRepairEmptyNameWithoutResultStillDropped(t *testing.T) {
+	report, list, topo := repair(t, `[`+
+		badCallMsg("c1", `"name":"","arguments":"{}"`)+`]`)
+
+	if topo != "" {
+		t.Fatalf("无结果的空 name 调用也应被剔除，拓扑=%q", topo)
+	}
+	if report.DroppedCalls != 1 {
+		t.Errorf("应剔除 1 条调用，实际 %d", report.DroppedCalls)
+	}
+	if len(list) != 0 {
+		t.Errorf("剔除后不应留消息，实际 %d 条", len(list))
+	}
+}
+
+// TestToolCallNameEmptyPrecise 直接钉住判定函数的精确边界：
+// 只有「function 存在 + name 字段存在 + 值为空白」才判真。
+func TestToolCallNameEmptyPrecise(t *testing.T) {
+	cases := []struct {
+		name string
+		call any
+		want bool
+	}{
+		{"空串", map[string]any{"function": map[string]any{"name": ""}}, true},
+		{"纯空白", map[string]any{"function": map[string]any{"name": "  "}}, true},
+		{"正常名字", map[string]any{"function": map[string]any{"name": "f"}}, false},
+		{"缺 name 字段", map[string]any{"function": map[string]any{"arguments": "{}"}}, false},
+		{"缺 function 对象", map[string]any{"id": "c1"}, false},
+		{"name 不是字符串", map[string]any{"function": map[string]any{"name": 42}}, false},
+		{"不是对象", "c1", false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		if got := toolCallNameEmpty(tc.call); got != tc.want {
+			t.Errorf("%s: toolCallNameEmpty=%v，期望 %v", tc.name, got, tc.want)
+		}
+	}
+}

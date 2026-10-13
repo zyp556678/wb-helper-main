@@ -62,6 +62,8 @@ func RepairToolSequence(obj map[string]any) ToolRepairReport {
 	// 每个 ID 只保留第一条调用，以及位于该调用之后的第一条结果
 	callMessageIndex := make(map[string]int)
 	callEntryIndex := make(map[string]int)
+	// nameBadIDs 记录 function.name 为空的调用 ID（见 toolCallNameEmpty）。
+	nameBadIDs := make(map[string]bool)
 	for messageIndex, messageAny := range messages {
 		message, ok := messageAny.(map[string]any)
 		if !ok || roleOf(message) != "assistant" {
@@ -72,6 +74,9 @@ func RepairToolSequence(obj map[string]any) ToolRepairReport {
 			id := toolCallID(callAny)
 			if id == "" {
 				continue
+			}
+			if toolCallNameEmpty(callAny) {
+				nameBadIDs[id] = true
 			}
 			if _, exists := callMessageIndex[id]; !exists {
 				callMessageIndex[id] = messageIndex
@@ -118,7 +123,9 @@ func RepairToolSequence(obj map[string]any) ToolRepairReport {
 			kept := make([]any, 0, len(calls))
 			for entryIndex, callAny := range calls {
 				id := toolCallID(callAny)
-				if id != "" && pairedIDs[id] &&
+				// nameBadIDs 一并否决：function.name 为空的调用上游判 11133
+				// （model_param_invalid），带不带结果都会拒。见 toolCallNameEmpty。
+				if id != "" && pairedIDs[id] && !nameBadIDs[id] &&
 					callMessageIndex[id] == messageIndex && callEntryIndex[id] == entryIndex {
 					kept = append(kept, callAny)
 				} else {
@@ -137,7 +144,10 @@ func RepairToolSequence(obj map[string]any) ToolRepairReport {
 
 		case "tool":
 			id := toolOutputID(message)
-			if id != "" && pairedIDs[id] && outputMessageIndex[id] == messageIndex {
+			// nameBadIDs 同样否决结果侧：**必须与调用侧对称**。否则空 name 的调用
+			// 被删掉、它的结果却留着，出站就成了「无 tool_calls 的 assistant +
+			// 孤儿 tool」—— 上游判 11148，比原 bug 更糟。
+			if id != "" && pairedIDs[id] && !nameBadIDs[id] && outputMessageIndex[id] == messageIndex {
 				filtered = append(filtered, messageAny)
 			} else {
 				report.DroppedOutputs++
@@ -409,4 +419,33 @@ func toolCallID(callAny any) string {
 func toolOutputID(message map[string]any) string {
 	id, _ := message["tool_call_id"].(string)
 	return strings.TrimSpace(id)
+}
+
+// toolCallNameEmpty 判断 assistant.tool_calls[] 单项的 function.name 是否为空。
+//
+// 为什么要单独判它：上游在工具调用 name 分片到达前异常结束（200 空流也算）时，
+// 聚合器会按占位符产出 `name:""` 的条目。客户端把它写进会话历史，下一轮原样转发，
+// 上游直接判
+//
+//	400 code=11133 tool_calls[i].function.name must be a non-empty string
+//
+// 而这是**消息参数级**拒绝（换账号也无效），整条会话从此每轮 503，只能手动清空历史。
+// 它比 11148 更难自愈：按 id 对称裁剪对「带配对结果的脏条目」不设防，原样放行。
+//
+// 判定**精确收窄**为「function 对象存在、name 字段存在且为空白字符串」：
+// 历史报文里有不带 function 的占位条目，上游不因此拒参，这里不扩大打击面。
+func toolCallNameEmpty(callAny any) bool {
+	call, ok := callAny.(map[string]any)
+	if !ok {
+		return false
+	}
+	fn, ok := call["function"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, ok := fn["name"].(string)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(name) == ""
 }

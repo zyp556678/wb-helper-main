@@ -656,3 +656,84 @@ func TestUpdateDownloadMirrorSurvivesReload(t *testing.T) {
 		t.Fatalf("重启后应保持「已退回直连」，得到 %q", got)
 	}
 }
+
+// TestProbeDisabledByDefaultButOptIn 钉住价格探测的默认值：**默认关闭**，
+// 显式配置才能打开。
+//
+// 为什么默认必须关：探测会向模型发真实的生成请求（消耗积分）。默认开等于
+// 「装好就开始悄悄花用户的积分」—— 与「下载加速」那种零成本默认开不是一回事。
+// 这条断言防的是「哪次重构顺手把默认值改回 true」。
+//
+// 开关走的是**配置文件**（config.json 的顶层 models_probe），不是面板保存：
+// 它与相邻的 models_npm 一样不在 SavePatch 的 Patch 结构里，属于「编辑文件生效」
+// 那一类。所以这里用真实加载路径验证，而不是 save() 补丁。
+func TestProbeDisabledByDefaultButOptIn(t *testing.T) {
+	// 一、零配置：关闭。
+	if c := newTestConfig(t); c.ProbeEnabled() {
+		t.Fatal("价格探测必须默认关闭（它会消耗账号积分）")
+	}
+
+	// 二、显式 true → 打开。
+	if c := configFromJSON(t, `{"models_probe":true}`); !c.ProbeEnabled() {
+		t.Fatal("models_probe=true 应启用价格探测")
+	}
+
+	// 三、显式 false → 关闭。
+	if c := configFromJSON(t, `{"models_probe":false}`); c.ProbeEnabled() {
+		t.Fatal("models_probe=false 应保持关闭")
+	}
+
+	// 四、只配了邻居字段时不能被带偏（默认仍是关）。
+	if c := configFromJSON(t, `{"models_npm":false}`); c.ProbeEnabled() {
+		t.Fatal("只改 models_npm 不该影响价格探测的默认值")
+	}
+}
+
+// configFromJSON 走真实加载路径构造配置（写文件 + Load），
+// 用于验证那些不在面板 Patch 里的配置文件字段。
+func configFromJSON(t *testing.T, body string) *Config {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写配置失败: %v", err)
+	}
+	c, err := Load(&Config{ConfigFile: path, WorkDir: dir})
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	return c
+}
+
+// TestProbeDisabledSurvivesReload 重启后默认值语义仍然成立。
+func TestProbeDisabledSurvivesReload(t *testing.T) {
+	c := newTestConfig(t)
+
+	// 未配置 → 重新加载后仍是关闭。
+	reloaded, err := Load(&Config{ConfigFile: c.ConfigFile, WorkDir: c.WorkDir})
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if reloaded.ProbeEnabled() {
+		t.Fatal("未配置时重新加载后仍应保持关闭")
+	}
+
+	// 显式打开 → 重新加载后仍是打开。
+	save(t, c, `{"models_probe":true}`)
+	reloaded2, err := Load(&Config{ConfigFile: c.ConfigFile, WorkDir: c.WorkDir})
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if !reloaded2.ProbeEnabled() {
+		t.Fatal("显式打开后重新加载应保持打开")
+	}
+}
+
+// TestModelsNPMStillDefaultsOn 顺带钉住邻居字段没被这次改动带偏：
+// npm 目录兜底是零成本行为，默认仍是**开**。
+func TestModelsNPMStillDefaultsOn(t *testing.T) {
+	c := newTestConfig(t)
+	if !c.ModelsNPMEnabled() {
+		t.Fatal("npm 目录兜底应默认开启（它不消耗积分）")
+	}
+}

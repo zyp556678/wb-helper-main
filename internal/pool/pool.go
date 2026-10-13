@@ -325,12 +325,17 @@ func (p *Pool) LoadError() string {
 }
 
 func (p *Pool) Load() (int, []error) {
-	paths := auth.Discover(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
+	paths, discoverErr := auth.DiscoverChecked(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
 
 	var (
 		accs []*Account
 		errs []error
 	)
+	// 目录读不到时不要把它当成「一个账号都没有」：那样 loadErr 为空，
+	// 上层会把它渲染成正常的「0 个账号」。记成加载错误，用户才知道要去看目录。
+	if discoverErr != nil {
+		errs = append(errs, discoverErr)
+	}
 	markers := p.loadMarkers(paths)
 	pausedMarkers := p.loadPausedMarkers(paths)
 	for _, path := range paths {
@@ -367,7 +372,21 @@ func (p *Pool) Load() (int, []error) {
 // 指纹变了（外部改过文件，例如重新登录或别处刷新了令牌）才重建对象，
 // 并把可保留的运行状态迁移过去。
 func (p *Pool) Reload() bool {
-	paths := auth.Discover(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
+	paths, discoverErr := auth.DiscoverChecked(p.config().WorkDir, p.config().AuthFile, p.config().AuthDir, p.config().AuthExplicit)
+
+	// 目录读不到（被删 / 改名 / 挂载丢失）时**保留原池，一个账号都不动**。
+	//
+	// 这里是热加载路径，默认每几秒跑一次（见 server.reloadLoop）。若把「读不到目录」
+	// 当成「目录是空的」，账号池会在几秒内被清空，面板显示 0 个账号、请求全部 503 ——
+	// 而用户的凭据文件其实一直躺在原处，只是目录暂时不可达。宁可用一份稍旧的池子继续
+	// 服务，也不要让一次瞬时故障变成「账号全没了」。
+	if discoverErr != nil {
+		p.mu.Lock()
+		p.lastScan = time.Now()
+		p.mu.Unlock()
+		p.setLoadError([]error{discoverErr})
+		return false
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -432,6 +451,8 @@ func (p *Pool) Reload() bool {
 	}
 
 	p.accounts = next
+	// 扫描成功即清掉上次的目录错误（上一轮可能因目录暂不可达而报过）。
+	p.setLoadError(nil)
 	if len(next) == 0 {
 		p.rrIndex = 0
 	} else if p.rrIndex >= len(next) {

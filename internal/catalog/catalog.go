@@ -125,7 +125,9 @@ type Catalog struct {
 
 	// NPMEnabled 控制是否使用 npm 静态目录兜底（默认开）。
 	NPMEnabled bool
-	// ProbeEnabled 控制价格探测（默认开）。
+	// ProbeEnabled 控制价格探测。**默认关**，由 main 按配置赋值
+	// （config.ProbeEnabled：nil = 关，显式 true 才开）—— 探测会发真实生成
+	// 请求消耗积分，不该在零配置下自己开起来。
 	ProbeEnabled bool
 
 	// probeMu 串行化探测：探测会消耗额度，且需要前后两次额度读数稳定，
@@ -141,15 +143,15 @@ type Catalog struct {
 // 抽象成接口反而容易写出「持锁后又调加锁方法」的自锁代码（已踩过一次）。
 func New(cacheFile string, client *upstream.Client, accts *pool.Pool) *Catalog {
 	return &Catalog{
-		bySite:       map[string][]Model{},
-		probes:       map[string]Probe{},
-		fetchedAt:    map[string]int64{},
-		includes:     map[string]bool{},
-		cacheFile:    cacheFile,
-		client:       client,
-		accts:        accts,
-		NPMEnabled:   true,
-		ProbeEnabled: true,
+		bySite:     map[string][]Model{},
+		probes:     map[string]Probe{},
+		fetchedAt:  map[string]int64{},
+		includes:   map[string]bool{},
+		cacheFile:  cacheFile,
+		client:     client,
+		accts:      accts,
+		NPMEnabled: true,
+		// ProbeEnabled 留 false：探测消耗积分，必须由配置显式开启。
 	}
 }
 

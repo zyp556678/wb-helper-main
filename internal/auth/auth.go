@@ -245,6 +245,20 @@ func IsCredentialFile(name string) bool {
 // 面板据此把整页渲染成「状态快照暂不可用」（见 server.overview 的 503 判据）——
 // 新手看到的是「坏了」，而他只是还没加账号。文件确实存在时已由扫描收进 paths。
 func Discover(workDir, authFile, authDir string, explicit bool) []string {
+	paths, _ := DiscoverChecked(workDir, authFile, authDir, explicit)
+	return paths
+}
+
+// DiscoverChecked 与 Discover 相同，但额外报告「凭据来源目录读不到」这个失败。
+//
+// 为什么要单独返回它：Discover 的调用方拿到空列表时无法区分两种截然不同的情形 ——
+// 「目录确实空的」（全新安装，正常）与「目录打不开了」（被删 / 改名 / 挂载丢失）。
+// 后者若被当成前者，账号池会被清空、面板显示「0 个账号」，用户以为账号丢了。
+// 周期热加载（每几秒一次）会让这个清空反复发生，看起来像账号被删。
+//
+// 返回的第二项只在**配置了目录且读目录失败**时非空；其余路径（显式文件、自动发现）
+// 沿用原语义，README 所述「一个都没有时返回空列表」的常态不受影响。
+func DiscoverChecked(workDir, authFile, authDir string, explicit bool) ([]string, error) {
 	var paths []string
 	if strings.TrimSpace(authDir) != "" {
 		dir := authDir
@@ -252,16 +266,17 @@ func Discover(workDir, authFile, authDir string, explicit bool) []string {
 			dir = filepath.Join(workDir, dir)
 		}
 		entries, err := os.ReadDir(dir)
-		if err == nil {
-			for _, e := range entries {
-				if e.IsDir() || !IsCredentialFile(e.Name()) {
-					continue
-				}
-				paths = append(paths, filepath.Join(dir, e.Name()))
-			}
-			sort.Strings(paths)
+		if err != nil {
+			return nil, fmt.Errorf("凭据目录 %s 无法读取: %w", dir, err)
 		}
-		return paths
+		for _, e := range entries {
+			if e.IsDir() || !IsCredentialFile(e.Name()) {
+				continue
+			}
+			paths = append(paths, filepath.Join(dir, e.Name()))
+		}
+		sort.Strings(paths)
+		return paths, nil
 	}
 
 	if explicit {
@@ -271,7 +286,7 @@ func Discover(workDir, authFile, authDir string, explicit bool) []string {
 				paths = append(paths, p)
 			}
 		}
-		return paths
+		return paths, nil
 	}
 
 	entries, err := os.ReadDir(workDir)
@@ -297,7 +312,7 @@ func Discover(workDir, authFile, authDir string, explicit bool) []string {
 	//
 	// 显式指定（`-auth`/`-auth-dir`）的路径仍然照常返回：那是用户**指明**要读的文件，
 	// 读不到必须报错（上面两个分支已提前 return）。
-	return paths
+	return paths, nil
 }
 
 // SaveAtomic 把当前令牌字段写回原文件：就地打补丁保留未知键，tmp + rename 原子替换，权限 0600。

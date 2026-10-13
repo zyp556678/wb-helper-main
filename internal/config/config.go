@@ -269,7 +269,9 @@ type Config struct {
 	// 必须与「从未配置」区分开，否则用户清空输入框想退回直连时会被默认值重新填上，
 	// 变成一个关不掉的开关。
 	updateMirrorPresent bool
-	// ModelsNPM / ModelsProbe 控制目录的两项可选行为（nil = 默认启用）。
+	// ModelsNPM / ModelsProbe 控制目录的两项可选行为。
+	// ModelsNPM 的 nil = 默认启用；ModelsProbe 的 nil = **默认关闭**（探测消耗积分，
+	// 见 ProbeEnabled 的说明），必须在配置里显式写成 true 才开。
 	ModelsNPM   *bool
 	ModelsProbe *bool
 

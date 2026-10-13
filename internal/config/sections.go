@@ -1241,9 +1241,18 @@ func (c *Config) ModelsNPMEnabled() bool {
 	return c.ModelsNPM == nil || *c.ModelsNPM
 }
 
-// ProbeEnabled 是否启用价格实测探测（默认启用）。
+// ProbeEnabled 是否启用价格实测探测（**默认关闭**）。
+//
+// 为什么默认关：探测会向模型发**真实的生成请求**（probeMaxTokens=400），
+// 因而消耗账号积分。默认开等于「装好就开始悄悄花用户的积分」，而用户既没要求、
+// 也不一定知道 —— 这与「下载加速」「自动检查更新」那类零成本默认开不是一回事。
+//
+// 代价（必须说清楚）：我们**没有**「正常请求顺带学到价格」的被动路径，
+// 价格结论只来自探测（catalog.go 里 probes 的唯一写入点）。所以关掉之后，
+// 「模型」页的价格列会停在「未知」，选号层的「免费站优先」也会因缺少结论而不倾斜。
+// 需要这两项功能的用户显式打开即可（面板「模型」页的开关写的就是它）。
 func (c *Config) ProbeEnabled() bool {
-	return c.ModelsProbe == nil || *c.ModelsProbe
+	return c.ModelsProbe != nil && *c.ModelsProbe
 }
 
 // HotFields 返回可热生效的配置段名（供文档与面板说明）。

@@ -198,42 +198,140 @@ func (c *Client) FetchQuota(ctx context.Context, cred *CredentialView, p *Profil
 //     not_authorized）。这里只反映该账号被分配的额度。
 //
 // 字段命名两套都收：上游桌面端有两条解析路径，分别读 camelCase 与 snake_case。
+// enterpriseUsage 是企业额度端点的解析结果。
+//
+// Credit / UsedNum 两种命名都收（官方两处实现分别读 camelCase 与 snake_case），
+// CycleResetTime 是本周期重置时间 —— 它是企业号唯一的「到期」概念，
+// 个人口径那边的 per-package 到期时间在企业体系里不存在。
+type enterpriseUsage struct {
+	Limit     int64
+	Used      float64
+	ResetAt   int64 // Unix 毫秒；0 表示没给或解析不出
+	Unlimited bool  // limitNum < 0
+}
+
+// fetchEnterpriseUsage 打一次企业额度端点并解析。
+//
+// 抽成独立函数是为了让**额度查询**与**积分资源明细**共用同一份响应与同一套判定，
+// 两处各写一遍迟早会漂移（尤其「credit 是已用不是剩余」这条反直觉的语义）。
+func (c *Client) fetchEnterpriseUsage(ctx context.Context, p *Profile, headers func(*http.Request)) (enterpriseUsage, error) {
+	var usage enterpriseUsage
+	var resp struct {
+		Credit         float64 `json:"credit"`
+		UsedNum        float64 `json:"used_num"`
+		LimitNum       int64   `json:"limitNum"`
+		LimitNumSnake  int64   `json:"limit_num"`
+		CycleResetTime any     `json:"cycleResetTime"`
+		ResetTimeSnake any     `json:"cycle_reset_time"`
+	}
+	data, _, err := c.doJSON(ctx, http.MethodPost, p.EnterpriseQuotaURL(), headers, strings.NewReader("{}"))
+	if err != nil {
+		return usage, err
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return usage, fmt.Errorf("解析企业额度响应失败: %w", err)
+	}
+
+	usage.Limit = resp.LimitNum
+	if usage.Limit == 0 {
+		usage.Limit = resp.LimitNumSnake
+	}
+	// credit 是**本周期已用**（与个人口径的 Remain 语义相反，见 enterpriseQuota 注释）。
+	usage.Used = resp.Credit
+	if usage.Used == 0 {
+		usage.Used = resp.UsedNum
+	}
+	if at, ok := toMillis(resp.CycleResetTime); ok {
+		usage.ResetAt = at
+	} else if at, ok := toMillis(resp.ResetTimeSnake); ok {
+		usage.ResetAt = at
+	}
+	usage.Unlimited = usage.Limit < 0
+	return usage, nil
+}
+
 func (c *Client) enterpriseQuota(ctx context.Context, p *Profile, headers func(*http.Request)) (Quota, error) {
 	var out Quota
-	data, _, err := c.doJSON(ctx, http.MethodPost, p.EnterpriseQuotaURL(), headers, strings.NewReader("{}"))
+	usage, err := c.fetchEnterpriseUsage(ctx, p, headers)
 	if err != nil {
 		return out, err
 	}
-	var resp struct {
-		Credit        float64 `json:"credit"`
-		LimitNum      int64   `json:"limitNum"`
-		LimitNumSnake int64   `json:"limit_num"`
-		UsedNum       float64 `json:"used_num"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return out, fmt.Errorf("解析企业额度响应失败: %w", err)
-	}
-	limit := resp.LimitNum
-	if limit == 0 {
-		limit = resp.LimitNumSnake
-	}
-	used := resp.Credit
-	if used == 0 {
-		used = resp.UsedNum
-	}
-
 	out.Plan = "企业版"
 	out.Paid = true
-	if limit < 0 {
+	if usage.Unlimited {
 		out.Plan = "企业版（不限量）"
 		return out, nil
 	}
-	out.Total = float64(limit)
-	out.Used = used
-	out.Remaining = float64(limit) - used
+	out.Total = float64(usage.Limit)
+	out.Used = usage.Used
+	out.Remaining = float64(usage.Limit) - usage.Used
 	if out.Remaining < 0 {
 		// 超额使用时上游仍返回正数 credit，钳到 0 —— 负的"剩余"没有意义。
 		out.Remaining = 0
+	}
+	return out, nil
+}
+
+// enterpriseCreditResources 把企业额度端点映射成一条积分资源。
+//
+// 为什么要有它：个人口径的三个资源端点对企业号恒返回空（见 FetchCreditResources），
+// 于是面板的「积分明细」对这类账号永远是空的、选号层的到期快照也拿不到数 ——
+// 而额度其实是有的。企业体系里没有「资源包」这个概念，只有一个周期配额，
+// 所以如实输出单条资源，而不是硬凑出个人体系的多包形状。
+func (c *Client) enterpriseCreditResources(ctx context.Context, cred *CredentialView, p *Profile,
+	now int64) (CreditExpiry, error) {
+
+	out := CreditExpiry{Resources: []CreditResource{}}
+	headers := func(r *http.Request) {
+		commonHeaders(r, p)
+		r.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+		r.Header.Set("X-Client-Platform", "web")
+		if cred.EnterpriseID != "" {
+			r.Header.Set("X-Enterprise-Id", cred.EnterpriseID)
+		}
+	}
+	usage, err := c.fetchEnterpriseUsage(ctx, p, headers)
+	if err != nil {
+		return out, err
+	}
+
+	res := CreditResource{
+		PackageCode: "enterprise_quota",
+		PackageName: "企业版配额",
+		Status:      -1,
+	}
+	if usage.Unlimited {
+		// 不限量：没有"总量/剩余"可言，留 0 并靠名字说明，而不是显示成"额度已用尽"。
+		res.PackageName = "企业版（不限量）"
+	} else {
+		res.Total = float64(usage.Limit)
+		res.Used = usage.Used
+		res.Remaining = float64(usage.Limit) - usage.Used
+		if res.Remaining < 0 {
+			res.Remaining = 0
+		}
+	}
+	if usage.ResetAt > 0 {
+		res.ExpireAt = usage.ResetAt
+		res.Expired = usage.ResetAt <= now
+		res.ExpiringSoon = usage.ResetAt > now && usage.ResetAt-now <= expiringSoonDays*24*3600*1000
+	}
+	out.Resources = append(out.Resources, res)
+
+	for _, r := range out.Resources {
+		if r.Remaining <= 0 {
+			continue
+		}
+		if r.ExpireAt > 0 && (out.SoonestExpireAt == 0 || r.ExpireAt < out.SoonestExpireAt) {
+			out.SoonestExpireAt = r.ExpireAt
+		}
+		if r.ExpiringSoon {
+			out.ExpiringRemaining += r.Remaining
+		}
+	}
+	out.TotalRemaining = 0
+	for _, r := range out.Resources {
+		out.TotalRemaining += r.Remaining
 	}
 	return out, nil
 }
@@ -436,6 +534,13 @@ func (c *Client) creditResourceRequest(ctx context.Context, cred *CredentialView
 func (c *Client) FetchCreditResources(ctx context.Context, cred *CredentialView, p *Profile) (CreditExpiry, error) {
 	out := CreditExpiry{Resources: []CreditResource{}}
 	now := time.Now().UnixMilli()
+
+	// 企业版资源明细**不在个人体系内**：个人口径的三个 resource 端点对企业号恒返回空
+	// （与 FetchQuota 同理，见其注释），拿到的会是「一条资源都没有」——面板显示空，
+	// 选号层的到期快照也因此拿不到数据。改走企业额度端点，映射成单条资源。
+	if cred.IsEnterprise() {
+		return c.enterpriseCreditResources(ctx, cred, p, now)
+	}
 
 	// 免费包要带当天切片时间窗（官方客户端如此）；付费包带续期信息开关。
 	day := time.Now().Format("2006-01-02")
