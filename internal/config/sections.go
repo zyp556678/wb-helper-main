@@ -242,14 +242,6 @@ type UpdateSection struct {
 	//（例如 v0.9.0-slice8）。默认不参与，是因为预发布版对使用者的默认预期
 	// 是「我不该被它推着升级」，而想抢先试的人会自己打开。
 	IncludePrerelease *bool `json:"include_prerelease"`
-	// Token 是读取**私有**仓库 Release 用的只读令牌。
-	//
-	// 为什么必须有这条通路：未认证访问私有仓库的 Release 接口一律返回 404
-	//（GitHub 连「这个仓库存在」都不告诉未认证方），而本项目的发布仓库默认私有。
-	// 留空时回落到环境变量 WB_UPDATE_TOKEN；两处都空就**如实报「缺令牌」**，
-	// 而不是报「已是最新」—— 把「查不到」说成「没有新版本」会让用户永远等不到更新，
-	// 而且没有任何迹象表明哪里配错了。
-	Token string `json:"token"`
 	// AutoDownload 决定「发现新版本后自动把安装包下到数据目录」是否开启，默认 **true**。
 	//
 	// 为什么默认开：**下载不是破坏性动作** —— 它只是往数据目录里放一个文件，
@@ -275,10 +267,7 @@ type UpdateSection struct {
 	//	"https://gh-proxy.org"   →  实际请求 https://gh-proxy.org/https://github.com/...
 	//
 	// 只影响**安装包下载**，不影响版本检查（那是 api.github.com 的一次小请求，
-	// 本来就不慢）。配了 update.token（私有仓库）时**不加速**：加速服务拿不到
-	// 我们的令牌，而私有附件必须带令牌 —— 硬走加速只会得到 404。
-	// 配了代理（Proxy / `-proxy` / 环境变量）时也**不加速**：走代理已经能到 GitHub，
-	// 再套一层第三方转发只是多一跳，还让那家看到你的下载。
+	// 本来就不慢）。
 	//
 	// 三态语义（空串有含义，所以不能用「空 = 用默认」的两态写法）：
 	//
@@ -290,21 +279,6 @@ type UpdateSection struct {
 	// 看不到明文内容，但它能决定给你哪一份文件（本项目没有代码签名，也就没有
 	// 本地校验环节）。在意这条链路的人必须能退回直连，而不是被默认值一直填回来。
 	DownloadMirror string `json:"download_mirror"`
-	// Proxy 是**专供更新检查和安装包下载**的 HTTP/HTTPS 代理地址，默认空 = 不走代理。
-	//
-	// 与 download_mirror 是两条正交通路，各自覆盖一类用户：
-	//
-	//	download_mirror  没有代理、只能靠第三方加速站转发的用户
-	//	proxy            本机开着 Clash / v2ray 之类代理的用户
-	//
-	// 为什么需要它：国内直连 github.com 与多数加速站都不通，而用户本机往往**已经**
-	// 有个能用的代理（只是网关进程读不到 —— 桌面壳启动网关时不传代理环境变量）。
-	// 让用户在面板里填一次，比要求他改环境变量或加 CLI 参数可靠得多。
-	//
-	// 为什么不与对话流量共用 `-proxy`：对话出口 IP 会影响上游风控，本项目刻意
-	// 让对话流量只认显式配置；而查 GitHub 是标准公共服务访问，两件事的取舍不同。
-	// 优先级：`-proxy`（显式，与对话同出口）> 本字段 > 环境变量代理 > 直连。
-	Proxy string `json:"proxy"`
 }
 
 // ApplyDefaults 填充未配置字段的默认值（口径与 wb2api-panel 一致）。
@@ -788,19 +762,6 @@ func (c *Config) UpdateDownloadMirror() string {
 		return ""
 	}
 	return v
-}
-
-// UpdateToken 取更新源令牌：config.json 里的优先，其次环境变量 WB_UPDATE_TOKEN。
-//
-// 为什么要留环境变量这条通路：容器化部署里 config.json 常常整份进镜像或进配置
-// 管理系统，token 写在里面等于把它复制到每一份副本；而环境变量可以只在运行时注入。
-// 反过来，桌面版用户没有配环境变量的习惯，所以两处都要认，且以配置文件为准
-// （显式写下的东西优先于环境里的残留）。
-func (c *Config) UpdateToken() string {
-	if t := strings.TrimSpace(c.Update.Token); t != "" {
-		return t
-	}
-	return strings.TrimSpace(os.Getenv("WB_UPDATE_TOKEN"))
 }
 
 // CheckinWindow 返回签到允许的时间段（当日分钟数，**左闭右开**）。

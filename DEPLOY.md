@@ -58,14 +58,13 @@ xattr -d com.apple.quarantine workbuddy-gateway_<版本>_arm64.pkg
 ### 检查更新要能出网
 
 网关默认每 6 小时向 `https://api.github.com` 查一次最新 Release（间隔与源可在
-`config.json` 的 `update` 段改，见 README）。它走的是与上游同一个出口代理（`-proxy`），
-所以：
+`config.json` 的 `update` 段改，见 README）。仓库是公开的，无需令牌。它走的是与上游
+同一个出口代理（`-proxy`；没显式配时回落到环境变量代理），所以：
 
 - **完全离线**的部署：把 `update.enabled` 设为 `false`，面板上的「检查更新」会如实
   显示未启用，而不是假装「已是最新」。
-- **私有仓库**：未认证访问 Release 接口返回 404，需要在 `update.token` 里配一个只读令牌
-  （细粒度 PAT、`contents:read`），或用环境变量 `WB_UPDATE_TOKEN` 注入（容器推荐后者，
-  免得令牌进镜像/配置管理）。
+- 未认证请求有 60 次/小时/IP 的限额；本项目的检查间隔（默认 6 小时）远低于它，
+  正常使用不会撞上。
 - 只有一个 Go 二进制、没有桌面壳的部署同样能查到更新；「下载安装包」会把包落到数据目录的
   `updates/` 下，装不装由你决定（网关不会自行替换正在运行的二进制）。
 - **代理**：配了 `-proxy` 就用它；没配则认环境变量（`HTTPS_PROXY` / `HTTP_PROXY` /

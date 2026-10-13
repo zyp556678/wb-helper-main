@@ -342,42 +342,20 @@ func TestCheckReportsUpToDate(t *testing.T) {
 	}
 }
 
-// 没配令牌 + 私有仓库 → 404。必须报「需要令牌」，绝不能报「已是最新」。
-func TestCheckPrivateRepoWithoutTokenExplainsItself(t *testing.T) {
+// 仓库查不到（404）→ 如实报错，绝不能报「已是最新」。
+//
+// 这条守的是一个很容易犯的错：把「查不到」说成「没有新版本」，会让用户永远等不到
+// 更新，而且看不出哪里配错了。
+func TestCheckMissingRepoExplainsItself(t *testing.T) {
 	f := newFakeGitHub(t)
 	f.status = http.StatusNotFound
 	c := newChecker(t, f, "0.9.2", "linux", "amd64", config.UpdateSection{})
 	st := c.Check(context.Background(), true)
-	if st.Error == "" || !strings.Contains(st.Error, "令牌") {
-		t.Fatalf("应当提示需要令牌，实际 %q", st.Error)
+	if st.Error == "" || !strings.Contains(st.Error, "404") {
+		t.Fatalf("应当如实报 404，实际 %q", st.Error)
 	}
 	if st.UpdateAvailable {
 		t.Error("查不到时不该声称有更新")
-	}
-}
-
-func TestCheckSendsTokenWhenConfigured(t *testing.T) {
-	f := newFakeGitHub(t)
-	f.body = releasesJSON(mkRelease("v0.9.2", nil))
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", config.UpdateSection{Token: "ghp_test"})
-	c.Check(context.Background(), true)
-	if f.lastAuth != "Bearer ghp_test" {
-		t.Errorf("配了令牌就应当带上，实际 %q", f.lastAuth)
-	}
-}
-
-// 环境变量是容器部署的主通路：配置文件里不写令牌也得能查。
-func TestCheckTokenFromEnv(t *testing.T) {
-	t.Setenv("WB_UPDATE_TOKEN", "env_token")
-	f := newFakeGitHub(t)
-	f.body = releasesJSON(mkRelease("v0.9.2", nil))
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", config.UpdateSection{})
-	st := c.Check(context.Background(), true)
-	if f.lastAuth != "Bearer env_token" {
-		t.Errorf("应当用环境变量里的令牌，实际 %q", f.lastAuth)
-	}
-	if !st.TokenSet {
-		t.Error("State 应当如实反映「配了令牌」")
 	}
 }
 
@@ -518,15 +496,33 @@ func TestAssetFileNameRejectsTraversal(t *testing.T) {
 func TestAllowedAssetHost(t *testing.T) {
 	ok := []string{"github.com", "objects.githubusercontent.com", "127.0.0.1", "localhost", "release-assets.githubusercontent.com"}
 	for _, h := range ok {
-		if !allowedAssetHost(h) {
+		if !allowedAssetHost(h, "") {
 			t.Errorf("%s 应当被允许", h)
 		}
 	}
 	bad := []string{"", "evil.com", "github.com.evil.com", "10.0.0.1"}
 	for _, h := range bad {
-		if allowedAssetHost(h) {
+		if allowedAssetHost(h, "") {
 			t.Errorf("%s 不该被允许", h)
 		}
+	}
+}
+
+// TestAllowedAssetHostAllowsMirrorHost 配了加速前缀时，白名单必须放行前缀主机本身。
+//
+// 否则会出现自相矛盾的行为：前缀拼接通过了，请求却被自己的重定向白名单挡下，
+// 表现为「配了加速前缀反而下不动」。
+func TestAllowedAssetHostAllowsMirrorHost(t *testing.T) {
+	if !allowedAssetHost("gh-proxy.org", "gh-proxy.org") {
+		t.Error("加速前缀主机应当被放行")
+	}
+	// 前缀主机被放行，但不等于任意主机都被放行。
+	if allowedAssetHost("evil.com", "gh-proxy.org") {
+		t.Error("非前缀的第三方主机仍应被拒")
+	}
+	// 没配前缀时它不该被放行。
+	if allowedAssetHost("gh-proxy.org", "") {
+		t.Error("没配前缀时该主机不是可信下载源")
 	}
 }
 
@@ -711,58 +707,6 @@ func TestCheckThrottlesAfterFailure(t *testing.T) {
 }
 
 // 私有仓库的附件必须走 API 资产端点：/releases/download/... 认的是浏览器会话
-// Cookie，带 Bearer 令牌一样 404（实测踩到过）。这条测试把「用哪个地址」钉住。
-func TestDownloadUsesAPIEndpointWhenTokenSet(t *testing.T) {
-	payload := []byte("private-deb")
-	var srv *httptest.Server
-	var assetPath, assetAuth string
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/repos/o/r/releases":
-			_, _ = io.WriteString(w, releasesJSON(mkRelease("v0.9.3", map[string]any{
-				"assets": []map[string]any{{
-					"name":                 "pkg_0.9.3_amd64.deb",
-					"size":                 len(payload),
-					"browser_download_url": srv.URL + "/dl/pkg_0.9.3_amd64.deb",
-					"url":                  srv.URL + "/repos/o/r/releases/assets/42",
-					"id":                   42,
-				}},
-			})))
-		case r.URL.Path == "/repos/o/r/releases/assets/42":
-			assetPath, assetAuth = r.URL.Path, r.Header.Get("Authorization")
-			if r.Header.Get("Accept") != "application/octet-stream" {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			_, _ = w.Write(payload)
-		default:
-			// 浏览器下载链接在私有仓库上会 404 —— 请求打到这儿就说明选错了地址。
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r", Token: "ghp_x"}), Options{
-		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
-		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
-	})
-	c.Check(context.Background(), true)
-	res, err := c.Download(context.Background())
-	if err != nil {
-		t.Fatalf("下载失败: %v", err)
-	}
-	if assetPath != "/repos/o/r/releases/assets/42" {
-		t.Errorf("应当走 API 资产端点，实际请求了 %q", assetPath)
-	}
-	if assetAuth != "Bearer ghp_x" {
-		t.Errorf("API 端点应当带令牌，实际 %q", assetAuth)
-	}
-	got, err := os.ReadFile(res.Path)
-	if err != nil || string(got) != string(payload) {
-		t.Errorf("文件内容不对: %q err=%v", got, err)
-	}
-}
-
 // 没配令牌（公开仓库）时用浏览器下载链接，省一次 API 调用。
 func TestDownloadUsesBrowserURLWithoutToken(t *testing.T) {
 	payload := []byte("public-deb")
@@ -910,39 +854,5 @@ func TestDownloadCleansStaleTempFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("陈旧的临时文件应当被清掉，实际仍在: %v", err)
-	}
-}
-
-// TestValidateUpdateProxy 代理地址校验的边界（与面板保存路径同一函数）。
-//
-// 只接受 http/https 是刻意的：用户最容易把 "127.0.0.1:7897"（少协议）当成能用的值，
-// 那种地址存进去之后请求会报一个难懂的错误，不如在保存时当场说明正确写法。
-func TestValidateUpdateProxy(t *testing.T) {
-	ok := []string{
-		"",
-		"   ",
-		"http://127.0.0.1:7897",
-		"https://proxy.example.com:8080",
-		"http://user:pass@127.0.0.1:7897",
-	}
-	for _, v := range ok {
-		if err := ValidateUpdateProxy(v); err != nil {
-			t.Errorf("%q 应被接受，却报错: %v", v, err)
-		}
-	}
-
-	bad := []string{
-		"127.0.0.1:7897",          // 少协议
-		"127.0.0.1",               // 少协议
-		"socks5://127.0.0.1:1080", // 非 http(s)
-		"ftp://127.0.0.1:21",
-		"http://", // 缺主机
-		"://127.0.0.1:7897",
-		"http:///path", // 缺主机、只有路径
-	}
-	for _, v := range bad {
-		if err := ValidateUpdateProxy(v); err == nil {
-			t.Errorf("%q 应被拒绝，却通过了", v)
-		}
 	}
 }

@@ -1296,14 +1296,6 @@ export function setUpdateMirror(mirror: string) {
   });
 }
 
-/** 设置更新代理（POST /panel/api/update/proxy，传空串表示不走代理）。 */
-export function setUpdateProxy(proxy: string) {
-  return request<{ ok: boolean; proxy: string; detail?: string }>("/update/proxy", {
-    method: "POST",
-    body: { proxy },
-  });
-}
-
 /**
  * 下载匹配本机平台的安装包（POST /panel/api/update/download）。
  *

@@ -23,12 +23,10 @@
 // 而用户手里的 CLI / IDE 全都指着这个端口。所以这里停在「下好安装包 + 告诉用户
 // 装哪个文件」，最后一步交给用户点 —— 这比做一个半可靠的自更新进程诚实得多。
 //
-// # 更新源是 GitHub Release，且默认仓库是私有的
+// # 更新源是 GitHub Release
 //
-// 未认证访问私有仓库的 Release 接口一律返回 404（GitHub 连「这个仓库存在」都不告诉
-// 未认证方），所以必须支持配一个只读令牌（config.json 的 update.token，或环境变量
-// WB_UPDATE_TOKEN）。**没配令牌时如实报「需要令牌」**，绝不报「已是最新」——
-// 把「查不到」说成「没有新版本」会让用户永远等不到更新，而且看不出哪里配错了。
+// 走 api.github.com 的公开接口（仓库已公开，无需令牌）。列表接口有 60 次/小时/IP
+// 的未认证限额，所以成功后按 CheckHours 缓存，不重复问。
 package update
 
 import (
@@ -147,26 +145,20 @@ type State struct {
 	AssetName   string `json:"asset_name,omitempty"`
 	AssetSize   int64  `json:"asset_size,omitempty"`
 	DownloadURL string `json:"download_url,omitempty"`
-	// assetAPIURL 是不下发给面板的内部字段：私有仓库下载附件要走 API 端点
-	//（见 releaseAsset.APIURL）。面板没有它的用途，也就不必扩大暴露面。
-	assetAPIURL string
 	// CheckedAt 是上次**成功**完成检查的时间（unix 秒；0 表示还没查过）。
 	CheckedAt int64 `json:"checked_at,omitempty"`
 	// Checking 表示此刻有一次检查在飞（面板据此显示转圈并轮询）。
 	Checking bool `json:"checking"`
-	// AutoCheck / IntervalHours / TokenSet 来自当前配置，面板据此渲染开关与提示，
-	// 不必再去读 /panel/api/config（那条路径还要处理 token 的脱敏）。
+	// AutoCheck / IntervalHours 来自当前配置，面板据此渲染开关与提示，
+	// 不必再去读 /panel/api/config。
 	AutoCheck     bool `json:"auto_check"`
 	IntervalHours int  `json:"interval_hours"`
-	TokenSet      bool `json:"token_set"`
 	// AutoDownload 来自配置：发现新版本后是否自动把安装包下到数据目录（默认 true）。
 	AutoDownload bool `json:"auto_download"`
 	// AutoInstall 来自配置：安装包下好之后是否自动安装（默认 false，见 config.UpdateSection）。
 	AutoInstall bool `json:"auto_install"`
 	// DownloadMirror 是生效中的下载加速前缀（空串 = 直连），面板据此显示当前走哪条路。
 	DownloadMirror string `json:"download_mirror,omitempty"`
-	// Proxy 是生效中的**更新代理**（空串 = 不走代理），面板据此回显输入框。
-	Proxy string `json:"proxy,omitempty"`
 	// Downloading / Downloaded / DownloadTotal 是**下载进度**：面板据此画进度条。
 	// 只在 Downloading 为真时有意义（下载结束就清零）。
 	Downloading   bool  `json:"downloading"`
@@ -320,17 +312,12 @@ func (c *Checker) DownloadDir() string { return c.downloadDir }
 // settings 从当前配置快照里取本次检查所需的参数（每次现读，改完即生效）。
 type settings struct {
 	repo           string
-	token          string
 	prerelease     bool
 	enabled        bool
 	autoDownload   bool
 	autoInstall    bool
 	downloadMirror string
-	proxy          string
-	// proxyConfigured 表示更新请求会经代理出去（`-proxy` / update.proxy / 环境变量
-	// 任一命中）。下载决策据此跳过加速前缀，见 Download。
-	proxyConfigured bool
-	hours           int
+	hours          int
 }
 
 func (c *Checker) settings() settings {
@@ -341,12 +328,9 @@ func (c *Checker) settings() settings {
 	}
 	s.enabled = cfg.UpdateEnabled()
 	s.prerelease = cfg.UpdatePrerelease()
-	s.token = cfg.UpdateToken()
 	s.autoDownload = cfg.UpdateAutoDownload()
 	s.autoInstall = cfg.UpdateAutoInstall()
 	s.downloadMirror = cfg.UpdateDownloadMirror()
-	s.proxy = strings.TrimSpace(cfg.Update.Proxy)
-	s.proxyConfigured = cfg.UpdateProxyConfigured()
 	if r := strings.TrimSpace(cfg.Update.Repo); r != "" {
 		s.repo = r
 	}
@@ -375,11 +359,9 @@ func (c *Checker) State() State {
 	c.mu.Unlock()
 	st.AutoCheck = s.enabled
 	st.IntervalHours = s.hours
-	st.TokenSet = s.token != ""
 	st.AutoDownload = s.autoDownload
 	st.AutoInstall = s.autoInstall
 	st.DownloadMirror = s.downloadMirror
-	st.Proxy = s.proxy
 	// 下载进度（面板的进度条）：原子读，不用加锁 —— 每写一个 chunk 都会更新。
 	st.Downloading = c.dlActive.Load()
 	st.Downloaded, st.DownloadTotal = 0, 0
@@ -592,7 +574,6 @@ func (c *Checker) runCheck(ctx context.Context, prev State) State {
 		Repo:            s.repo,
 		AutoCheck:       s.enabled,
 		IntervalHours:   s.hours,
-		TokenSet:        s.token != "",
 		Latest:          prev.Latest,
 		UpdateAvailable: prev.UpdateAvailable,
 		ReleaseName:     prev.ReleaseName,
@@ -641,7 +622,6 @@ func (c *Checker) runCheck(ctx context.Context, prev State) State {
 		st.AssetName = a.Name
 		st.AssetSize = a.Size
 		st.DownloadURL = a.BrowserDownloadURL
-		st.assetAPIURL = a.APIURL
 	}
 
 	switch {
@@ -694,15 +674,9 @@ type release struct {
 type releaseAsset struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
-	// BrowserDownloadURL 是给人看的下载页链接（github.com/.../releases/download/...）。
-	// 公开仓库直接下它就行；**私有仓库不行** —— 那条链接认的是浏览器会话 Cookie，
-	// 带 Bearer 令牌一样 404（实测），必须走下面那个 API 端点。
+	// BrowserDownloadURL 是下载页链接（github.com/.../releases/download/...）。
 	BrowserDownloadURL string `json:"browser_download_url"`
-	// APIURL 是资产端点（api.github.com/repos/{owner}/{repo}/releases/assets/{id}）。
-	// 配 `Accept: application/octet-stream` + 令牌，它会 302 到一个签名地址，
-	// 这是 GitHub 文档里下载 Release 附件的正路，私有仓库也认。
-	APIURL string `json:"url"`
-	ID     int64  `json:"id"`
+	ID                 int64  `json:"id"`
 }
 
 // fetchReleases 拉取 Release 列表。
@@ -722,7 +696,7 @@ func (c *Checker) fetchReleases(ctx context.Context, s settings) ([]release, err
 				return nil, ctx.Err()
 			}
 		}
-		body, err := c.get(ctx, endpoint, s.token)
+		body, err := c.get(ctx, endpoint)
 		if err != nil {
 			lastErr = err
 			// 只重试瞬时网络故障；HTTP 状态码类的错误（404/401/403）重试没有意义。
@@ -741,19 +715,19 @@ func (c *Checker) fetchReleases(ctx context.Context, s settings) ([]release, err
 }
 
 // get 发一次 GET 并返回响应体（带上限）。
-func (c *Checker) get(ctx context.Context, endpoint, token string) ([]byte, error) {
+func (c *Checker) get(ctx context.Context, endpoint string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	c.setGitHubHeaders(req, token)
+	c.setGitHubHeaders(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, githubStatusError(resp.StatusCode, c.repoForMessage(), token != "")
+		return nil, githubStatusError(resp.StatusCode, c.repoForMessage())
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
@@ -766,38 +740,24 @@ func (c *Checker) get(ctx context.Context, endpoint, token string) ([]byte, erro
 //
 // User-Agent 不是可选项：GitHub 对空 UA（含 Go 的默认 UA）直接返回 403，
 // 而那条 403 的文案与限流一模一样，很容易被误判成「额度用完了」。
-func (c *Checker) setGitHubHeaders(req *http.Request, token string) {
+func (c *Checker) setGitHubHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "workbuddy-gateway/"+c.current)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 }
 
 func (c *Checker) repoForMessage() string { return c.settings().repo }
 
 // githubStatusError 把 GitHub 的状态码翻译成用户能照着做的说明。
 //
-// 这里最要紧的一条是 404：**私有仓库对未认证请求就是 404**。若把它笼统地写成
-// 「仓库不存在」，用户永远不会想到要配令牌。
-func githubStatusError(code int, repo string, tokenSet bool) error {
+// 未认证请求每小时只有 60 次额度，所以 403/429 基本就是撞了限流 —— 如实说明，
+// 而不是笼统写「请求失败」。
+func githubStatusError(code int, repo string) error {
 	switch code {
 	case http.StatusNotFound:
-		if tokenSet {
-			return fmt.Errorf("GitHub 返回 404：仓库 %s 不存在，或令牌没有读取该仓库的权限", repo)
-		}
-		return fmt.Errorf("GitHub 返回 404：仓库 %s 不存在或是私有的。"+
-			"私有仓库需要只读令牌：在 config.json 的 update.token 里填一个，"+
-			"或设环境变量 WB_UPDATE_TOKEN", repo)
-	case http.StatusUnauthorized:
-		return errors.New("GitHub 返回 401：update.token 无效或已过期")
-	case http.StatusForbidden, http.StatusTooManyRequests:
-		if tokenSet {
-			return fmt.Errorf("GitHub 返回 %d：令牌权限不足或已触发限流", code)
-		}
-		return fmt.Errorf("GitHub 返回 %d：未认证请求每小时只有 60 次额度，"+
-			"配一个只读令牌可以提到 5000 次", code)
+		return fmt.Errorf("GitHub 返回 404：仓库 %s 不存在（检查更新源仓库名是否写错）", repo)
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return fmt.Errorf("GitHub 返回 %d：未认证请求每小时只有 60 次额度，已触发限流，稍后再试", code)
 	default:
 		return fmt.Errorf("GitHub 返回 HTTP %d", code)
 	}
@@ -918,29 +878,27 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	if name == "" {
 		return DownloadResult{}, errors.New("安装包地址里没有可用的文件名：" + st.DownloadURL)
 	}
-	// 有令牌就走 API 资产端点：私有仓库的 /releases/download/... 链接认的是浏览器
-	// 会话，带 Bearer 令牌一样 404（这是实测踩到的）。公开仓库则用浏览器链接，
-	// 少一次 API 调用。
+	// 下载用浏览器下载链接（github.com/.../releases/download/...）。仓库是公开的，
+	// 无需令牌，也就不必绕 api.github.com 的资产端点。
+	//
+	// mirrorHost 是**实际生效的**前缀主机（前缀被拒时留空）：下载的重定向白名单
+	// 要放行它，否则配了加速前缀时请求会被自己挡下。
 	target := st.DownloadURL
-	if s := c.settings(); s.token != "" && strings.TrimSpace(st.assetAPIURL) != "" {
-		target = st.assetAPIURL
-	} else if s.downloadMirror != "" && !s.proxyConfigured {
-		// 公开仓库才套加速前缀：私有附件必须带令牌，而加速服务拿不到我们的令牌，
-		// 硬走它只会得到 404（见 config.UpdateSection.DownloadMirror 的说明）。
-		//
-		// 代理已生效时也不套：走代理已经能到 GitHub，再套一层第三方转发只是多一跳，
-		// 还让那家看到你的下载（见 config.UpdateProxyConfigured）。
+	mirrorHost := ""
+	if s := c.settings(); s.downloadMirror != "" {
+		if host, ok := mirrorHostOf(s.downloadMirror); ok {
+			mirrorHost = host
+		}
 		mirrored, err := ApplyDownloadMirror(s.downloadMirror, target)
 		if err != nil {
 			// 前缀配错（少了协议、写成了 URL 片段……）不该让下载彻底不可用：
 			// 退回直连并说明原因，用户至少还能装上。
 			c.logf("[更新] 下载加速前缀不可用（%v），本次改为直连", err)
+			mirrorHost = ""
 		} else {
 			target = mirrored
 			c.logf("[更新] 安装包走加速下载：%s", target)
 		}
-	} else if s.downloadMirror != "" {
-		c.logf("[更新] 已配代理，安装包直连 GitHub 下载（不套加速前缀）")
 	}
 	if err := os.MkdirAll(c.downloadDir, 0o755); err != nil {
 		return DownloadResult{}, err
@@ -972,7 +930,7 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 				return DownloadResult{}, ctx.Err()
 			}
 		}
-		written, lastErr = c.downloadOnce(ctx, target, dest)
+		written, lastErr = c.downloadOnce(ctx, target, dest, mirrorHost)
 		if lastErr == nil {
 			break
 		}
@@ -1049,34 +1007,24 @@ func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
 	return strings.TrimSuffix(m, "/") + "/" + rawURL, nil
 }
 
-// ValidateUpdateProxy 校验「更新代理」地址，空串表示不走代理（合法）。
+// mirrorHostOf 取加速前缀的主机名（小写）。前缀非法时 ok=false。
 //
-// 只接受 http / https 代理（与 switch 的设置页同规则）：socks5 之类的地址 Go 的
-// ProxyURL 也认，但用户手写时最容易把 "127.0.0.1:7897"（少协议）当成能用的值 ——
-// 那会让请求报一个难懂的错误。这里当场拒绝并说明正确写法，比存进去之后再失败好。
-func ValidateUpdateProxy(proxy string) error {
-	p := strings.TrimSpace(proxy)
-	if p == "" {
-		return nil
+// 单独一个函数而不是在 Download 里内联解析：下载的重定向白名单要按主机名放行，
+// 而这里必须与 ApplyDownloadMirror 认的是同一个东西，否则会出现「拼接通过了、
+// 白名单却把它当成非预期主机挡掉」的自相矛盾。
+func mirrorHostOf(mirror string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(mirror))
+	if err != nil || u.Host == "" {
+		return "", false
 	}
-	u, err := url.Parse(p)
-	if err != nil {
-		return fmt.Errorf("代理地址无法解析（%q）：%v", p, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("代理地址必须以 http:// 或 https:// 开头（当前值 %q，正确写法如 http://127.0.0.1:7897）", p)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("代理地址缺少主机名（当前值 %q，正确写法如 http://127.0.0.1:7897）", p)
-	}
-	return nil
+	return strings.ToLower(u.Hostname()), true
 }
 
 // downloadOnce 下载一次并落盘，返回写入的字节数。
 //
 // 先写临时文件再改名：中途失败（网络断、磁盘满、进程被杀）不会留下一个
 // 「大小不对但看起来像安装包」的文件 —— 那种文件最容易被用户双击安装。
-func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest string) (int64, error) {
+func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest, mirrorHost string) (int64, error) {
 	// 清掉上次异常退出留下的临时文件：它们不会被复用，却会一直占着几十 MB 磁盘，
 	// 而且文件名看起来像安装包。下载已由 dlMu 串行化，不会误删正在写的那个。
 	if stale, err := filepath.Glob(dest + ".part*"); err == nil {
@@ -1090,25 +1038,16 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest string) (int64,
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("User-Agent", "workbuddy-gateway/"+c.current)
-	// 私有仓库的附件下载同样要鉴权；跨主机重定向时会被 downloadClient 摘掉。
-	if s := c.settings(); s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-	}
 
-	resp, err := c.downloadClient().Do(req)
+	resp, err := c.downloadClient(mirrorHost).Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
-		case http.StatusUnauthorized:
-			return 0, errors.New("HTTP 401：令牌无效或已过期")
 		case http.StatusForbidden, http.StatusNotFound:
-			if s := c.settings(); s.token != "" {
-				return 0, fmt.Errorf("HTTP %d：令牌没有读取该仓库 / 附件的权限（需要 contents:read）", resp.StatusCode)
-			}
-			return 0, fmt.Errorf("HTTP %d：私有仓库的附件需要令牌（config.json 的 update.token）", resp.StatusCode)
+			return 0, fmt.Errorf("HTTP %d：下载地址不可用（Release 可能已被删除，或加速前缀指向了不存在的文件）", resp.StatusCode)
 		default:
 			return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
@@ -1149,37 +1088,39 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest string) (int64,
 
 // downloadClient 复制一份客户端并加上重定向白名单。
 //
-// 两个作用：
-//  1. 安装包地址来自上游响应，正常会被重定向到 objects.githubusercontent.com；
-//     限定主机名可以挡住「响应被篡改 → 把安装包下成任意地址的内容」；
-//  2. 跨主机时不带 Authorization：令牌只该发给 github.com。
+// 作用是防篡改：安装包地址来自上游响应，正常会被重定向到 objects.githubusercontent.com；
+// 限定主机名可以挡住「响应被篡改 → 把安装包下成任意地址的内容」。
+// 白名单必须包含**加速前缀的主机**，否则配了加速前缀时请求会被自己挡下。
 //
 // 顺带把总超时去掉（只保留 ctx 的上限）：安装包几十 MB，60 秒的总超时
 // 在慢网络下会稳定失败，而这里的正确约束是「调用方给多久」。
-func (c *Checker) downloadClient() *http.Client {
+func (c *Checker) downloadClient(mirrorHost string) *http.Client {
 	cp := *c.client
 	cp.Timeout = 0
 	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("安装包地址重定向次数过多")
 		}
-		if !allowedAssetHost(req.URL.Hostname()) {
+		if !allowedAssetHost(req.URL.Hostname(), mirrorHost) {
 			return fmt.Errorf("安装包地址被重定向到非预期主机 %s，已中止", req.URL.Hostname())
 		}
-		req.Header.Del("Authorization")
 		return nil
 	}
 	return &cp
 }
 
-// allowedAssetHost 判断下载重定向的目标主机是否可信。
+// allowedAssetHost 判断下载（含重定向）的目标主机是否可信。
 //
 // 回环地址是给测试用的（httptest 监听 127.0.0.1）；GitHub 侧除了 github.com
-// 本身，附件实际由 *.githubusercontent.com 提供。
-func allowedAssetHost(host string) bool {
+// 本身，附件实际由 *.githubusercontent.com 提供。mirrorHost 是当前生效的加速前缀
+// 主机（空串表示没配）—— 配了它时请求本来就要发到那儿，必须放行。
+func allowedAssetHost(host, mirrorHost string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
 		return false
+	}
+	if m := strings.ToLower(strings.TrimSpace(mirrorHost)); m != "" && h == m {
+		return true
 	}
 	if h == "localhost" {
 		return true

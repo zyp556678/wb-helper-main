@@ -510,28 +510,18 @@ func (c *Config) transportBase() *http.Transport {
 
 // UpdateClient 返回「检查更新」用的 HTTP 客户端。
 //
-// 代理的取值优先级（从前到后）：
+// 与 Control 只差一件事：没显式配 `-proxy` 时**回落到环境变量代理**
+// （HTTPS_PROXY / HTTP_PROXY / ALL_PROXY）。
 //
-//  1. `-proxy`（ProxyURL）—— 显式配置，与对话流量同一出口，行为可预期
-//  2. update.proxy —— 面板可配的「更新代理」，桌面用户的主要入口
-//  3. 环境变量代理（HTTPS_PROXY / HTTP_PROXY / ALL_PROXY）
-//  4. 都没有 → 直连
-//
-// 为什么更新要走代理、而对话流量不读环境代理：上游对话走的是账号凭据，出口 IP 与
-// 代理规则会影响风控，本项目刻意让对话只认 `-proxy`（见 buildClients）；而「问一句
-// GitHub 有没有新版本、把安装包下下来」是标准的公共服务访问，用户机器上开着系统代理
-// （Clash / v2ray 之类）时它本就该走代理。不走代理的实际后果是「检查更新一直超时或
-// 极慢」，而用户完全看不出原因 —— 本机实测直连 objects.githubusercontent.com 下 15MB
-// 会中途断流，走本机代理（127.0.0.1:7897）则秒级完成。
-//
-// 第 2 条是给桌面用户加的正路：桌面壳启动网关时**不传代理环境变量**，所以第 3 条
-// 对「点图标启动」的用户形同虚设；让他们在面板里填一次，比要求改环境变量可靠。
+// 为什么对话流量不读环境代理、而这里读：上游对话走的是账号凭据，出口 IP 与代理
+// 规则会影响风控，本项目刻意只认 `-proxy`（见 buildClients）；而「问一句 GitHub
+// 有没有新版本、把安装包下下来」是标准的公共服务访问，用户机器上开着系统代理
+// （Clash / v2ray 之类）时它本就该走代理。不读环境变量的实际后果是「检查更新一直
+// 超时或极慢」，而用户完全看不出原因 —— 本机实测直连 objects.githubusercontent.com
+// 下 15MB 会中途断流，走本机代理（127.0.0.1:7897）则秒级完成。
 //
 // 不动 Control 那份 Transport：`Transport.Proxy` 是共享状态，原地改会同时改掉
 // 对话流量的出站策略。这里 Clone 一份，只改自己这份的 Proxy。
-//
-// 本函数每次都新建 client（不缓存），所以改了代理配置**天然热生效** —— 下一个请求
-// 就用新代理，与其它配置的热加载口径一致。
 func (c *Config) UpdateClient() *http.Client {
 	if strings.TrimSpace(c.ProxyURL) != "" {
 		// 显式配了代理就以它为准 —— 与对话流量同一出口，行为可预期。
@@ -545,43 +535,13 @@ func (c *Config) UpdateClient() *http.Client {
 		}
 	}
 	tr := base.Clone()
-	// 面板配的更新代理优先于环境变量。解析失败不在这里吞掉：面板保存时会先校验
-	// （见 server.setUpdateProxy），所以能存进来的值一定合法；万一磁盘被手改成非法值，
-	// 这里退回环境变量比直接报错更不容易把更新功能彻底弄死。
-	if p := strings.TrimSpace(c.Update.Proxy); p != "" {
-		if u, err := url.Parse(p); err == nil && u.Host != "" {
-			tr.Proxy = http.ProxyURL(u)
-			return &http.Client{Transport: tr, Timeout: DefaultControlTimeout}
-		}
-	}
-	// 回落环境变量代理。ProxyFromEnvironment 只在首次调用时读一次环境变量
-	//（Go 内部有 sync.Once），进程起来之后再改环境变量不会生效 ——
-	// 这与「配置读一次」的直觉一致，不额外处理。
+	// ProxyFromEnvironment 只在首次调用时读一次环境变量（Go 内部有 sync.Once），
+	// 进程起来之后再改环境变量不会生效 —— 这与「配置读一次」的直觉一致，不额外处理。
 	tr.Proxy = http.ProxyFromEnvironment
 	return &http.Client{Transport: tr, Timeout: DefaultControlTimeout}
 }
 
-// UpdateProxyConfigured 报告更新请求是否会经代理出去（三个来源任一命中即为真）。
-//
-// 存在的理由是「代理已生效时不再套下载加速前缀」这条决策：走代理已经能到 GitHub，
-// 再套一层第三方转发只是多一跳，还让那家看到你的下载。放在 config 是因为三个来源
-// 里有两个（`-proxy` 与环境变量）不在 update 包可见的配置字段里。
-//
-// 环境变量那一支用 http.ProxyFromEnvironment 探测而不是自己读 env：它同时处理
-// NO_PROXY 排除规则，自己读会与真正建 client 时的行为不一致。
-func (c *Config) UpdateProxyConfigured() bool {
-	if strings.TrimSpace(c.ProxyURL) != "" {
-		return true
-	}
-	if p := strings.TrimSpace(c.Update.Proxy); p != "" {
-		if u, err := url.Parse(p); err == nil && u.Host != "" {
-			return true
-		}
-	}
-	probe := &http.Request{URL: &url.URL{Scheme: "https", Host: "github.com"}}
-	u, err := http.ProxyFromEnvironment(probe)
-	return err == nil && u != nil
-}
+// ListenAddr 返回 host:port。
 
 // ListenAddr 返回 host:port。
 func (c *Config) ListenAddr() string {

@@ -380,7 +380,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/panel/api/update/download", s.withPanelAuth(s.downloadUpdate))
 	mux.HandleFunc("/panel/api/update/install", s.withPanelAuth(s.installUpdate))
 	mux.HandleFunc("/panel/api/update/mirror", s.withPanelAuth(s.setUpdateMirror))
-	mux.HandleFunc("/panel/api/update/proxy", s.withPanelAuth(s.setUpdateProxy))
 
 	// ---- 面板：用量统计（切片 6）----
 	mux.HandleFunc("/panel/api/stats", s.withPanelAuth(s.handlePanelStats))

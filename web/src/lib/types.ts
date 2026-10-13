@@ -699,8 +699,6 @@ export interface ConfigUpdate {
   check_hours: number;
   repo: string;
   include_prerelease: boolean;
-  /** 只回「配没配」：令牌原文不下发（面板没有任何需要看到它的场景）。 */
-  token_set: boolean;
 }
 
 export interface ConfigTasks {
@@ -2443,10 +2441,6 @@ export interface UpdateStatus {
   interval_hours: number;
   /** 生效中的下载加速前缀（空串 = 直连）。 */
   download_mirror?: string;
-  /** 生效中的更新代理（空串 = 不走代理）。 */
-  proxy?: string;
-  /** 是否配了私有仓库令牌（不回令牌原文）。 */
-  token_set: boolean;
   /** 发现新版本后是否自动下载安装包（config.json 的 update.auto_download，默认开）。 */
   auto_download: boolean;
   /** 安装包下好之后是否自动安装（config.json 的 update.auto_install，默认关）。 */

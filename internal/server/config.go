@@ -117,7 +117,6 @@ func (s *Server) configView() map[string]any {
 			"auto_download":      c.UpdateAutoDownload(),
 			"auto_install":       c.UpdateAutoInstall(),
 			"download_mirror":    c.UpdateDownloadMirror(),
-			"token_set":          c.UpdateToken() != "",
 		},
 
 		// ---- 提示词与出站改写（切片 4）----
