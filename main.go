@@ -73,6 +73,15 @@ func main() {
 		runReset(args)
 	case "probe":
 		runProbe(args)
+	case "install":
+		runInstall(args)
+	case "upgrade":
+		runUpgrade(args)
+	case "uninstall":
+		runUninstall(args)
+	case "autostart":
+		// 供安装器与脚本调用（安装器只关心落点，不重复实现一遍三端逻辑）。
+		runAutostart(args)
 	case "version", "-v", "--version":
 		fmt.Printf("WorkBuddy Gateway v%s\n", version)
 	case "help", "-h", "--help":
@@ -101,6 +110,11 @@ func printHelp() {
             用法：monitor [-interval 秒] [-addr ip] [-port 端口]；Ctrl+C 退出
   probe     对运行中的网关发起模型属性探测（指定账号 × 模型，只走本机回环）
             用法：probe [-auth 账号ID] [-models m1,m2] [-limit N]
+  install   安装到本机（由安装包调用；也可手动执行：install [-src 载荷目录] [-dir 安装目录]）
+            安装是原子切换：解包到 <目录>.new → 删旧目录 → 改名，装完内容与本版清单一致
+  upgrade   升级到本包版本，保留数据目录（等同 install，命令名用于表明意图）
+  uninstall 卸载（默认保留数据目录 —— 里面有真实凭据；确认不要了加 -drop-data）
+  autostart 开机自启开关：autostart [on|off|status] [-json]
   reset     清理本地运行数据（保留登录凭据与关联会话登记表），并重新拉取模型目录
   version   查看版本
   help      查看帮助
