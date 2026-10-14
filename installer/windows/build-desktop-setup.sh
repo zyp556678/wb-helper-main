@@ -69,11 +69,24 @@ fi
 #   - MSVC：静态链接，**不需要**该 DLL；
 #   - gnu ：动态链接，**必须**随包分发，否则壳启动后静默退出（进程活着、无窗口）。
 #
-# 所以不写死走哪条，而是看 src-tauri/WebView2Loader.dll 在不在：在就带上（gnu），
-# 不在就不带（MSVC）。两条路产出的安装包结构一致，安装语义也同一套。
+# 所以不写死走哪条，而是**先让环境决定**，再看结果。
+
+# 第一步：如果仓库内补齐过 gnu 工具链（`.toolchain/rust` 里有），就 source env.sh。
+#
+# 顺序不能反 —— 这是个踩过的坑：先前是「先用系统 rustup 探测 host、是 gnu 才
+# source env.sh」，而系统 rustup 装的通常是 msvc，于是永远探测出 msvc、
+# 永远不 source，gnu 那条路根本到不了。探测结果本身依赖环境，用它当开关是循环。
+if [ -d ".toolchain/rust/toolchains" ]; then
+  echo "==> 采用仓库内 gnu 工具链（.toolchain/）"
+  # shellcheck disable=SC1091
+  source desktop/scripts/env.sh
+fi
+
 RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
 case "$RUST_HOST" in
-  *windows-gnu*) echo "==> Rust 目标: $RUST_HOST（gnu，需随包携带 WebView2Loader.dll）" ;;
+  *windows-gnu*)
+    echo "==> Rust 目标: $RUST_HOST（gnu，需随包携带 WebView2Loader.dll）"
+    ;;
   *windows-msvc*) echo "==> Rust 目标: $RUST_HOST（msvc，静态链接）" ;;
   *) echo "!! 无法确认 Rust 主机目标（rustc -vV 得到 '$RUST_HOST'）" >&2; exit 1 ;;
 esac
@@ -118,12 +131,18 @@ node desktop/scripts/prepare-resources.mjs
 #
 # --no-bundle 是关键：我们要的是 target/release/ 下的壳可执行文件本身，
 # 而不是 Tauri 生成的 NSIS 安装器。打包在下一步由我们自己做。
-#
-# 同时覆盖 resources：MSVC 不需要 WebView2Loader.dll（静态链接），而基础配置里
-# 为 gnu 留着它，那个文件不存在会让打包失败。（实测 Tauri 的 --config 对数组是
-# **替换**而非合并，这一条才真正生效。）
 echo "==> tauri build --no-bundle（只编壳）"
-( cd desktop && npx tauri build --no-bundle --config '{"bundle":{"resources":["bin/*"]}}' )
+#
+# resources 按工具链给：gnu 动态链接 WebView2Loader.dll，必须作为资源打进壳
+# （tauri.windows.conf.json 里本来就声明了它，这里不能覆盖掉）；MSVC 静态链接，
+# 那个文件在仓库里根本不存在，声明了反而让打包失败（Tauri 找不到声明的资源会报错）。
+# 实测 Tauri 的 --config 对数组是**替换**而非合并，所以只能二选一。
+if [ -f "desktop/src-tauri/WebView2Loader.dll" ]; then
+  RES_JSON='["bin/*","WebView2Loader.dll"]'
+else
+  RES_JSON='["bin/*"]'
+fi
+( cd desktop && npx tauri build --no-bundle --config "{\"bundle\":{\"resources\":$RES_JSON}}" )
 
 RELEASE_DIR="${CARGO_TARGET_DIR:-$ROOT/desktop/src-tauri/target}/release"
 SHELL_EXE="$RELEASE_DIR/workbuddy-gateway-desktop.exe"
