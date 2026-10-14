@@ -1,107 +1,100 @@
 @echo off
 rem Entry point launched by the self-extracting setup.exe after it unpacks the
-rem payload. Asks the two choices that cannot be expressed by double-clicking, then
-rem hands off to the gateway's own `install` subcommand -- which owns every bit of
-rem install semantics (stop processes, atomic swap, shortcuts, uninstall entry,
-rem optional autostart). This script holds no logic of its own on purpose: two
-rem implementations of "how to install" is exactly the drift we set out to remove.
+rem payload. Hands off to the gateway's own `install` subcommand, which owns every
+rem bit of install semantics (stop processes, atomic swap, shortcuts, uninstall
+rem entry, optional autostart). This script holds no logic of its own on purpose:
+rem two implementations of "how to install" is exactly the drift we set out to remove.
 rem
-rem Unattended use (deployment scripts, CI): call setup.cmd with flags directly, or
-rem set WB_SETUP_SILENT=1 (optionally with WB_SETUP_FLAGS="-autostart").
+rem NOTHING IN HERE MAY PROMPT. The self-extractor launches this with an
+rem INVISIBLE console -- no window, no way to type (measured: the spawned cmd.exe
+rem has MainWindowHandle == 0). An earlier version asked two `set /p` questions
+rem like the old installer did; every double-click then left a cmd.exe parked
+rem forever on that prompt. That is what "I double-clicked and it just flashed"
+rem actually was: the extraction window closed, and the real installer sat
+rem waiting for input nobody could see or give.
+rem
+rem Choices are therefore passed in as flags, never asked:
+rem   setup.cmd -autostart          (or set WB_SETUP_FLAGS to anything)
+rem A plain double-click installs with the defaults below.
+rem
+rem Outcome is reported through a message box, which is the only channel guaranteed
+rem to be visible when the console is not.
 rem
 rem ASCII only: .cmd files are read using the OEM code page, so non-ASCII text here
 rem would render as garbage on non-UTF8 systems.
 
 setlocal enabledelayedexpansion
 
-set "EXTRA="
 set "LOG=%TEMP%\workbuddy-setup.log"
+if exist "%LOG%" del "%LOG%" >nul 2>&1
 
-rem Silent / unattended mode. Two ways in:
-rem   * pass flags directly:            setup.cmd -autostart
-rem   * set WB_SETUP_SILENT=1 with optional WB_SETUP_FLAGS="-autostart"
-rem The second form is what makes this usable from a deployment script or an
-rem automated verification run: the self-extractor starts this script in a *new*
-rem console, so piped stdin cannot answer the prompts below.
-if not "%~1"=="" (
-  set "EXTRA=%*"
-  goto run
-)
-if defined WB_SETUP_SILENT (
-  echo   Silent mode ^(WB_SETUP_SILENT set^)
-  set "EXTRA=%WB_SETUP_FLAGS%"
-  goto run
-)
+set "EXTRA="
+if not "%~1"=="" set "EXTRA=%*"
+if defined WB_SETUP_FLAGS set "EXTRA=%WB_SETUP_FLAGS%"
 
 echo.
 echo   WorkBuddy Gateway - Setup
 echo   =========================
 echo.
-echo   Installs the gateway (one binary, admin panel included) plus the optional
-echo   local agent. Account data and configuration are never touched by an install
-echo   or an upgrade; they live in:
-echo     %LOCALAPPDATA%\wb-gateway
-echo.
-echo   No administrator rights are required.
-echo.
-
-set "AUTOSTART="
-set /p "AUTOSTART=Start the gateway automatically when you log on? [y/N]: "
-if /i "%AUTOSTART%"=="y" set "EXTRA=!EXTRA! -autostart"
-
-set "OPENPANEL="
-set /p "OPENPANEL=Open the management panel when finished? [Y/n]: "
-if /i not "%OPENPANEL%"=="n" set "LAUNCH=1"
-
-:run
-echo.
 echo   Installing...
 echo.
+
 rem %~dp0 ALWAYS ends with a backslash, and a quoted path ending in one is a trap:
 rem `"C:\dir\"` makes the closing quote an ESCAPED quote in the Windows command
 rem line, so the argument never terminates and swallows everything after it --
 rem the installer received `C:\...\IXP000.TMP"` and failed to find its payload.
-rem Strip the trailing backslash before quoting. (Verified by running the script:
-rem the broken form yields a src path with a stray quote and "missing gateway".)
+rem Strip the trailing backslash before quoting. (Verified by printing os.Args in
+rem cmd.exe: the broken form yields a src path with a stray quote.)
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
 
 "%~dp0workbuddy-gateway.exe" install -src "%SRC%" !EXTRA!
 set "RC=%ERRORLEVEL%"
 
-rem Keep a record outside the console: when this runs from the self-extractor the
-rem window can close before anything can be read, and "the installer flashed and
-rem vanished" is not a useful thing to have to debug from memory.
 if not "%RC%"=="0" (
+  rem Leave a record on disk too: a message box can be dismissed, and the exact
+  rem command is what makes it reproducible.
   > "%LOG%" echo WorkBuddy Gateway setup failed with exit code %RC%.
   >> "%LOG%" echo Command: "%~dp0workbuddy-gateway.exe" install -src "%SRC%" !EXTRA!
   >> "%LOG%" echo.
-  >> "%LOG%" echo Re-run this script from a command prompt in this folder to see the
-  >> "%LOG%" echo full output, or run the installer directly:
-  >> "%LOG%" echo   workbuddy-gateway.exe install -src "%SRC%"
-)
-
-echo.
-if not "%RC%"=="0" (
-  echo   Installation FAILED ^(exit code %RC%^). See the messages above.
-  echo   A copy of this is in: %LOG%
-  echo.
-  if not defined WB_SETUP_SILENT pause
+  >> "%LOG%" echo Re-run the installer by hand to see the full output:
+  >> "%LOG%" echo   "%SRC%\workbuddy-gateway.exe" install -src "%SRC%" !EXTRA!
+  call :notify "WorkBuddy Gateway setup FAILED (exit code %RC%)." "Details: %LOG%"
   exit /b %RC%
 )
 
-echo   Installation complete.
-echo.
+rem Start what was just installed, so a successful double-click ends with something
+rem the user can actually see. The gateway itself needs ~30s before it answers (it
+rem pulls the model catalog first), so the launcher -- which waits -- is preferred
+rem over opening a browser at an address that is not listening yet.
+rem
+rem Skipped when the caller passed -dir: the launcher below lives at the *default*
+rem location, so starting it would launch a different installation than the one we
+rem just wrote (or an older one). A caller that chooses its own directory can start
+rem it itself.
+set "CUSTOM="
+echo !EXTRA! | findstr /i /c:"-dir" >nul 2>&1
+if not errorlevel 1 set "CUSTOM=1"
 
-if defined LAUNCH (
-  rem The launcher lives in the install directory, not in this temporary unpack
-  rem folder, so hand the browser the panel URL directly instead of guessing where
-  rem the install landed (the installer decides that, not this script).
-  start "" "http://127.0.0.1:8317/panel/"
+if defined CUSTOM (
+  call :notify "WorkBuddy Gateway installed." "Installed to the requested directory. Panel: http://127.0.0.1:8317/panel/"
+  exit /b 0
 )
 
-rem Silent mode must not block on a keypress.
-if defined WB_SETUP_SILENT exit /b 0
-if not "%~1"=="" exit /b 0
-pause
+set "APP=%LOCALAPPDATA%\WorkBuddy Gateway"
+if exist "%APP%\workbuddy-gateway-desktop.exe" (
+  start "" "%APP%\workbuddy-gateway-desktop.exe"
+  call :notify "WorkBuddy Gateway installed." "The app is starting; the panel is at http://127.0.0.1:8317/panel/"
+) else if exist "%APP%\run.cmd" (
+  start "" "%APP%\run.cmd"
+  call :notify "WorkBuddy Gateway installed." "It is starting now; the panel is at http://127.0.0.1:8317/panel/"
+) else (
+  call :notify "WorkBuddy Gateway installed." "Start it from the Start menu; the panel is at http://127.0.0.1:8317/panel/"
+)
+exit /b 0
+
+:notify
+rem %1 = title line, %2 = detail line. Shown as a GUI message box because the
+rem console handed to us by the self-extractor has no window.
+powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('%~2','%~1','OK','Information')" >nul 2>&1
 exit /b 0
