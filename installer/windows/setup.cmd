@@ -15,6 +15,7 @@ rem would render as garbage on non-UTF8 systems.
 setlocal enabledelayedexpansion
 
 set "EXTRA="
+set "LOG=%TEMP%\workbuddy-setup.log"
 
 rem Silent / unattended mode. Two ways in:
 rem   * pass flags directly:            setup.cmd -autostart
@@ -56,12 +57,34 @@ if /i not "%OPENPANEL%"=="n" set "LAUNCH=1"
 echo.
 echo   Installing...
 echo.
-"%~dp0workbuddy-gateway.exe" install -src "%~dp0" !EXTRA!
+rem %~dp0 ALWAYS ends with a backslash, and a quoted path ending in one is a trap:
+rem `"C:\dir\"` makes the closing quote an ESCAPED quote in the Windows command
+rem line, so the argument never terminates and swallows everything after it --
+rem the installer received `C:\...\IXP000.TMP"` and failed to find its payload.
+rem Strip the trailing backslash before quoting. (Verified by running the script:
+rem the broken form yields a src path with a stray quote and "missing gateway".)
+set "SRC=%~dp0"
+if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
+
+"%~dp0workbuddy-gateway.exe" install -src "%SRC%" !EXTRA!
 set "RC=%ERRORLEVEL%"
+
+rem Keep a record outside the console: when this runs from the self-extractor the
+rem window can close before anything can be read, and "the installer flashed and
+rem vanished" is not a useful thing to have to debug from memory.
+if not "%RC%"=="0" (
+  > "%LOG%" echo WorkBuddy Gateway setup failed with exit code %RC%.
+  >> "%LOG%" echo Command: "%~dp0workbuddy-gateway.exe" install -src "%SRC%" !EXTRA!
+  >> "%LOG%" echo.
+  >> "%LOG%" echo Re-run this script from a command prompt in this folder to see the
+  >> "%LOG%" echo full output, or run the installer directly:
+  >> "%LOG%" echo   workbuddy-gateway.exe install -src "%SRC%"
+)
 
 echo.
 if not "%RC%"=="0" (
   echo   Installation FAILED ^(exit code %RC%^). See the messages above.
+  echo   A copy of this is in: %LOG%
   echo.
   if not defined WB_SETUP_SILENT pause
   exit /b %RC%
