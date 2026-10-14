@@ -115,9 +115,8 @@ func planFor(goos, path string) InstallPlan {
 			Supported: true,
 			Command:   path,
 			Restart:   false,
-			Note: "会打开安装向导，网关随即退出以让出 bin\\*.exe 的文件锁 —— " +
-				"旧的卸载器删不掉被占用的文件，会直接报「无法卸载！」并中止安装。" +
-				"装完请在向导最后一页确认「运行」；中途取消的话网关会停着，需要手动启动一次。",
+			Note: "会打开安装包；网关随即退出，把 bin\\*.exe 的文件锁让给安装器。" +
+				"装完请从开始菜单重新启动（中途取消的话网关会停着，需要手动启动一次）。",
 		}
 	default:
 		return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
@@ -270,31 +269,29 @@ func (c *Checker) installDarwin(ctx context.Context, path string) (InstallResult
 	}, nil
 }
 
-// installWindows 启动安装向导（**不静默**），随后由调用方让网关退出。
+// installWindows 启动安装包，随后由调用方让网关退出。
 //
-// 为什么不像其它平台那样静默：Windows 上正在运行的 .exe 被锁，必须由一个提权的
-// 安装程序先结束进程再覆盖 —— 安装包自带这个钩子，而静默装完之后没有任何可靠的
-// 「重新启动应用」通路（.exe 无法像 Unix 那样 exec 自己）。
+// 为什么这里只是「启动安装包」而不是自己装：Windows 上正在运行的 .exe 被锁，
+// 覆盖安装必须先把占用进程停掉。那件事现在由安装包里的网关 install 子命令负责
+// （见 internal/installer 的 stopProcesses），它按「映像位于安装目录之下」筛选并
+// 结束进程、等文件锁释放，再原子切换 —— 同一份实现也用在命令行版与手动安装上。
 //
-// 为什么要**退出**（而不是像 Linux/macOS 那样自己重启）：升级时安装向导会先跑
-// **旧版本**的卸载器，它删不掉还被我们占着的 `bin\workbuddy-gateway.exe` 与
-// `bin\wb-local-agent.exe`，于是 Tauri 的 NSIS 模板直接弹「无法卸载！」并中止 ——
-// 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚。
-//
-// 两道防线各管一段：新版安装包与卸载器里的钩子（desktop/src-tauri/windows/hooks.nsh）
-// 负责「以后的升级」；这里的退出负责「从任意旧版本升上来」—— 旧版本的卸载器里
-// 有没有那个钩子，我们无从判断。
+// 为什么要求网关**退出**（而不是像 Linux/macOS 那样自己重启）：install 子命令会
+// 结束安装目录下的所有进程，本进程正是其中之一。与其被它从外部 taskkill（那可能
+// 打断一个正在写的请求），不如主动走优雅关闭、把句柄干净地交出去。装完网关停着，
+// 由用户从开始菜单或桌面快捷方式启动 —— 这也避免了「装完自动拉起一个用户没要求
+// 的进程」。Unix 上 `exec` 能保持 PID 与壳手里的句柄，Windows 没有对等物。
 func (c *Checker) installWindows(path string) (InstallResult, error) {
 	cmd := exec.Command(path)
 	if err := cmd.Start(); err != nil {
-		return InstallResult{}, fmt.Errorf("启动安装向导失败：%w", err)
+		return InstallResult{}, fmt.Errorf("启动安装包失败：%w", err)
 	}
-	// 不 Wait：向导会先把本进程结束掉（这是它覆盖文件的必要步骤），
+	// 不 Wait：install 子命令会先把本进程结束掉（这是它替换文件的必要步骤），
 	// 等它退出等于永远等不到。
 	return InstallResult{
 		OK: true,
-		Detail: "安装向导已打开；网关随即退出以让出文件锁，" +
-			"装完请在向导最后一页确认「运行」（或从开始菜单重新启动）",
+		Detail: "安装包已打开；网关随即退出，" +
+			"装完请从开始菜单重新启动（或确认安装向导最后一页的「运行」）",
 		Exit: true,
 	}, nil
 }

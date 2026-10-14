@@ -467,3 +467,89 @@ Windows / Linux 的桌面版不再使用系统标题栏：壳启动时去掉窗�
 
 npm 形态的正确升级方式仍是 `npm i -g workbuddy-gateway@latest`（而不是覆盖文件）：
 二进制随平台包进 npm registry，校验交给 npm 自身（见 `npm/scripts/install.js` 顶部说明）。
+
+## 统一安装器（安装语义收回 Go）
+
+此前安装/卸载的语义由各平台的打包模板决定：Windows 是 Tauri 生成的 NSIS，
+Linux 是 deb 的维护脚本，macOS 是 dmg。模板改不动，最直接的后果是 Windows 上
+升级时选「安装前卸载」**必然**弹「无法卸载！」并中止 —— NSIS 跑完旧版本的卸载器后
+用 `${FileExists}` 检查主程序是否还在，而旧卸载器永远删不掉被运行中进程锁住的
+那个文件，这条岔路从设计上就走不通。
+
+现在安装包退化成「把文件铺到磁盘」的搬运工，真正的语义由
+`workbuddy-gateway install | upgrade | uninstall | autostart` 四个子命令完成
+（`internal/installer`）。四端（Windows 命令行包 / Windows 桌面包 / Linux / macOS）
+共用同一份实现，可 `go test`，改动不再依赖任何打包工具链。
+
+### 核心不变量：原子切换
+
+安装 = 解包到 `<目录>.new` → 删旧目录 → `rename`。**不是**「原地覆盖」：覆盖只写
+同名文件，某一版曾经有、后来删掉的文件会永久留在安装目录里。原子切换让「装完的
+目录内容 == 这一版清单」成为结构性保证，而不是靠维护一份会漂移的文件清单。
+代价是安装期间有一个短暂的目录不存在窗口，所以必须先停掉所有占用进程。
+
+### Windows 卸载：为什么卸载器要把自己搬到 %TEMP%
+
+A/R 里的卸载项指向 `<安装目录>\bin\workbuddy-gateway.exe uninstall`，于是卸载进程的
+可执行文件就在它必须删掉的那个目录里。两个问题一起出现（都在实机验证过）：
+
+1. Windows 不允许删除正在运行的映像 —— `os.RemoveAll` 在 `bin\workbuddy-gateway.exe`
+   上以 "Access is denied" 失败，目录删到一半留下残骸。Unix 无此问题（inode 语义）。
+2. `stopProcesses` 按「映像位于安装目录之下」筛选进程，这个判据会把**正在执行卸载的
+   自己**一起筛进去，于是把自己杀掉，流程半途而废 —— 现象是「点了卸载没反应」。
+
+做法：检测到自身在目标目录内时，把自己复制到 `%TEMP%\wb-uninstall-*`，用
+`uninstall -dir <同一个目录> -wait-pid <自己>` 启动副本，本进程退出。副本不在安装目录
+之下，两条同时消失。
+
+**副本必须完全脱离父进程的 console**（`DETACHED_PROCESS`）。一开始用
+`HideWindow: true` 启动，副本继承了父进程的 console；父进程为让出文件锁立刻退出，
+console 随之关闭，副本收到 `CTRL_CLOSE_EVENT` 被终结。症状极隐蔽：安装目录确实删掉了
+（那一步在副本被杀之前完成），只有副本自己的临时目录永远留着，每次卸载在 `%TEMP%`
+残留一份二十多 MB 的可执行文件。
+
+配套的两处细节同样是实测得出：`processesUnder` 在 Windows 上也要**跳过当前进程**
+（Unix 侧一直有这道判断，Windows 侧漏了）；副本自清用的 `cmd /c` 命令行必须走
+`SysProcAttr.CmdLine` 而不是 `exec.Command` 的参数 —— Go 会反斜杠转义参数里内嵌的
+引号，而 `cmd.exe` 不认，那条 `rmdir` 会**静默不执行**。
+
+### 平滑接管旧安装
+
+旧的 Windows 安装有**两套互不相识**的形态，接管时必须都认出来：
+
+| | 桌面版（Tauri NSIS） | 命令行版（install.ps1） |
+|---|---|---|
+| 安装目录 | `%LOCALAPPDATA%\WorkBuddy Gateway` | `%LOCALAPPDATA%\Programs\workbuddy-gateway` |
+| A/R 键 | `...\Uninstall\WorkBuddy Gateway`（带空格） | `...\Uninstall\WorkBuddyGateway` |
+| 主程序 | `workbuddy-gateway-desktop.exe` | `workbuddy-gateway.exe` |
+| A/R 显示名 | WorkBuddy Gateway | WorkBuddy Gateway |
+
+键位不同 → 两套安装器互相看不见；显示名相同 → 用户在「设置 → 应用」里看到两个一样
+的条目。若已有命令行版再双击桌面版安装包，NSIS 读自己的键（空）→ 不显示重装页 →
+直接装进另一个目录，结果是两份并存、两个开始菜单项、**两份自启抢 8317 端口**。
+
+接管逻辑复用它找到的目录（不产生第二个落点），并清掉旧键、旧自启值、旧的
+`launch-hidden.vbs` 计划任务。计划任务只在动作确实指向 `launch-hidden.vbs` 时才删 ——
+同名任务完全可能是用户自己写的。
+
+### 平台落点与服务端形态
+
+`DefaultInstallDir()` 在 Linux 返回空串：那种形态的文件由 dpkg 拥有，安装目录不是
+我们能选的，必须由调用方用 `-dir` 指定。macOS 与 Windows 的默认落点与旧安装器保持
+一致（改了就等同让已装用户失去升级路径）。`NoRegister`（`-no-register`）供绿色版
+与测试使用：只铺文件，不写 A/R 项、快捷方式、自启，也不接管旧安装。
+
+### 命令行形态的自启与快捷方式
+
+命令行包（无桌面壳）的自启宿主是 `launch-hidden.vbs`，快捷方式指向 `run.cmd` ——
+两者都在**安装目录根**，而网关在 `bin/` 下，所以两个脚本都按「先找 `bin/` 再找同级」
+的顺序定位。自启的落点、值名、冲突检测始终由 `internal/autostart` 唯一定义：
+面板开关、托盘开关、安装器三条路操作同一条记录。
+
+### 尚未完成的部分
+
+- **Linux 的 deb 维护脚本与 macOS 的 pkg/dmg 还没改**。这两端的安装包目前仍走
+  各自的旧流程，`internal/installer` 的对应实现（`process_unix.go`）已就绪且通过
+  交叉编译与单测，但打包侧尚未接线。它们只能在对应系统或 CI 上验证。
+- **两端旧安装的接管**（`adoptLegacy` 的 Unix 分支）是空实现：Unix 侧的落点一直由
+  包管理器与 productName 唯一决定，不存在 Windows 那种分叉。

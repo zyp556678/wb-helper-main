@@ -64,10 +64,14 @@
 **无法交叉编译**）：
 
 ```bash
-./installer/windows/build-desktop-setup.sh    # 需 MSVC
+./installer/windows/build-desktop-setup.sh    # 需 MSVC 或 windows-gnu
 ./installer/macos/build-desktop-pkg.sh        # 只能在 macOS 上跑
 ./installer/linux/build-desktop-deb.sh        # 需 WebKitGTK 开发包
 ```
+
+> Windows 那条现在分两段：`tauri build --no-bundle` 只编出壳，再由脚本把
+> 「壳 + 网关 + 启动器」打成安装包，安装语义交给网关自己的 `install` 子命令 ——
+> 与命令行版**完全同一套**。Tauri 不再负责打包，NSIS 与其钩子已从仓库移除。
 
 打 tag 时 `.github/workflows/release.yml` 会用三个平台的 runner 各构建一次，只把这三种
 窗口版包发到 Release。
@@ -77,11 +81,13 @@ systemd 服务、只有浏览器访问、**没有窗口**；两者 dpkg 包名�
 （`work-buddy-gateway` / `workbuddy-gateway`），可以共存，但共用 8317 端口，因此只能有
 一个设置开机自启。
 
-> **Windows 有两条工具链路线**：CI 与一般机器走 **MSVC**（上表那个脚本）；
-> 作者本机因 aka.ms 不可达而走 **windows-gnu**（`scripts/build-desktop.sh` +
+> **Windows 有两条工具链路线，同一个打包脚本都支持**：CI 与一般机器走 **MSVC**；
+> 作者本机因 aka.ms 不可达而走 **windows-gnu**（配合
 > `desktop/scripts/setup-rust-toolchain.sh` 的工具链修补，另出绿色版
-> `workbuddy-gateway-desktop_<版本>_x64.exe`）。两条路对 `WebView2Loader.dll`
-> 的要求正好相反，细节见 `desktop/README.md`。
+> `workbuddy-gateway-desktop_<版本>_x64.exe`）。两条路唯一的差别是
+> `WebView2Loader.dll`（gnu 需随包、MSVC 静态链接不需要），
+> `installer/windows/build-desktop-setup.sh` 按该文件是否存在自动决定带不带，
+> 细节见 `desktop/README.md`。
 >
 > GNOME 下托盘图标需要 AppIndicator 扩展；没装扩展时窗口一切正常，只是没有托盘图标。
 
@@ -110,15 +116,22 @@ systemd 服务、只有浏览器访问、**没有窗口**；两者 dpkg 包名�
 
 **一、平台安装包**（双击安装，最省事）
 
-| 平台 | 文件 | 数据目录 |
-| --- | --- | --- |
-| Windows x64 / ARM64 | `workbuddy-gateway_<版本>_x64-setup.exe` / `_arm64-setup.exe` | `%LOCALAPPDATA%\wb-gateway` |
-| Linux x64 / ARM64 | `workbuddy-gateway_<版本>_amd64.deb` / `_arm64.deb` | `/var/lib/workbuddy-gateway` |
-| macOS Intel / Apple Silicon | `workbuddy-gateway_<版本>_amd64.pkg` / `_arm64.pkg`（含 `.dmg`） | `~/.wb-gateway` |
+| 平台 | 文件 | 安装位置 | 数据目录 |
+| --- | --- | --- | --- |
+| Windows x64 / ARM64 | `workbuddy-gateway_<版本>_x64-setup.exe` / `_arm64-setup.exe` | `%LOCALAPPDATA%\WorkBuddy Gateway`（每用户、免 UAC） | `%LOCALAPPDATA%\wb-gateway` |
+| Linux x64 / ARM64 | `workbuddy-gateway_<版本>_amd64.deb` / `_arm64.deb` | `/usr/bin` + `/usr/lib/`（systemd 服务） | `/var/lib/workbuddy-gateway` |
+| macOS Intel / Apple Silicon | `workbuddy-gateway_<版本>_amd64.pkg` / `_arm64.pkg`（含 `.dmg`） | `/Applications` | `~/.wb-gateway` |
 
 Windows 安装包会问两个问题（是否随登录启动、是否装完打开面板），并创建开始菜单/桌面快捷方式与
 卸载项；Linux 装成 systemd 服务；macOS 装一个每用户 LaunchAgent。安装包均**未签名**，
 首次运行需要手动允许（详见 `DEPLOY.md`）。
+
+> **Windows 与桌面版装到同一目录**（`%LOCALAPPDATA%\WorkBuddy Gateway`），两者的
+> 安装/升级/卸载由同一份 Go 代码执行（`internal/installer`）：先停掉占用进程、
+> 解包到暂存目录、删旧目录、原子改名，再重建快捷方式与卸载项。不再使用 NSIS 模板
+> 或 PowerShell 安装脚本，因此升级时**不会**再出现「无法卸载！」。
+>
+> 卸载默认保留数据目录（里面是真实凭据），要一并删除须显式确认。
 
 **二、npm 全局安装**
 

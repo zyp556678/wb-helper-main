@@ -81,15 +81,20 @@ func TestPlanForPlatforms(t *testing.T) {
 		t.Fatal("windows 上不该承诺自动重启：exe 被锁，重启由安装程序与用户完成")
 	}
 	if win.Note == "" {
-		t.Fatal("windows 方案必须提醒会弹安装向导")
+		t.Fatal("windows 方案必须提醒会打开安装包并退出")
 	}
-	// Windows 上必须先退出让出文件锁：升级时安装程序会先跑**旧版本**的卸载器，
-	// 它删不掉还被占用的 bin\*.exe，会直接报「无法卸载！」并中止安装。
-	// 这条文案是用户点确认前唯一能看到的前因后果，不能省。
-	for _, want := range []string{"无法卸载", "退出"} {
+	// Windows 上必须先退出让出文件锁：安装包的 install 子命令会结束安装目录下的
+	// 进程（包括本进程），主动优雅退出好过被它从外部结束。
+	//
+	// 注意这里**不再**断言出现「无法卸载」：那正是旧 NSIS 模板的行为，而换成自制
+	// 安装器之后这条路从根上消失了。文案若还把旧故障写成当前事实，就是在误导用户。
+	for _, want := range []string{"退出", "重新启动"} {
 		if !strings.Contains(win.Note, want) {
 			t.Fatalf("windows 方案的说明缺少 %q：%q", want, win.Note)
 		}
+	}
+	if strings.Contains(win.Note, "无法卸载") {
+		t.Fatalf("windows 说明不该再提「无法卸载」——那是已修掉的旧故障：%q", win.Note)
 	}
 
 	other := planFor("plan9", path)

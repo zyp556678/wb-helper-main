@@ -13,10 +13,16 @@ setlocal
 set "DIR=%~dp0"
 set "DATA=%LOCALAPPDATA%\wb-gateway"
 set "PORT=8317"
-set "GATEWAY=%DIR%workbuddy-gateway.exe"
+
+rem The gateway lives in bin\ (the layout the installer lays out, see
+rem internal/installer/copyPayload). Older packages kept it next to this launcher,
+rem so fall back to that -- a user who upgraded from such a version must not lose
+rem the start menu entry.
+set "GATEWAY=%DIR%bin\workbuddy-gateway.exe"
+if not exist "%GATEWAY%" set "GATEWAY=%DIR%workbuddy-gateway.exe"
 
 if not exist "%GATEWAY%" (
-  echo Cannot find workbuddy-gateway.exe next to this launcher.
+  echo Cannot find workbuddy-gateway.exe under "%DIR%" or "%DIR%bin".
   pause
   exit /b 1
 )

@@ -21,7 +21,13 @@ Set sh = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 baseDir = fso.GetParentFolderName(WScript.ScriptFullName)
-exePath = fso.BuildPath(baseDir, "workbuddy-gateway.exe")
+' The installer lays the gateway out in bin\ (see internal/installer/copyPayload).
+' Older packages kept it next to this script, so try that too -- an upgraded
+' installation must keep working.
+exePath = fso.BuildPath(fso.BuildPath(baseDir, "bin"), "workbuddy-gateway.exe")
+If Not fso.FileExists(exePath) Then
+    exePath = fso.BuildPath(baseDir, "workbuddy-gateway.exe")
+End If
 
 If Not fso.FileExists(exePath) Then
     ' Nothing to report to: exit silently so the logon task does not error out

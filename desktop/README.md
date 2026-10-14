@@ -81,11 +81,16 @@ cd desktop/src-tauri && cargo build
 `prepare-resources.mjs` 把它们复制进 `src-tauri/bin/` → `tauri build`（Tauri 按平台自动
 叠加 `tauri.<os>.conf.json`）→ 把产出的安装包按 `dist/` 的命名习惯复制一份。
 
+Windows 是唯一的例外，它分成两段：`tauri build --no-bundle` 只编出壳，
+再由脚本把「壳 + 网关 + 启动器」打成 IExpress 自解压包，安装语义交给网关自己的
+`install` 子命令。原因是 NSIS 模板改不动，且它带来的升级故障（「无法卸载！」）
+正是这次要消除的；详见 `internal/installer` 的包注释。**NSIS 与其钩子文件已从仓库移除。**
+
 平台差异全部按分支处理，没有复制第二套代码：
 
 | 关注点 | Windows | macOS | Linux |
 | --- | --- | --- | --- |
-| 打包目标 | `nsis` + `tauri.windows.conf.json` | `tauri.macos.conf.json` 的 `dmg` | `tauri.linux.conf.json` 的 `deb` |
+| 打包目标 | IExpress 自解压包（壳 + Go 安装器），不再用 NSIS | `tauri.macos.conf.json` 的 `dmg` | `tauri.linux.conf.json` 的 `deb` |
 | WebView | WebView2 | 系统 WKWebView | 系统 WebKitGTK |
 | 额外资源 | **仅 gnu 目标**需要 `WebView2Loader.dll` | 不需要 | 不需要 |
 | Go 产物名 | `workbuddy-gateway.exe` | `workbuddy-gateway` | `workbuddy-gateway` |

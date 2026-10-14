@@ -4,6 +4,7 @@ package installer
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -33,6 +34,17 @@ const (
 	// （见 internal/autostart 的 winValue），所以 NSIS 的卸载器删不掉它 ——
 	// 这是旧版留下的自启残留，卸载后开机仍会被 Windows 尝试启动。
 	legacyRunValue = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WorkBuddy Gateway`
+	// legacyCLIDir 是旧**命令行版**安装包的落点（installer/windows/install.ps1）。
+	//
+	// 它和桌面版的 `%LOCALAPPDATA%\WorkBuddy Gateway` 是**两个不同的目录**，
+	// 而两套 A/R 显示名都是「WorkBuddy Gateway」—— 这正是用户会看到重复条目、
+	// 且两份自启互抢 8317 端口的根源。接管时必须把这个目录也认出来。
+	legacyCLIDir = `Programs\workbuddy-gateway`
+	// legacyCLITask 是旧命令行版注册的计划任务名。
+	//
+	// 新版自启走注册表 Run 值（internal/autostart 的 winValue），与这个计划任务
+	// 是两套机制；接管时若不删掉它，升级后会有两个自启项在登录时抢同一个端口。
+	legacyCLITask = "WorkBuddyGateway"
 )
 
 // legacyInstall 描述一次被发现的旧形态安装（类型定义在 installer.go）。
@@ -128,6 +140,7 @@ func processesUnder(dir string) []procInfo {
 		return nil
 	}
 	var procs []procInfo
+	self := uint32(os.Getpid())
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -139,6 +152,12 @@ func processesUnder(dir string) []procInfo {
 		}
 		var pid uint32
 		if _, err := fmt.Sscanf(parts[0], "%d", &pid); err != nil {
+			continue
+		}
+		// 不杀自己：安装器/卸载器可能就住在安装目录里（A/R 的卸载项正是
+		// `bin\workbuddy-gateway.exe uninstall`），不加这道判断会把自己杀掉，
+		// 表现为「点了卸载没反应」。Unix 侧的同名函数一直有这个判断。
+		if pid == self {
 			continue
 		}
 		procs = append(procs, procInfo{name: strings.TrimSpace(parts[1]), pid: pid})

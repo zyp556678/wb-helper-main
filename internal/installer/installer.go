@@ -61,10 +61,14 @@ type Options struct {
 	KeepData bool
 	// NoRegister 跳过「注册」这一步（A/R 项、快捷方式、自启）。
 	//
-	// 给测试用：注册会写**真实的**系统位置（开始菜单、注册表、LaunchAgent），
-	// 而单元测试必须能在任何机器上反复跑而不留痕迹 —— 测试里连装两次会在用户的
-	// 开始菜单里留下快捷方式，那不是「测试通过了」而是「弄脏了用户的机器」。
-	// 生产路径不要设它。
+	// 两种用途：
+	//   - 绿色版 / 便携安装（`-no-register`）：把文件铺到指定目录就结束，不往系统里
+	//     写任何东西 —— 解压即用、删目录即卸载，这是「免安装压缩包」那类需求。
+	//   - 测试：注册会写**真实的**系统位置（开始菜单、注册表、LaunchAgent），
+	//     而单元测试必须能在任何机器上反复跑而不留痕迹 —— 测试里连装两次会在用户的
+	//     开始菜单里留下快捷方式，那不是「测试通过了」而是「弄脏了用户的机器」。
+	//     端到端验证同理：要能在一个临时目录里走完整流程，而不覆盖用户真实的
+	//     A/R 项与快捷方式。
 	NoRegister bool
 	// TestGuard 是一道**硬护栏**：设成非空时，任何会改动系统状态的步骤都要求
 	// 目标目录位于这个前缀之下，否则直接报错终止。
@@ -160,7 +164,11 @@ func Install(opt Options) (Result, error) {
 
 	// ---- 1. 定目标目录 ----
 	explicit := strings.TrimSpace(opt.InstallDir) != ""
-	if !explicit {
+	// NoRegister（绿色版）不接管旧安装：接管会读注册表、删旧键、删旧计划任务，
+	// 而绿色版的承诺是「只把文件铺到指定目录，不碰系统里任何东西」。
+	// 调用方要么显式给了 -dir，要么就该落到平台默认目录 —— 让 adoptLegacy 去改
+	// 落点，等于把它装到用户那条正规安装的头上。
+	if !explicit && !opt.NoRegister {
 		// 只在调用方没指定时才去接管旧安装。
 		adopted, err := adoptLegacy(opt, logf)
 		if err != nil {
@@ -265,7 +273,12 @@ func Uninstall(opt Options) (UninstallResult, error) {
 	// 清注册（A/R 项、自启、快捷方式）必须在删目录**之前**：
 	// 那些信息有一部分（卸载脚本路径）指向目录里的文件，目录没了就无从得知
 	// 该删哪些键。
-	unregisterInstall(opt, logf)
+	//
+	// NoRegister 时跳过：绿色版安装没写过系统注册信息，去删等于误删**另一个**
+	// 正规安装的 A/R 项与快捷方式。
+	if !opt.NoRegister {
+		unregisterInstall(opt, logf)
+	}
 
 	logf("删除安装目录 %s", opt.InstallDir)
 	if err := os.RemoveAll(opt.InstallDir); err != nil {
@@ -330,7 +343,7 @@ func swap(opt Options, logf func(string, ...any)) (string, error) {
 	return removed, nil
 }
 
-// extraFiles 是随包落盘的辅助文件（图标、启动器、说明）。
+// extraFiles 是随包落盘的辅助文件（图标、启动器、说明、卸载脚本）。
 //
 // 刻意用显式清单而不是「把 srcDir 下的都拷过去」：清单是安装的契约，
 // 将来加文件时会强迫作者想一次「它属于运行时还是构建期」；而「全拷」会把
@@ -342,7 +355,6 @@ var extraFiles = []string{
 	"app.ico",
 	"run.cmd",
 	"launch-hidden.vbs",
-	"uninstall.ps1",
 	"uninstall.cmd",
 	"INSTALL.txt",
 	"WebView2Loader.dll",

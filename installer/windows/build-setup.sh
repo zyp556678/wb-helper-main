@@ -55,7 +55,10 @@ for f in workbuddy-gateway.exe wb-local-agent.exe; do
 done
 
 echo "==> 加入安装脚本"
-for f in app.ico run.cmd setup.cmd install.ps1 uninstall.ps1 launch-hidden.vbs INSTALL.txt; do
+# 载荷里只有「铺文件」与「调用网关」这两件事，安装语义全在网关的 install 子命令里
+# （见 internal/installer 的包注释）。所以这里是一小串启动器与说明，不再是
+# 一份完整的 PowerShell 安装器 —— 那正是之前「两套实现各说各话」的来源。
+for f in app.ico run.cmd setup.cmd uninstall.cmd launch-hidden.vbs INSTALL.txt; do
   [ -f "installer/windows/$f" ] || { echo "!! 缺少 installer/windows/$f" >&2; exit 1; }
   cp "installer/windows/$f" "$STAGE/"
 done

@@ -36,6 +36,21 @@ func adoptLegacy(opt Options, logf func(string, ...any)) (legacyInstall, error) 
 		dir = readRegValue(legacyUninstKey, "InstallLocation")
 	}
 	dir = strings.Trim(strings.TrimSpace(dir), `"`)
+
+	// 桌面版没找到，再看旧**命令行版**的默认落点。
+	//
+	// 两种旧形态互不相识（不同的键、不同的目录），所以必须依次查：只认 NSIS 那条
+	// 会让命令行版用户升级时出现「第二份安装 + 两个 A/R 条目 + 两份自启抢端口」，
+	// 而命令行版的用户量并不小（npm 之外的分发就靠它）。
+	if dir == "" {
+		if base := os.Getenv("LOCALAPPDATA"); base != "" {
+			cand := filepath.Join(base, legacyCLIDir)
+			if st, err := os.Stat(cand); err == nil && st.IsDir() {
+				dir = cand
+			}
+		}
+	}
+
 	if dir == "" {
 		return legacyInstall{}, nil
 	}
@@ -54,18 +69,23 @@ func adoptLegacy(opt Options, logf func(string, ...any)) (legacyInstall, error) 
 	return res, nil
 }
 
-// cleanupLegacyRegistry 删掉旧安装器写的注册表项。
+// cleanupLegacyRegistry 删掉旧安装器写的注册表项与计划任务。
 //
-// 三处都要删，缺一处就是残留：
+// 都要删，缺一处就是残留：
 //   - A/R 键：不删会在「设置 → 应用」里留下一个点了没反应的死条目
 //     （它指向的旧卸载器已被原子切换删掉了）
 //   - 厂商键：NSIS 用它记录安装位置，留着会让下一次接管误判
 //   - Run 值：NSIS 卸载器尝试删的值名与它自己写的不符，所以一直没被清掉
+//   - 命令行版的 A/R 键与计划任务：与桌面版**同名不同键**，不删就是两个条目、
+//     两个自启项抢同一个 8317 端口
 func cleanupLegacyRegistry(logf func(string, ...any)) {
 	for _, key := range []string{
 		`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy Gateway`,
 		`HKCU\Software\workbuddy\WorkBuddy Gateway`,
 		`HKCU\Software\workbuddy`,
+		// 旧命令行版（install.ps1）写的 A/R 键：无空格那个。
+		// 它和上面带空格的键是**两个**条目，显示名却一样。
+		`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddyGateway`,
 	} {
 		if regKeyExists(key) {
 			logf("清理旧注册表项 %s", key)
@@ -76,6 +96,32 @@ func cleanupLegacyRegistry(logf func(string, ...any)) {
 		logf("清理旧自启值 WorkBuddy Gateway")
 		deleteRegValue(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "WorkBuddy Gateway")
 	}
+	cleanupLegacyCLITask(logf)
+}
+
+// cleanupLegacyCLITask 删掉旧命令行版注册的登录计划任务。
+//
+// 只在任务确实由我们注册时删 —— 判据是它的动作指向 `launch-hidden.vbs`。
+// 同名任务完全可能是用户自己写的（「WorkBuddyGateway」并不冷僻），
+// 不加这道判断就是拿别人的任务替我们腾地方。
+//
+// 这条任务必须清掉：新版自启走注册表 Run 值，它走计划任务，两者都会在登录时
+// 拉起一个网关，而它们共用 8317 端口 —— 典型症状是「有时能连上、有时连不上」。
+func cleanupLegacyCLITask(logf func(string, ...any)) {
+	out, err := runHidden("schtasks.exe", "/Query", "/TN", legacyCLITask, "/FO", "LIST", "/V")
+	if err != nil {
+		return // 不存在或查不到，都是正常情况
+	}
+	// 核对任务确实是我们写的那条：动作里应当出现启动器脚本名。
+	if !strings.Contains(out, "launch-hidden.vbs") {
+		logf("发现同名计划任务 %s，但它不指向 launch-hidden.vbs，保留不动", legacyCLITask)
+		return
+	}
+	if _, err := runHidden("schtasks.exe", "/Delete", "/TN", legacyCLITask, "/F"); err != nil {
+		logf("清理旧计划任务 %s 失败（不影响安装）：%v", legacyCLITask, err)
+		return
+	}
+	logf("清理旧计划任务 %s", legacyCLITask)
 }
 
 // registerInstall 注册 A/R 项、快捷方式与（可选）自启，返回装上去的版本号。
@@ -92,7 +138,6 @@ func registerInstall(opt Options, logf func(string, ...any)) (string, error) {
 	if err := createShortcuts(opt, shellPath, logf); err != nil {
 		return version, err
 	}
-
 	// ---- 自启 ----
 	//
 	// 只在用户要求时注册；**不主动删除**用户已有选择（AutoStart=false 时保持现状）。
@@ -111,23 +156,30 @@ func registerInstall(opt Options, logf func(string, ...any)) (string, error) {
 
 // writeUninstallEntry 写 A/R 项。
 //
-// DisplayName 带「（桌面版）」后缀 —— 命令行版与桌面版共用 8317 端口，
-// 两者在 A/R 里同名会让人分不清该卸载哪个（旧 NSIS 正是这个问题）。
+// DisplayName 区分桌面版与命令行版 —— 两者共用 8317 端口，在 A/R 里同名会让人
+// 分不清该卸载哪个（旧 NSIS 正是这个问题）。判据是「装上去的有没有桌面壳」，
+// 而不是安装包自称是哪种。
 func writeUninstallEntry(opt Options, shellPath, version string) error {
-	uninst := filepath.Join(opt.InstallDir, "uninstall.cmd")
-	if !fileExists(uninst) {
-		// 没有独立卸载脚本时，用网关自己的 uninstall 子命令 —— 它本来就能做这件事。
-		uninst = filepath.Join(opt.InstallDir, "bin", "workbuddy-gateway"+exeSuffix())
-	}
-	uninstStr := fmt.Sprintf(`"%s" uninstall --dir "%s"`, uninst, opt.InstallDir)
+	// 卸载串直接指向网关二进制本身，不经过 .cmd 包装脚本：
+	//   - 少一层转发就少一处可能漂移的地方（包装脚本传的 dir 与这里写的是同一个值，
+	//     重复传参只会让 `-dir` 出现两次）；
+	//   - 二进制就在安装目录里，卸载时它会把自己的副本转交到 %TEMP% 继续 ——
+	//     那一步由 install_cmd.go 处理，不依赖任何脚本文件还在。
+	gateway := filepath.Join(opt.InstallDir, "bin", gatewayBinaryName())
+	uninstStr := fmt.Sprintf(`"%s" uninstall -dir "%s"`, gateway, opt.InstallDir)
 
 	icon := filepath.Join(opt.InstallDir, "app.ico")
 	if !fileExists(icon) {
 		icon = shellPath
 	}
 
+	displayName := "WorkBuddy Gateway（桌面版）"
+	if !fileExists(shellPath) {
+		displayName = "WorkBuddy Gateway（命令行版）"
+	}
+
 	values := map[string]string{
-		"DisplayName":     "WorkBuddy Gateway（桌面版）",
+		"DisplayName":     displayName,
 		"DisplayVersion":  version,
 		"Publisher":       "workbuddy-gateway",
 		"InstallLocation": opt.InstallDir,
@@ -148,13 +200,23 @@ func arKey() string {
 	return `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddyGateway`
 }
 
-// createShortcuts 建开始菜单与桌面快捷方式，指向网关本体。
+// createShortcuts 建开始菜单与桌面快捷方式。
 //
-// 与命令行版不同，桌面版**不需要** run.cmd 之类的中转：壳自己就是那个窗口，
-// 双击快捷方式等于启动壳，壳再去拉起网关。多一层批处理只会多一个黑窗口。
+// 目标按形态回退：有桌面壳就指向壳（它就是那个窗口），没有则指向 run.cmd
+// （命令行形态的启动器，负责拉起网关并打开面板）。
+//
+// 为什么命令行形态也要建快捷方式：它同样是一个「装完就该能双击打开面板」的
+// 产品形态，而手动去 %LOCALAPPDATA% 深处找 run.cmd 不是用户该做的事。旧
+// install.ps1 一直两者都建，这次收回 Go 时不能把这个能力弄丢。
 func createShortcuts(opt Options, shellPath string, logf func(string, ...any)) error {
-	if !fileExists(shellPath) {
-		return nil // 命令行形态没有壳，快捷方式由它自己的安装器负责
+	target := shellPath
+	if !fileExists(target) {
+		// 命令行形态：run.cmd 随包落盘（见 extraFiles）。
+		target = filepath.Join(opt.InstallDir, "run.cmd")
+		if !fileExists(target) {
+			logf("跳过快捷方式：既没有桌面壳也没有 run.cmd")
+			return nil
+		}
 	}
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
@@ -176,7 +238,7 @@ func createShortcuts(opt Options, shellPath string, logf func(string, ...any)) e
 		if err := os.MkdirAll(filepath.Dir(lnk), 0o755); err != nil {
 			continue
 		}
-		if err := createShortcut(lnk, shellPath, opt.InstallDir, opt.DataDir); err != nil {
+		if err := createShortcut(lnk, target, opt.InstallDir, opt.DataDir); err != nil {
 			logf("建快捷方式失败（%s）：%v", filepath.Base(lnk), err)
 		}
 	}

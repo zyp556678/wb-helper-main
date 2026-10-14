@@ -40,6 +40,8 @@ type installFlags struct {
 	autoStart  bool
 	jsonOut    bool
 	dropData   bool
+	waitPID    int
+	noRegister bool
 }
 
 // newInstallFlagSet 建一个只注册**通用**选项的解析器。
@@ -57,6 +59,9 @@ func newInstallFlagSet(name string, dst *installFlags, errOut io.Writer) *flag.F
 	fs.BoolVar(&dst.autoStart, "autostart", false, "安装完成后注册开机自启")
 	fs.BoolVar(&dst.jsonOut, "json", false, "以 JSON 输出结果（供面板解析）")
 	fs.BoolVar(&dst.dropData, "drop-data", false, "卸载时**一并删除数据目录**（里面是真实凭据，默认保留）")
+	fs.IntVar(&dst.waitPID, "wait-pid", 0, "内部使用：等这个 PID 退出后再继续（卸载转交副本时用）")
+	fs.BoolVar(&dst.noRegister, "no-register", false,
+		"不写系统注册信息（A/R 项、快捷方式、自启）——绿色版/便携安装用；安装与卸载都生效")
 	return fs
 }
 
@@ -119,6 +124,7 @@ func cmdInstall(args []string, out, errOut io.Writer) int {
 		Port:       f.port,
 		AutoStart:  f.autoStart,
 		KeepData:   !f.dropData,
+		NoRegister: f.noRegister,
 		Log:        logf,
 	})
 	if err != nil {
@@ -163,6 +169,22 @@ func cmdUninstall(args []string, out, errOut io.Writer) int {
 		return 2
 	}
 
+	// 卸载器位于待删目录之内时，Windows 上删不掉自己（映像被锁），
+	// 而 stopProcesses 的「按目录筛选」还会把正在卸载的自己一起杀掉。
+	// 转交给临时目录里的副本执行，本进程退出。
+	//
+	// 判据是「自身是否在目标目录下」而不是某个显式开关：副本在 %TEMP% 里，
+	// 自然不满足这个条件，于是同一条命令在两种位置下各自走对的分支 ——
+	// 不需要额外传「我是副本」这种可以被误传的标记。
+	if selfInsideDir(f.installDir) {
+		return relaunchSelfForUninstall(f, out, errOut)
+	}
+
+	// 副本路径：等原进程真正退出，否则它的映像仍锁着目录里的文件。
+	if f.waitPID > 0 {
+		waitForProcessExit(f.waitPID)
+	}
+
 	logf := func(format string, a ...any) {
 		if !f.jsonOut {
 			fmt.Fprintf(out, format+"\n", a...)
@@ -172,6 +194,7 @@ func cmdUninstall(args []string, out, errOut io.Writer) int {
 		InstallDir: f.installDir,
 		DataDir:    f.dataDir,
 		KeepData:   !f.dropData,
+		NoRegister: f.noRegister,
 		Log:        logf,
 	})
 	if err != nil {
@@ -187,5 +210,7 @@ func cmdUninstall(args []string, out, errOut io.Writer) int {
 	if res.DataKept {
 		fmt.Fprintf(out, "  数据目录已保留: %s\n  （里面有凭据与配置；确认不再需要时用 -drop-data 再跑一次）\n", f.dataDir)
 	}
+	// 副本收尾：删掉自己所在的临时目录。
+	cleanupSelfTempDir()
 	return 0
 }

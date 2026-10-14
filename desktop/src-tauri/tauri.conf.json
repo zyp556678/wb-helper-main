@@ -28,26 +28,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
     ],
     "resources": [
       "bin/*"
-    ],
-    "windows": {
-      "nsis": {
-        "languages": [
-          "SimpChinese",
-          "English"
-        ],
-        "displayLanguageSelector": true,
-        "installMode": "currentUser",
-        "installerHooks": "./windows/hooks.nsh"
-      }
-    }
+    ]
   }
 }

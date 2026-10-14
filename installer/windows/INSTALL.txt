@@ -5,24 +5,28 @@ This folder is the unpacked installer payload. You normally do not need to read
 this: the setup program already installed everything.
 
 If you are installing from this folder manually (for example on a machine where
-running a downloaded .exe is blocked), open a PowerShell window here and run:
+running a downloaded .exe is blocked), open a command prompt here and run:
 
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Launch
+    workbuddy-gateway.exe install
 
-Useful switches:
+That is the same command the setup program runs. Useful switches:
 
-    -Port 9000            listen on another port
-    -ApiKey "your-key"    require this key for the panel and /v1 endpoints
-    -AutoStart            also start the gateway hidden at logon
-    -Launch               open the panel when installation finishes
+    -dir <path>       install somewhere other than the default
+    -autostart        also start the gateway hidden at logon
+    -no-register      lay down files only; write no shortcuts, no uninstall
+                      entry, no autostart (a "green"/portable install)
+
+Run it with -h to see the rest.
 
 What gets installed
 -------------------
-    %LOCALAPPDATA%\Programs\workbuddy-gateway
-        workbuddy-gateway.exe   the gateway (admin panel is embedded in it)
-        wb-local-agent.exe      optional: powers the "local client" panel page
-        run.cmd                 launcher used by the shortcuts
-        uninstall.ps1           uninstaller
+    %LOCALAPPDATA%\WorkBuddy Gateway
+        workbuddy-gateway-desktop.exe   the window + tray shell (desktop build)
+        bin\workbuddy-gateway.exe       the gateway (admin panel is embedded)
+        bin\wb-local-agent.exe          optional: powers the "local client" page
+        run.cmd                         launcher used by the shortcuts
+        launch-hidden.vbs               hidden-start helper for logon autostart
+        uninstall.cmd                   uninstaller
 
     %LOCALAPPDATA%\wb-gateway
         credentials (workbuddy*.json), config.json, model cache, usage stats
@@ -30,11 +34,22 @@ What gets installed
 Everything is per-user: no administrator rights are needed and nothing is written
 outside your own profile.
 
+Upgrading
+---------
+Run the newer setup program. It installs over the same directory: running
+processes are stopped, the old directory is replaced atomically, and your data
+directory is never touched. You do not need to uninstall first -- and unlike the
+old NSIS-based installers, choosing to uninstall first does not fail.
+
 Uninstalling
 ------------
-Settings > Apps > "WorkBuddy Gateway" > Uninstall, or run uninstall.ps1 from the
-install folder. Your data directory is kept unless you explicitly confirm deleting
-it (it contains credentials).
+Settings > Apps > "WorkBuddy Gateway" > Uninstall, or run uninstall.cmd from the
+install folder. Your data directory is kept unless you explicitly pass -drop-data
+(it contains credentials).
+
+Because Windows will not let a running program delete the folder it lives in, the
+uninstall finishes in a copy of itself placed in %TEMP%; the window may close
+before the folder is gone.
 
 Two things worth knowing
 -----------------------
