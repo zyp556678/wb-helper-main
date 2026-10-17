@@ -1081,9 +1081,14 @@ func (s *Server) recordMessagesRequest(r *http.Request, mode, modelName string, 
 	s.observeModelPrice(acc, modelName, usage)
 
 	s.logRequest(r, modelName, accountLabel, mode, ttft, time.Since(started), total, outputTokens, failed)
+	site := ""
+	if acc != nil {
+		site = acc.Site()
+	}
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      accountID,
+		Site:         site,
 		OK:           !failed,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,

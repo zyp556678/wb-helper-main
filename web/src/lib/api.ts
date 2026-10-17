@@ -1103,8 +1103,13 @@ export function fetchStats(range: string, signal?: AbortSignal) {
 }
 
 /** 按天统计（GET /panel/api/stats/daily）；range 支持 today / 7d / 30d / 90d / 180d / 1y。 */
-export function fetchStatsDaily(range: string, signal?: AbortSignal) {
-  return request<DailySnapshot>("/stats/daily?range=" + encodeURIComponent(range), { signal });
+export function fetchStatsDaily(
+  range: string,
+  opts: { site?: AccountSite | ""; signal?: AbortSignal } = {},
+) {
+  const query = new URLSearchParams({ range });
+  if (opts.site) query.set("site", opts.site);
+  return request<DailySnapshot>("/stats/daily?" + query.toString(), { signal: opts.signal });
 }
 
 /** Token 统计（GET /panel/api/token-stats）；days 为扫描窗口天数。 */

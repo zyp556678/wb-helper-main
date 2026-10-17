@@ -719,6 +719,7 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),
+		Site:         acc.Site(),
 		OK:           !interrupted,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
@@ -752,6 +753,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 		s.stats.Record(stats.RecordInput{
 			Model:   modelName,
 			Account: acc.Cred.AccountID(),
+			Site:    acc.Site(),
 			OK:      false,
 		})
 		s.logRequest(r, modelName, accountLogLabel(acc), "chat/aggregate",
@@ -780,6 +782,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),
+		Site:         acc.Site(),
 		OK:           true,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy-gateway/internal/auth"
 	"workbuddy-gateway/internal/eventlog"
 	"workbuddy-gateway/internal/pool"
 	"workbuddy-gateway/internal/upstream"
@@ -47,7 +48,15 @@ func (s *Server) handlePanelStatsDaily(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	days := parseDays(r.URL.Query().Get("range"))
-	writeJSON(w, http.StatusOK, s.stats.QueryDaily(days))
+	site, ok := parseStatsSite(r.URL.Query().Get("site"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errBody("site 只能是 cn 或 intl"))
+		return
+	}
+	// 校验放在同步之前：非法参数直接 400，不必先花一次全池拷贝。
+	// 账号 → 站点映射每次查询前同步一次（账号增减的路径太多，逐条接线迟早漏一个）。
+	s.syncStatsAccountSites()
+	writeJSON(w, http.StatusOK, s.stats.QueryDailyBySite(days, site))
 }
 
 // parseRange 解析时间范围参数。
@@ -69,6 +78,35 @@ func parseRange(raw string) int {
 		return n
 	}
 	return 24
+}
+
+// parseStatsSite 校验站点过滤参数。
+//
+// 非法值返回 400 而不是静默当成「全部」：把 `site=cnn` 当成不过滤，
+// 用户会以为自己在看国内站数据，而其实看到的是总和。
+func parseStatsSite(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "", true
+	case auth.SiteCN:
+		return auth.SiteCN, true
+	case auth.SiteINTL:
+		return auth.SiteINTL, true
+	}
+	return "", false
+}
+
+// syncStatsAccountSites 把账号池当前的「账号 → 站点」映射同步给统计层。
+//
+// 每次查询前同步一次（账号数在几十量级，成本可忽略），而不是在增删账号的
+// 每一条路径上各调一次 —— 少一个「新增账号后忘了同步」的坑。
+func (s *Server) syncStatsAccountSites() {
+	accounts := s.pool.Accounts()
+	sites := make(map[string]string, len(accounts))
+	for _, a := range accounts {
+		sites[a.Cred.AccountID()] = a.Site()
+	}
+	s.stats.SetAccountSites(sites)
 }
 
 // parseDays 把范围参数解析成天数（按天接口用）。
@@ -210,7 +248,12 @@ func (s *Server) handleOfficialUsage(w http.ResponseWriter, r *http.Request) {
 			Days: []upstream.OfficialUsageDay{}, Models: []upstream.OfficialUsageModel{},
 			DetailLimit: 0,
 		}
-		sum, err := s.client.OfficialUsage(ctx, view, a.Profile(), days)
+		// 每个账号一份独立超时预算：滑动扫描会按数据量翻若干轮，
+		// 用一个全局 60 秒会让「账号多 + 数据量大」时后面的账号直接超时，
+		// 表现成「部分账号读不到」。失败仍然只影响该账号（见下）。
+		accCtx, accCancel := context.WithTimeout(ctx, officialUsageAccountTimeout)
+		sum, err := s.client.OfficialUsage(accCtx, view, a.Profile(), days)
+		accCancel()
 		if err != nil {
 			// 国际站等不提供该端点的站点必然失败，如实标注而不是让整页失败
 			rec.Error = err.Error()
@@ -382,6 +425,12 @@ func (s *Server) handleOfficialUsage(w http.ResponseWriter, r *http.Request) {
 
 // officialDetailLimit 是**单账号**保留的请求明细条数上限，与 upstream 侧一致。
 const officialDetailLimit = 200
+
+// officialUsageAccountTimeout 是**单账号**官方用量扫描的超时预算。
+//
+// 滑动扫描每轮最多 3000 条，重度账号可能要跑几轮；给足 30 秒，同时保证
+// 某个账号卡住不会把整页（以及后面的账号）一起拖死。
+const officialUsageAccountTimeout = 30 * time.Second
 
 // officialDetailTotalCap 是合并后返回给面板的明细总条数上限。
 //

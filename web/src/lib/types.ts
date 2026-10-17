@@ -1287,6 +1287,8 @@ export interface DayPoint {
 
 export interface AccountRollup {
   account: string;
+  /** 账号所属站点（cn / intl）；旧后端可能不带。 */
+  site?: AccountSite;
   requests: number;
   failures: number;
   tokens: number;
@@ -1309,6 +1311,8 @@ export interface DailyTotals {
 
 export interface DailySnapshot {
   range_days: number;
+  /** 本次查询的站点过滤（缺省 = 全部站点）。 */
+  site?: AccountSite;
   generated_at: number;
   since_at: number;
   totals: DailyTotals;

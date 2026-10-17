@@ -61,6 +61,9 @@ type RecordInput struct {
 	TotalTokens int64
 	// TTFTMs <= 0 表示没有首字样本（非流式聚合取不到），不计入均值而不计为 0。
 	TTFTMs int64
+	// Site 是本次请求所用账号的站点（cn / intl），空表示未知。
+	// 它是**请求的属性**（同一个请求只会打一个站），所以按站点分桶不会重复计数。
+	Site string
 }
 
 // tokens 返回本次请求应计入的总 token。
@@ -130,8 +133,15 @@ type HourBucket struct {
 type DayBucket struct {
 	Day int64 `json:"day"` // 本地日历日索引（见 localDayIndex），不是 UTC 天
 	Counter
-	Models   map[string]*Counter `json:"models,omitempty"`
-	Accounts map[string]*Counter `json:"accounts,omitempty"`
+	Models   map[string]*Counter    `json:"models,omitempty"`
+	Accounts map[string]*Counter    `json:"accounts,omitempty"`
+	Sites    map[string]*SiteBucket `json:"sites,omitempty"`
+}
+
+// SiteBucket 是单个站点的聚合（总量 + 该站的模型维度）。
+type SiteBucket struct {
+	Counter
+	Models map[string]*Counter `json:"models,omitempty"`
 }
 
 // CreditPoint 是一次余额采样。
@@ -148,6 +158,14 @@ type document struct {
 	Credits []CreditPoint          `json:"credits"`
 	Updated int64                  `json:"updated_at"`
 	SinceAt int64                  `json:"since_at"`
+	// AccountSites 是「账号标识 → 站点」的**落盘**副本。
+	//
+	// 为什么必须持久化：站点视图要按账号归站，而账号可能被删掉或改名。
+	// 只从活动账号池反查时，删号会让它全部历史在站点视图里消失
+	// （「国内站 + 国际站」小于「全部站点」）。写入请求时顺手记下归属，
+	// 历史就能一直归到正确的站点。内存里的 accountSite 仍是查询时的权威
+	// （账号可能换站/改名后要跟上），这里只是兜底。
+	AccountSites map[string]string `json:"account_sites,omitempty"`
 }
 
 // Store 是统计仓库。
@@ -158,6 +176,10 @@ type Store struct {
 	doc   document
 	dirty bool
 	Logf  func(format string, args ...any)
+
+	// accountSite 是「账号标识 → 站点」映射（见 SetAccountSites）。
+	// 只影响查询时的站点过滤，不落盘：它可以从账号池随时重建。
+	accountSite map[string]string
 }
 
 // New 构造仓库（不读文件，需另调 Load）。
@@ -204,6 +226,9 @@ func (s *Store) Load() {
 	if doc.Schema != schemaVersion {
 		s.logf("[统计] %s schema %d → %d，保留既有数据并补齐新字段", filepath.Base(s.path), doc.Schema, schemaVersion)
 		doc.Schema = schemaVersion
+	}
+	if doc.AccountSites == nil {
+		doc.AccountSites = map[string]string{}
 	}
 	if doc.Days == nil {
 		doc.Days = map[string]*DayBucket{}
@@ -274,13 +299,53 @@ func (s *Store) Record(in RecordInput) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 顺手记下「这一笔请求的账号属于哪个站点」，供历史归站兜底。
+	if in.Account != "" && in.Site != "" {
+		if s.doc.AccountSites == nil {
+			s.doc.AccountSites = map[string]string{}
+		}
+		if s.doc.AccountSites[in.Account] != in.Site {
+			s.doc.AccountSites[in.Account] = in.Site
+			s.dirty = true
+		}
+	}
+
 	h := s.bucketLocked(now / 3600)
 	addToBucket(&h.Counter, h.Models, h.Accounts, in)
+	// 小时桶**不做**站点分桶：站点视图只有按天查询用得到它，
+	// 而小时桶要保留 30 天并参与每次落盘的整份序列化 —— 存了没人读，
+	// 只会把 wb-stats.json 撑大。
 
 	d := s.dayBucketLocked(localDayIndex(time.Unix(now, 0)))
 	addToBucket(&d.Counter, d.Models, d.Accounts, in)
+	if d.Sites == nil {
+		d.Sites = map[string]*SiteBucket{}
+	}
+	addToSite(d.Sites, in)
 
 	s.dirty = true
+}
+
+// addToSite 把请求累加进所属站点的桶（含该站的模型维度）。
+//
+// 站点未知时不建桶：造一个 "unknown" 站会让「国内站 + 国际站」之和不等于总量，
+// 而明细页正是按这两个站组织的。
+func addToSite(sites map[string]*SiteBucket, in RecordInput) {
+	if in.Site == "" {
+		return
+	}
+	s := sites[in.Site]
+	if s == nil {
+		s = &SiteBucket{Models: map[string]*Counter{}}
+		sites[in.Site] = s
+	}
+	s.add(in)
+	m := s.Models[in.Model]
+	if m == nil {
+		m = &Counter{}
+		s.Models[in.Model] = m
+	}
+	m.add(in)
 }
 
 // addToBucket 把一个请求同时累加到「时间片总量」以及它的模型/账号维度。
@@ -472,6 +537,53 @@ type ModelRollup struct {
 	AvgTTFTMs *float64 `json:"avg_ttft_ms"`
 }
 
+// SetAccountSites 记录「账号 → 站点」映射。
+//
+// 两条路径都用它：
+//   - 账号维度的站点过滤与 AccountRollup.Site 标注；
+//   - 旧天桶（本功能上线前写入、没有 Sites 字段）的站点总量回退。
+//
+// 请求写入时其实也带了 Site（RecordInput.Site → SiteBucket），那份是
+// 「站点 × 模型」的交叉，反推不出来；这里这份只解决「账号是谁的」。
+// 每次按天查询前由 server 层从活动账号池重建。
+func (s *Store) SetAccountSites(sites map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accountSite = make(map[string]string, len(sites))
+	for id, site := range sites {
+		s.accountSite[id] = site
+	}
+}
+
+// siteOfAccount 返回账号所属站点；完全未知时返回空串。
+//
+// 先查活动账号池（改名 / 换站要跟上），再回退到落盘的 AccountSites：
+// 删除只影响未来的归属，不影响历史，否则删号会让该账号的历史用量在站点视图里凭空消失。
+func (s *Store) siteOfAccount(id string) string {
+	if v := s.accountSite[id]; v != "" {
+		return v
+	}
+	// 活动账号池里没有（已删除/已改名）：回退到落盘的历史归属。
+	return s.doc.AccountSites[id]
+}
+
+// sumSiteAccounts 按账号维度反推某站点的合计（供没有 Sites 桶的历史天桶使用）。
+func (s *Store) sumSiteAccounts(b *DayBucket, site string) *Counter {
+	agg := &Counter{}
+	any := false
+	for id, a := range b.Accounts {
+		if s.siteOfAccount(id) != site {
+			continue
+		}
+		any = true
+		mergeCounter(agg, a)
+	}
+	if !any {
+		return nil
+	}
+	return agg
+}
+
 // Query 返回最近 hours 小时的统计。
 //
 // 缺失的小时会被补成 0 点：图表必须连续，否则 recharts 会把不连续的日期连成一条斜线，
@@ -632,7 +744,9 @@ type DayPoint struct {
 
 // AccountRollup 是账号维度的聚合项。
 type AccountRollup struct {
-	Account      string   `json:"account"`
+	Account string `json:"account"`
+	// Site 是账号所属站点（cn / intl），供按站点过滤与「按站点看用量」使用。
+	Site         string   `json:"site,omitempty"`
 	Requests     int64    `json:"requests"`
 	Failures     int64    `json:"failures"`
 	Tokens       int64    `json:"tokens"`
@@ -657,7 +771,9 @@ type DailyTotals struct {
 
 // DailySnapshot 是按天统计的查询结果。
 type DailySnapshot struct {
-	RangeDays   int             `json:"range_days"`
+	RangeDays int `json:"range_days"`
+	// Site 是本次查询的站点过滤（"" = 全部）。
+	Site        string          `json:"site,omitempty"`
 	GeneratedAt int64           `json:"generated_at"`
 	SinceAt     int64           `json:"since_at"`
 	Totals      DailyTotals     `json:"totals"`
@@ -692,6 +808,18 @@ func dailyWindow(now time.Time, days int) (int64, int64) {
 // 让人误以为那几天有流量。余额口径也与小时视图保持一致 —— 存量指标取**当天最后一个**
 // 采样点，而不是求平均，因为平均会掩盖掉「这天到底消耗了多少」。
 func (s *Store) QueryDaily(days int) DailySnapshot {
+	return s.QueryDailyBySite(days, "")
+}
+
+// QueryDailyBySite 同 QueryDaily，但只统计指定站点（cn / intl）下的账号。
+//
+// site 为空表示不过滤。为什么按账号维度过滤而不是另存一份按站点的桶：
+// 站点是账号的**属性**，一个账号不会换站；按账号维度求和即可得到站点口径，
+// 另存一份只会引入「两份数字对不上」的可能。
+//
+// 代价是**账号维度缺失的请求**（全池不可用等早期失败）无法归站，因此在
+// site 过滤时不计入 —— 这是唯一诚实的做法：把它们算进某一站等于编造归属。
+func (s *Store) QueryDailyBySite(days int, site string) DailySnapshot {
 	if days <= 0 {
 		days = 30
 	}
@@ -708,6 +836,7 @@ func (s *Store) QueryDaily(days int) DailySnapshot {
 		RangeDays:   days,
 		GeneratedAt: now.Unix(),
 		SinceAt:     s.doc.SinceAt,
+		Site:        site,
 		Series:      make([]DayPoint, 0, days),
 		TopModels:   []ModelRollup{},
 		Accounts:    []AccountRollup{},
@@ -727,7 +856,10 @@ func (s *Store) QueryDaily(days int) DailySnapshot {
 		if d == nowDay {
 			p.Label = "今天"
 		}
-		if v, ok := creditsByDay[d]; ok {
+		// 站点过滤时**不展示**余额曲线：余额采样只有全池口径（RecordCredits
+		// 记的是所有账号的合计），沿用它会让「国际站请求量 + 两站总余额」出现在
+		// 同一张图里，CreditsUsed 也会明显偏大。留空比混两个总体诚实。
+		if v, ok := creditsByDay[d]; ok && site == "" {
 			v := v
 			p.Credits = &v
 			if firstCredit == nil {
@@ -736,29 +868,54 @@ func (s *Store) QueryDaily(days int) DailySnapshot {
 			lastCredit = &v
 		}
 		if b, ok := s.doc.Days[dayKey(d)]; ok {
-			p.Requests = b.Requests
-			p.Failures = b.Failures
-			p.Tokens = b.Tokens
-			p.InputTokens = b.InputTokens
-			p.OutputTokens = b.OutputTokens
-
-			snap.Totals.Requests += b.Requests
-			snap.Totals.Failures += b.Failures
-			snap.Totals.Tokens += b.Tokens
-			snap.Totals.InputTokens += b.InputTokens
-			snap.Totals.OutputTokens += b.OutputTokens
-			if b.Requests > 0 {
-				snap.Totals.ActiveDays++
-			}
-			for name, m := range b.Models {
-				agg := modelAgg[name]
-				if agg == nil {
-					agg = &Counter{}
-					modelAgg[name] = agg
+			// 站点过滤优先用写入时分好的站点桶：它自带「站点 × 模型」的交叉，
+			// 用账号维度反推只能得到总量、拿不到模型构成。
+			var src *Counter
+			var srcModels map[string]*Counter
+			switch {
+			case site != "":
+				if sb := b.Sites[site]; sb != nil {
+					src, srcModels = &sb.Counter, sb.Models
+				} else {
+					// 兼容本功能上线前写入的天桶（没有 Sites 字段）：
+					// 用账号维度反推那个站的总量。拿不到该站的模型构成，
+					// 但至少不会把真实历史显示成 0。
+					if agg := s.sumSiteAccounts(b, site); agg.Requests > 0 || agg.Tokens > 0 {
+						src = agg
+					}
 				}
-				mergeCounter(agg, m)
+			default:
+				src, srcModels = &b.Counter, b.Models
 			}
+			if src != nil {
+				p.Requests = src.Requests
+				p.Failures = src.Failures
+				p.Tokens = src.Tokens
+				p.InputTokens = src.InputTokens
+				p.OutputTokens = src.OutputTokens
+
+				snap.Totals.Requests += src.Requests
+				snap.Totals.Failures += src.Failures
+				snap.Totals.Tokens += src.Tokens
+				snap.Totals.InputTokens += src.InputTokens
+				snap.Totals.OutputTokens += src.OutputTokens
+				if src.Requests > 0 {
+					snap.Totals.ActiveDays++
+				}
+				for name, m := range srcModels {
+					agg := modelAgg[name]
+					if agg == nil {
+						agg = &Counter{}
+						modelAgg[name] = agg
+					}
+					mergeCounter(agg, m)
+				}
+			}
+			// 账号维度在站点过滤下同样只取该站的账号。
 			for id, a := range b.Accounts {
+				if site != "" && s.siteOfAccount(id) != site {
+					continue
+				}
 				agg := accountAgg[id]
 				if agg == nil {
 					agg = &Counter{}
@@ -798,6 +955,7 @@ func (s *Store) QueryDaily(days int) DailySnapshot {
 	for id, a := range accountAgg {
 		snap.Accounts = append(snap.Accounts, AccountRollup{
 			Account:      id,
+			Site:         s.siteOfAccount(id),
 			Requests:     a.Requests,
 			Failures:     a.Failures,
 			Tokens:       a.Tokens,

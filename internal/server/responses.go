@@ -476,6 +476,7 @@ func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),
+		Site:         acc.Site(),
 		OK:           true,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
@@ -888,6 +889,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 	s.stats.Record(stats.RecordInput{
 		Model:        modelName,
 		Account:      acc.Cred.AccountID(),
+		Site:         acc.Site(),
 		OK:           !interrupt,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,

@@ -72,6 +72,7 @@ import {
 import { getStackedSegmentVisualLayout } from "@/lib/stacked-bar-visuals";
 import { splitUsage } from "@/lib/usage-split";
 import type {
+  AccountSite,
   DailySnapshot,
   OfficialUsageResponse,
   TokenGroup,
@@ -487,6 +488,12 @@ export function StatsPage() {
   const [overviewRange, setOverviewRange] = useState<OverviewRangeKey>("today");
   const [trendRange, setTrendRange] = useState<TrendRangeKey>("30d");
   const [splitDays, setSplitDays] = useState(30);
+  /**
+   * 请求来源拆分的站点维度（"" = 全部）。与「按账号筛选」互斥：
+   * 一个账号只属于一个站点，两个条件叠加通常只会得到空集，
+   * 所以选了站点就不再问账号（对照 v1.14.18 的统计范围）。
+   */
+  const [splitSite, setSplitSite] = useState<AccountSite | "">("");
   const [data, setData] = useState<TokenStatistics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -496,6 +503,8 @@ export function StatsPage() {
   const [detailOpen, setDetailOpen] = useState(false);
 
   const [daily, setDaily] = useState<DailySnapshot | null>(null);
+  /** 请求来源拆分的加载/失败状态；失败时不能继续展示上一个范围/站点的数字。 */
+  const [splitError, setSplitError] = useState<string | null>(null);
   const [official, setOfficial] = useState<OfficialUsageResponse | null>(null);
   const [officialError, setOfficialError] = useState<string | null>(null);
 
@@ -538,15 +547,21 @@ export function StatsPage() {
     let alive = true;
     const splitRange =
       SPLIT_RANGES.find((r) => r.value === String(splitDays))?.daily ?? "30d";
-    fetchStatsDaily(splitRange)
+    // 先清空：切换站点/范围后，旧数据与标题口径不一致，
+    // 继续显示会把「全部站点」的数字当成新站点自己的数字。
+    setDaily(null);
+    setSplitError(null);
+    fetchStatsDaily(splitRange, { site: splitSite })
       .then((res) => {
         if (alive) setDaily(res);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (alive) setSplitError(describeError(err));
+      });
     return () => {
       alive = false;
     };
-  }, [splitDays]);
+  }, [splitDays, splitSite]);
 
   useEffect(() => {
     let alive = true;
@@ -618,18 +633,33 @@ export function StatsPage() {
     if (modelFilter !== "all" && !modelOptions.includes(modelFilter)) setModelFilter("all");
   }, [modelFilter, modelOptions]);
 
+  // 站点过滤下**不拆直连**：官方账本没有站点维度，拿「全站官方合计 − 单站反代」
+  // 会把另一站的流量算进本站直连。此时把官方侧置空，让组件走「无法拆分」分支。
   const requestSplit = useMemo(
-    () => splitUsage(daily?.totals.requests ?? 0, officialError ? null : official),
-    [daily, official, officialError],
+    () => splitUsage(daily?.totals.requests ?? 0, splitSite || officialError ? null : official),
+    [daily, official, officialError, splitSite],
   );
 
   const splitPills = (
-    <PillGroup
-      value={String(splitDays)}
-      options={SPLIT_RANGES.map((r) => ({ value: r.value, label: r.label }))}
-      onChange={(v) => setSplitDays(Number(v))}
-      ariaLabel="请求来源拆分范围"
-    />
+    <div className="flex flex-wrap items-center gap-2">
+      {/* 站点维度：只影响「经过网关（反代）」那一侧的计数，不影响官方账本。 */}
+      <PillGroup<AccountSite | "">
+        value={splitSite}
+        options={[
+          { value: "", label: "全部站点" },
+          { value: "cn", label: "国内站" },
+          { value: "intl", label: "国际站" },
+        ]}
+        onChange={(v) => setSplitSite(v)}
+        ariaLabel="请求来源拆分站点"
+      />
+      <PillGroup
+        value={String(splitDays)}
+        options={SPLIT_RANGES.map((r) => ({ value: r.value, label: r.label }))}
+        onChange={(v) => setSplitDays(Number(v))}
+        ariaLabel="请求来源拆分范围"
+      />
+    </div>
   );
   const overviewPills = (
     <PillGroup
@@ -709,11 +739,28 @@ export function StatsPage() {
       <Section
         id="usage-source-split"
         title="请求来源拆分"
-        description={`${splitRangeLabel}内按「是否经过网关」拆分请求量。`}
+        description={
+          splitSite
+            ? `${splitRangeLabel}内、仅${splitSite === "cn" ? "国内站" : "国际站"}账号，按「是否经过网关」拆分请求量。`
+            : `${splitRangeLabel}内按「是否经过网关」拆分请求量。`
+        }
         action={splitPills}
       >
         <CardContent className="min-w-0 space-y-4 px-4 pt-4 pb-4 sm:px-5">
-          {requestSplit.state === "ready" ? (
+          {splitError ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              读取反代计数失败：{splitError}。为避免把上一个站点/范围的数字当成当前口径，
+              这里暂不展示拆分结果，请点右上角「刷新统计」重试。
+            </p>
+          ) : splitSite ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              官方账本没有站点维度，因此选定「{splitSite === "cn" ? "国内站" : "国际站"}」时
+              无法推算「官方直连」这一项。要看两路拆分请选「全部站点」。
+              当前站点经过网关的请求量为 <span className="font-medium text-foreground">
+                {formatQuantity(daily?.totals.requests ?? 0)} 次
+              </span>。
+            </p>
+          ) : requestSplit.state === "ready" ? (
             <>
               <RankingRows
                 rows={[
@@ -738,6 +785,10 @@ export function StatsPage() {
                 合计 {formatQuantity(requestSplit.officialRequests ?? 0)} 次（WorkBuddy 官方账本）。
                 「官方直连」是<span className="font-medium text-foreground">推算值</span>
                 ：官方账本不区分流量是否经过网关，它只能由「官方合计 − 反代计数」得出。
+                {splitSite
+                  ? " 注意：官方账本没有站点维度，「经过网关」已按所选站点过滤，"
+                    + "而「官方直连」仍是全部站点口径，因此选定站点时这一项仅供参考。"
+                  : ""}
                 {requestSplit.officialCredit !== null
                   ? ` 官方账本同期消耗 ${formatCredits(requestSplit.officialCredit)} 积分，含两路。`
                   : ""}
