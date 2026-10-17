@@ -21,6 +21,7 @@ import {
   notifyWarning,
   notifyInfo,
 } from "@/lib/notify";
+import { shouldDefaultSelectArchive, useDefaultArchiveSync } from "@/lib/sync-prefs";
 
 import {
   AlertDialog,
@@ -457,6 +458,8 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
   const [error, setError] = useState<string | null>(null);
   /** 执行中的操作：`batch` / `add` / 某个成员的 session_id（以此为准）。 */
   const [busy, setBusy] = useState<string | null>(null);
+  // 「仅同步归档状态」的默认勾选偏好（设置页可开；默认关 = 每次手动确认）。
+  const defaultArchiveSync = useDefaultArchiveSync();
   /** 「以此为准」的预览计划（逐目标的判定/模式/阻断项）。 */
   const [unifyPlan, setUnifyPlan] = useState<UnifyPlan | null>(null);
   const [unlinkTarget, setUnlinkTarget] = useState<LocalSessionGroupMember | null>(null);
@@ -638,9 +641,19 @@ function GroupDetailDialog({ groupId, onClose, onGroupChanged }: GroupDetailDial
               targetMemberId: m.member_id,
             });
             const mode = p.available_modes?.[0] ?? "";
-            // 归档传导是**可选动作**，默认不勾（防误操作）。只在后端给出
-            // archive_action 时才可用 —— 那是「来源已归档 + 目标在终态」的资格结论。
-            return { member: m, preview: p, mode, syncArchive: false };
+            // 归档传导是**可选动作**。是否预勾选由用户的常驻偏好决定（默认关）：
+            // 只有「正文已一致 + 后端给出 archive_action」的纯归档项才会被预勾，
+            // 需要覆盖正文的目标永远不自动勾选（见 lib/sync-prefs.ts）。
+            return {
+              member: m,
+              preview: p,
+              mode,
+              syncArchive: shouldDefaultSelectArchive({
+                mode,
+                archiveAction: p.archive_action,
+                defaultEnabled: defaultArchiveSync,
+              }),
+            };
           } catch (err) {
             return { member: m, preview: null, mode: "", error: describeError(err) };
           }

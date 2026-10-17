@@ -57,6 +57,7 @@ import {
   type NotificationRecord,
 } from "@/lib/notify";
 import { setSessionsNavEnabled, useSessionsNavEnabled } from "@/lib/nav-prefs";
+import { setDefaultArchiveSyncEnabled, useDefaultArchiveSync } from "@/lib/sync-prefs";
 import { setToolEnabled, SUPPORTED_TOOLS, useSupportedTools } from "@/lib/supported-tools";
 import { useThemePreference, type ThemePreference } from "@/lib/theme";
 import type {
@@ -630,6 +631,7 @@ export function ConfigPage() {
   const [themePreference, selectTheme] = useThemePreference();
   /** 「显示关联会话菜单」偏好：关掉后左侧导航不渲染「关联会话」入口。 */
   const sessionsNav = useSessionsNavEnabled();
+  const defaultArchiveSync = useDefaultArchiveSync();
   /** 「支持工具」开关：控制本机应用条目 / 账号卡入口与对应探测。 */
   const supportedTools = useSupportedTools();
   /** 路径复制反馈（请求日志 / 数据目录）。 */
@@ -1525,6 +1527,16 @@ export function ConfigPage() {
                   checked={sessionsNav}
                   aria-label="显示关联会话菜单"
                   onCheckedChange={(checked) => setSessionsNavEnabled(checked)}
+                />
+              </ConfigRow>
+              <ConfigRow
+                label="默认勾选「仅同步归档状态」"
+                hint="统一会话时，对正文已一致、且可传导归档状态的副本自动勾选。需要覆盖正文的目标永远不会被自动勾选"
+              >
+                <Switch
+                  checked={defaultArchiveSync}
+                  aria-label="默认勾选仅同步归档状态"
+                  onCheckedChange={(checked) => setDefaultArchiveSyncEnabled(checked)}
                 />
               </ConfigRow>
             </CardContent>
