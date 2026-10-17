@@ -8,17 +8,19 @@
 
 | 平台 | 文件 | 装到哪 | 数据在哪 |
 | --- | --- | --- | --- |
-| Windows x64 / ARM64 | `workbuddy-gateway_<版本>_x64-setup.exe` | `%LOCALAPPDATA%\Programs\workbuddy-gateway` | `%LOCALAPPDATA%\wb-gateway` |
-| Linux x64 / ARM64 | `workbuddy-gateway_<版本>_amd64.deb` | `/usr/bin` + systemd 服务 | `/var/lib/workbuddy-gateway` |
-| macOS Intel / Apple Silicon | `workbuddy-gateway_<版本>_amd64.pkg`（含 `.dmg`） | `/usr/local/bin` + 每用户 LaunchAgent | `~/.wb-gateway` |
+| Windows x64 / ARM64 | `workbuddy-gateway-desktop_<版本>_x64-setup.exe` | `%LOCALAPPDATA%\WorkBuddy Gateway` | `%LOCALAPPDATA%\wb-gateway` |
+| Linux x64 / ARM64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` | `/usr/bin` + systemd 服务 | `/var/lib/workbuddy-gateway` |
+| macOS Intel / Apple Silicon | `workbuddy-gateway-desktop_<版本>_arm64.dmg` | `/Applications` | `~/.wb-gateway` |
 
-- Windows：双击 → 回答两个问题（是否随登录启动、是否装完打开面板）→ 完成。
-  开始菜单与桌面会各有一个快捷方式；卸载走「设置 → 应用」或 `uninstall.ps1`。
-  无需管理员权限（每个用户装在自己的目录里）。
-- Linux：`sudo dpkg -i workbuddy-gateway_<版本>_amd64.deb`，装完自动启用并启动服务。
-  `dpkg -r` 卸载但**保留**数据目录，`dpkg --purge` 才连数据一起删。
-- macOS：双击 `.pkg`。会在 `~/Library/LaunchAgents` 装一个 LaunchAgent（登录自启），
-  并创建 `~/.wb-gateway` 作为数据目录。
+- Windows：双击 → 安装向导（每用户、免 UAC）→ 从开始菜单启动。带窗口与托盘。
+- Linux：`sudo dpkg -i workbuddy-gateway-desktop_<版本>_amd64.deb`，装完从应用菜单启动。
+- macOS：打开 `.dmg`，把「WorkBuddy Gateway」拖进「应用程序」。
+
+Release 页只发布这三种**桌面版**包。命令行形态（无窗口、登录计划任务）的安装包
+（`workbuddy-gateway_<版本>_x64-setup.exe`）只由 CI 的 `windows-setup` 作业在手动触发时产出，
+不进 Release；需要它时从 Actions 页面下载，或直接用下面的 npm / 压缩包形态。
+两种形态装在不同目录、注册不同的卸载项，**不要混装**：面板里的「检查更新」会按当前
+形态挑包，不会把一个命令行安装换成桌面版。
 
 三个平台的安装包都**未做代码签名**，Windows SmartScreen 与 macOS Gatekeeper 会提示来源未知。
 这与同类小工具（包括 switch）的情况一致，需手动允许。macOS 上如果提示"已损坏"：
@@ -214,6 +216,9 @@ Stop-ScheduledTask     -TaskName WorkBuddyGateway
 Unregister-ScheduledTask -TaskName WorkBuddyGateway -Confirm:$false   # 卸载
 ```
 
+`-Port` 与 `-ApiKey` 写进安装目录的 `launch.txt`，登录计划任务与 `run.cmd` 都读这一份，
+不会出现「计划任务在 9000、快捷方式在 8317」的两份实例。
+
 为什么用计划任务而不是 Windows 服务：网关要读写**当前用户**目录下的凭据、缓存与统计。
 LocalSystem 服务的家目录和账户都不一样，账号池会看起来是空的。登录触发在当前用户下跑，
 路径与权限跟手工执行完全一致。
@@ -304,10 +309,13 @@ volumes:
 数据目录（凭据、`config.json`、模型缓存、统计）与程序文件是分开的，所以升级只换程序即可。
 
 ```bash
-# 安装包形态：重新下发同一个安装包，装的时候会先停掉旧实例再覆盖
-#   Windows : 再跑一次 setup.exe（数据在 %LOCALAPPDATA%\wb-gateway，不动）
-#   Linux   : sudo dpkg -i workbuddy-gateway_<新版本>_amd64.deb
-#   macOS   : 再双击一次 .pkg
+# 安装包形态：重新下发**同一种形态**的安装包，装的时候会先停掉旧实例再覆盖
+#   Windows : 再跑一次同形态的 setup.exe（数据在 %LOCALAPPDATA%\wb-gateway，不动）
+#   Linux   : sudo dpkg -i workbuddy-gateway-desktop_<新版本>_amd64.deb
+#   macOS   : 再打开一次 .dmg 拖进「应用程序」覆盖
+#
+# 桌面版与命令行版的包不能互换：装到不同目录、注册不同卸载项，
+# 混装会留下两份程序。面板的「检查更新」按当前形态挑包，可以放心用。
 
 # npm 形态
 npm i -g workbuddy-gateway@latest

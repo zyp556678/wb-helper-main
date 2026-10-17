@@ -112,13 +112,15 @@ systemd 服务、只有浏览器访问、**没有窗口**；两者 dpkg 包名�
 
 | 平台 | 文件 | 数据目录 |
 | --- | --- | --- |
-| Windows x64 / ARM64 | `workbuddy-gateway_<版本>_x64-setup.exe` / `_arm64-setup.exe` | `%LOCALAPPDATA%\wb-gateway` |
-| Linux x64 / ARM64 | `workbuddy-gateway_<版本>_amd64.deb` / `_arm64.deb` | `/var/lib/workbuddy-gateway` |
-| macOS Intel / Apple Silicon | `workbuddy-gateway_<版本>_amd64.pkg` / `_arm64.pkg`（含 `.dmg`） | `~/.wb-gateway` |
+| Windows x64 | `workbuddy-gateway-desktop_<版本>_x64-setup.exe` | `%LOCALAPPDATA%\wb-gateway` |
+| Linux x64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` | `~/.wb-gateway` |
+| macOS Apple Silicon | `workbuddy-gateway-desktop_<版本>_arm64.dmg` | `~/.wb-gateway` |
 
-Windows 安装包会问两个问题（是否随登录启动、是否装完打开面板），并创建开始菜单/桌面快捷方式与
-卸载项；Linux 装成 systemd 服务；macOS 装一个每用户 LaunchAgent。安装包均**未签名**，
-首次运行需要手动允许（详见 `DEPLOY.md`）。
+Release 页发布的就是上面这三种**桌面版**包（带窗口 + 托盘）。无窗口的命令行形态安装包
+（`workbuddy-gateway_<版本>_x64-setup.exe`，装成登录计划任务）只在 CI 手动触发时产出，
+不进 Release；要那种形态就用下面的 npm 或压缩包路径。两种形态装在不同目录、
+注册不同卸载项，**不要混装**——面板里的「检查更新」会按当前形态挑包，不会跨形态替换。
+安装包均**未签名**，首次运行需要手动允许（详见 `DEPLOY.md`）。
 
 **二、npm 全局安装**
 
