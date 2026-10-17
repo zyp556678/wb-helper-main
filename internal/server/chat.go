@@ -59,6 +59,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 会话上下文头必须在**调度之前**算好：换号重试期间复用同一组标识，
+	// 上游才认得出这是同一个逻辑请求（v1.14.19，缺它会撞 11-128）。
+	upstream.PrepareConversation(r, reqObj)
+
 	modelName, _ := reqObj["model"].(string)
 	if strings.TrimSpace(modelName) == "" {
 		modelName = "deepseek-v4.1-flash"

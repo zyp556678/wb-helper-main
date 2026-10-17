@@ -130,6 +130,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 会话上下文头：Anthropic 客户端（Claude Code）不传 conversation_id，
+	// 靠 metadata.user_id 或客户端会话头识别；都没有时独立生成。
+	upstream.PrepareConversation(r, msgReq)
+
 	modelName, _ := msgReq["model"].(string)
 	if strings.TrimSpace(modelName) == "" {
 		modelName = "deepseek-v4.1-flash"

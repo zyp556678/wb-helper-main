@@ -71,6 +71,10 @@ func BackendHeaders(req *http.Request, c *CredentialView, p *Profile) {
 	req.Header.Set("X-Client-ID", p.ClientID)
 	req.Header.Set("X-Client-Version", p.ClientVer)
 	req.Header.Set("X-Product", p.Product)
+	// 会话上下文三件套（v1.14.19）。必须在这里设而不是在 doChatWithRetry 的
+	// 每轮里生成：同一个逻辑请求换号/重试时，上游看到的是同一个会话的同一轮，
+	// 否则工具调用请求会回 11-128。
+	SetConversationHeaders(req)
 
 	if c != nil {
 		if c.AccessToken != "" {

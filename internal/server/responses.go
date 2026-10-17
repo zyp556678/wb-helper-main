@@ -52,6 +52,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 会话上下文头：用**原始** Responses 请求体取会话字段（转换后的 chat 请求
+	// 会把 metadata 改写），且在调度之前算好，供换号重试复用。
+	upstream.PrepareConversation(r, respReq)
+
 	modelName, _ := respReq["model"].(string)
 	if strings.TrimSpace(modelName) == "" {
 		modelName = "deepseek-v4.1-flash"
