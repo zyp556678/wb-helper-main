@@ -155,7 +155,7 @@ type State struct {
 	IntervalHours int  `json:"interval_hours"`
 	// AutoDownload 来自配置：发现新版本后是否自动把安装包下到数据目录（默认 true）。
 	AutoDownload bool `json:"auto_download"`
-	// AutoInstall 来自配置：安装包下好之后是否自动安装（默认 false，见 config.UpdateSection）。
+	// AutoInstall 来自配置：安装包下好之后是否自动安装（默认 true，见 config.UpdateSection）。
 	AutoInstall bool `json:"auto_install"`
 	// DownloadMirror 是生效中的下载加速前缀（空串 = 直连），面板据此显示当前走哪条路。
 	DownloadMirror string `json:"download_mirror,omitempty"`
@@ -205,6 +205,12 @@ type Options struct {
 	Now func() time.Time
 	// StartupDelay 覆盖 DefaultStartupDelay（测试用）。
 	StartupDelay time.Duration
+	// ExePath 是本进程的可执行文件路径（main 传入 os.Executable 的结果）。
+	// 用来判断「这份网关是桌面版还是命令行版」，从而只挑对应形态的安装包。
+	ExePath string
+	// Host 是代管方声明的形态（`WB_GATEWAY_HOST=desktop|cli`，由启动器设置）。
+	// 优先于 ExePath 推断：路径规则会随安装布局变化，而启动器是自己写的。
+	Host string
 }
 
 // Checker 是更新检查器。零值不可用，请用 New 构造。
@@ -219,6 +225,9 @@ type Checker struct {
 	events       *eventlog.Log
 	now          func() time.Time
 	startupDelay time.Duration
+	// form 是本实例的安装形态（formDesktop / formCLI / formUnknown），
+	// 决定从 Release 里挑哪一类安装包。见 detectForm。
+	form string
 
 	// cfgPtr 与 server 同款：配置在面板保存时是「克隆 → 改 → 换指针」，
 	// 直接持有旧指针会让面板改的间隔/开关永远不生效。
@@ -271,6 +280,7 @@ func New(cfg *config.Config, opt Options) *Checker {
 		events:       opt.Events,
 		now:          opt.Now,
 		startupDelay: opt.StartupDelay,
+		form:         detectForm(opt.Host, opt.ExePath),
 	}
 	if c.apiBase == "" {
 		c.apiBase = DefaultAPIBase
@@ -618,7 +628,7 @@ func (c *Checker) runCheck(ctx context.Context, prev State) State {
 	st.PublishedAt = rel.PublishedAt.Unix()
 	st.Notes = truncateRunes(strings.TrimSpace(rel.Body), maxNotesRunes)
 	st.CheckedAt = c.now().Unix()
-	if a, ok := pickAsset(rel.Assets, c.goos, c.goarch); ok {
+	if a, ok := pickAsset(rel.Assets, c.goos, c.goarch, c.form); ok {
 		st.AssetName = a.Name
 		st.AssetSize = a.Size
 		st.DownloadURL = a.BrowserDownloadURL
@@ -632,7 +642,12 @@ func (c *Checker) runCheck(ctx context.Context, prev State) State {
 		st.Detail = "当前版本号 " + c.current + " 不是发行版本号，无法比较，仅显示更新源上的最新版本"
 	case compareSemver(latest, cur) > 0:
 		st.UpdateAvailable = true
-		if st.AssetName == "" {
+		switch {
+		case c.form == formNPM:
+			// npm 安装没有可用的系统安装包，而且装上去会变成两份程序。
+			// 这里明说该怎么升，而不是给一个「下载」按钮。
+			st.Detail = "本实例由 npm 全局安装，请用 npm i -g workbuddy-gateway@latest 升级"
+		case st.AssetName == "":
 			st.Detail = "更新源上没有匹配 " + c.platform() + " 的安装包，请到 Release 页按平台手动下载"
 		}
 	default:
@@ -790,6 +805,61 @@ func pickRelease(rels []release, prerelease bool) (release, bool) {
 	return best, found
 }
 
+// 安装形态。Release 上同时存在两种 Windows 产物：
+//
+//	workbuddy-gateway-desktop_<ver>_x64-setup.exe   带窗口 + 托盘的桌面版
+//	workbuddy-gateway_<ver>_x64-setup.exe           无窗口的命令行版
+//
+// 两者装到不同目录、注册不同卸载项。如果不管形态都挑「第一个匹配的 setup.exe」，
+// 命令行版用户点一下更新就会被装成桌面版，机器上出现两份安装、快捷方式互相覆盖。
+const (
+	formDesktop = "desktop"
+	formCLI     = "cli"
+	// formNPM 是 npm 全局安装。它没有对应的安装包：升级必须走 npm，
+// 用 Release 上的 setup.exe / deb 覆盖只会多出一份安装。
+	formNPM     = "npm"
+	formUnknown = "unknown"
+)
+
+// hostEnv 是启动器声明的形态。桌面壳、命令行启动器与 npm 入口各自设置，
+// 比从路径推断可靠（见 main.go 里传给 Options.Host 的来源）。
+const hostEnv = "WB_GATEWAY_HOST"
+
+// HostEnv 是 WB_GATEWAY_HOST 的名字，供 main 读取。
+const HostEnv = hostEnv
+
+// detectForm 判断本实例属于哪种安装形态。
+//
+// 顺序：启动器声明 > 可执行文件路径 > 未知。
+// 路径规则只用于兜底（例如用户直接双击了压缩包里的二进制，没有启动器），
+// 因此只认两种安装器写死的目录名，不做模糊猜测 —— 猜错会让用户装错形态。
+func detectForm(host, exePath string) string {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case formDesktop, formCLI, formNPM:
+		return strings.ToLower(strings.TrimSpace(host))
+	}
+	p := strings.ToLower(filepath.ToSlash(exePath))
+	switch {
+	// 桌面版：Tauri 每用户安装的 bin/ 资源目录。
+	case strings.Contains(p, "/workbuddy gateway/bin/"):
+		return formDesktop
+	// npm 全局安装：包内 bin/ 目录，路径形如
+	//   <prefix>/node_modules/workbuddy-gateway/bin/workbuddy-gateway
+	// 必须排在命令行版之前判断：npm 的 prefix 可以是任意目录，但 node_modules
+	// 这一层是它独有的。
+	case strings.Contains(p, "/node_modules/workbuddy-gateway/"):
+		return formNPM
+	// 命令行版：install.ps1 / deploy 脚本的落点，以及 DEPLOY.md 建议的 ~/.wb-gateway/bin。
+	// 注意 Linux/macOS 的数据目录带点（.wb-gateway），Windows 的不带 —— 两种都要认。
+	case strings.Contains(p, "/programs/workbuddy-gateway/"),
+		strings.Contains(p, "/wb-gateway/bin/"),
+		strings.Contains(p, "/.wb-gateway/bin/"):
+		return formCLI
+	}
+
+	return formUnknown
+}
+
 // assetRules 给出某平台可接受的安装包特征：扩展名与架构标记，均按优先级排列。
 func assetRules(goos, goarch string) (exts, archTokens []string) {
 	switch goos {
@@ -817,7 +887,15 @@ func assetRules(goos, goarch string) (exts, archTokens []string) {
 // 按「扩展名优先级 × 架构标记优先级」取第一个命中的：先 .deb 后 .rpm、
 // 先 amd64 后 x86_64 —— 顺序即偏好，避免同一平台有多个包时结果随机。
 // 找不到就返回 false（调用方据此提示「到 Release 页手动下载」，而不是给一个错的文件）。
-func pickAsset(assets []releaseAsset, goos, goarch string) (releaseAsset, bool) {
+//
+// form 限制候选形态（见 detectForm）。它只做**排除**，不做加分：
+//   - formDesktop：只要桌面版（文件名带 -desktop）。
+//   - formCLI：只要命令行版（文件名不带 -desktop）。
+//   - formUnknown：不限制 —— 连自己是什么形态都不知道时，任何排除都可能把
+//     唯一可用的包挡掉，那比装错形态更糟。
+//
+// 同一形态内仍然先按扩展名、再按架构标记挑，因此补发资产不会改变结果。
+func pickAsset(assets []releaseAsset, goos, goarch, form string) (releaseAsset, bool) {
 	exts, archTokens := assetRules(goos, goarch)
 	for _, ext := range exts {
 		for _, tok := range archTokens {
@@ -829,11 +907,29 @@ func pickAsset(assets []releaseAsset, goos, goarch string) (releaseAsset, bool) 
 				if !strings.Contains(name, strings.ToLower(tok)) {
 					continue
 				}
+				if !formAllows(form, name) {
+					continue
+				}
 				return a, true
 			}
 		}
 	}
 	return releaseAsset{}, false
+}
+
+// formAllows 判断某个资产文件名是否属于当前安装形态。
+func formAllows(form, lowerName string) bool {
+	switch form {
+	case formDesktop:
+		return strings.Contains(lowerName, "-desktop")
+	case formCLI:
+		return !strings.Contains(lowerName, "-desktop")
+	case formNPM:
+		// npm 安装没有对应的安装包：系统安装包一律不匹配，调用方据此提示
+		// 「用 npm 升级」。装上去只会多出一份程序，而 npm 那份仍然在。
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

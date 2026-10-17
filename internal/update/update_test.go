@@ -264,7 +264,7 @@ func TestPickAssetPerPlatform(t *testing.T) {
 		{"windows", "arm64", "workbuddy-gateway-desktop_0.9.3_arm64-setup.exe"},
 	}
 	for _, tc := range cases {
-		got, ok := pickAsset(assets, tc.goos, tc.goarch)
+		got, ok := pickAsset(assets, tc.goos, tc.goarch, formUnknown)
 		if !ok {
 			t.Errorf("%s/%s 应当匹配到安装包", tc.goos, tc.goarch)
 			continue
@@ -278,8 +278,75 @@ func TestPickAssetPerPlatform(t *testing.T) {
 // 只发过 arm64 的 dmg 时，Intel Mac 不该拿到一个 arm64 的包 —— 宁可没有。
 func TestPickAssetDoesNotFallBackToWrongArch(t *testing.T) {
 	assets := []releaseAsset{{Name: "workbuddy-gateway-desktop_0.9.3_arm64.dmg"}}
-	if got, ok := pickAsset(assets, "darwin", "amd64"); ok {
+	if got, ok := pickAsset(assets, "darwin", "amd64", formUnknown); ok {
 		t.Errorf("不该把 arm64 的包发给 amd64，实际给了 %q", got.Name)
+	}
+}
+
+// 同一平台两种形态同时存在时，必须各拿各的。
+//
+// 这是「命令行版用户点一下更新，结果被装成桌面版」的根因：只看扩展名与架构时，
+// 谁排在前面就装谁。两条路径都要覆盖，因为排除规则是镜像的。
+func TestPickAssetRespectsInstallForm(t *testing.T) {
+	assets := []releaseAsset{
+		{Name: "workbuddy-gateway-desktop_0.9.3_x64-setup.exe"},
+		{Name: "workbuddy-gateway_0.9.3_x64-setup.exe"},
+	}
+	cases := []struct{ form, want string }{
+		{formDesktop, "workbuddy-gateway-desktop_0.9.3_x64-setup.exe"},
+		{formCLI, "workbuddy-gateway_0.9.3_x64-setup.exe"},
+	}
+	for _, tc := range cases {
+		got, ok := pickAsset(assets, "windows", "amd64", tc.form)
+		if !ok || got.Name != tc.want {
+			t.Errorf("form=%s 应匹配 %q，实际 %q（ok=%v）", tc.form, tc.want, got.Name, ok)
+		}
+	}
+
+	// 形态不明时不排除：连自己是什么都不知道时，把唯一可用的包挡掉更糟。
+	if got, ok := pickAsset(assets, "windows", "amd64", formUnknown); !ok {
+		t.Error("形态不明时不该拒绝所有候选")
+	} else if got.Name != assets[0].Name {
+		t.Errorf("形态不明时应按原顺序取第一个，实际 %q", got.Name)
+	}
+
+	// 只发了桌面版时，命令行形态宁可拿不到包，也不该被静默换成桌面版。
+	onlyDesktop := []releaseAsset{{Name: "workbuddy-gateway-desktop_0.9.3_x64-setup.exe"}}
+	if got, ok := pickAsset(onlyDesktop, "windows", "amd64", formCLI); ok {
+		t.Errorf("命令行形态不该匹配桌面版安装包，实际给了 %q", got.Name)
+	}
+
+	// npm 形态对任何系统安装包都不匹配：升级必须走 npm。
+	if got, ok := pickAsset(assets, "windows", "amd64", formNPM); ok {
+		t.Errorf("npm 形态不该匹配系统安装包，实际给了 %q", got.Name)
+	}
+}
+
+// 形态判定：启动器声明优先于路径推断。
+func TestDetectForm(t *testing.T) {
+	cases := []struct {
+		host, exe, want string
+	}{
+		// 启动器声明最可信，路径再像也不推翻它。
+		{"desktop", `C:\x\workbuddy-gateway.exe`, formDesktop},
+		{"cli", `C:\x\WorkBuddy Gateway\bin\workbuddy-gateway.exe`, formCLI},
+		// 没有声明时看安装器写死的目录。
+		{"", `C:\Users\u\AppData\Local\WorkBuddy Gateway\bin\workbuddy-gateway.exe`, formDesktop},
+		{"", `C:\Users\u\AppData\Local\Programs\workbuddy-gateway\workbuddy-gateway.exe`, formCLI},
+		{"", `/home/u/.wb-gateway/bin/workbuddy-gateway`, formCLI},
+		// 认不出来的（源码目录、压缩包解压到任意位置）不猜。
+		{"", `/home/u/src/workbuddy-gateway/workbuddy-gateway`, formUnknown},
+		{"", "", formUnknown},
+		// npm 全局安装：任意 prefix，但 node_modules 那一层是它独有的。
+		{"", `/usr/local/lib/node_modules/workbuddy-gateway/bin/workbuddy-gateway`, formNPM},
+		{"", `C:\Users\u\AppData\Roaming\npm\node_modules\workbuddy-gateway\bin\workbuddy-gateway.exe`, formNPM},
+		// 大小写与斜杠都要吃得住（Windows 路径可能来自不同来源）。
+		{"DESKTOP", `c:/x/y.exe`, formDesktop},
+	}
+	for _, tc := range cases {
+		if got := detectForm(tc.host, tc.exe); got != tc.want {
+			t.Errorf("detectForm(%q, %q) = %q，期望 %q", tc.host, tc.exe, got, tc.want)
+		}
 	}
 }
 

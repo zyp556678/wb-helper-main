@@ -464,7 +464,10 @@ export function UpdatesPage() {
                 </AlertDialog>
               ) : null}
 
-              {status?.update_available && !downloaded ? (
+              {/* 没有匹配本机形态的安装包时不显示「下载」：后端已经把原因写进
+                  detail（npm 安装要用 npm 升级、缺平台产物要去 Release 页）。
+                  留一个点了只会报错的按钮，比不显示更让人困惑。 */}
+              {status?.update_available && !downloaded && status.asset_name ? (
                 <Button type="button" size="sm" disabled={busyAll} onClick={() => void handleDownload()}>
                   {busy === "download" ? (
                     <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
@@ -599,7 +602,7 @@ export function UpdatesPage() {
               </div>
               <div className="text-xs text-muted-foreground">
                 安装包下好之后直接装并重启（Windows 上是退出让出文件锁）。
-                它会覆盖程序、结束正在跑的进程 —— 打开前请确认你能接受这一点。
+                默认开启；它会覆盖程序、结束正在跑的进程，可随时关掉改成「只下不装」。
               </div>
             </div>
             {loading ? (
@@ -609,8 +612,8 @@ export function UpdatesPage() {
                 checked={status?.auto_install ?? false}
                 disabled={busyAll || !status}
                 onCheckedChange={(checked) => {
-                  // 打开是危险动作（会覆盖程序、结束进程、重启网关），先确认；
-                  // 关掉是恢复安全状态，直接生效、不拦。
+                  // 默认已开；关掉是恢复安全状态，直接生效、不拦。
+                  // 重新打开会覆盖程序、结束进程、重启网关，先确认。
                   if (checked) setConfirmAutoInstall(true);
                   else void handleSwitch("install", false);
                 }}
@@ -691,9 +694,9 @@ export function UpdatesPage() {
           </AlertDialog>
 
           <CardHint>
-            自动检查与自动下载是只读动作（查一次 GitHub、放一个文件），默认开；
-            自动安装会覆盖程序、结束正在跑的进程，默认关 —— 打不开的话它就只下不装，
-            安装那一下永远由你点。
+            自动检查、自动下载、自动安装三项默认全开：发现新版本即下载，下好即安装并重启。
+            安装会覆盖程序、结束正在跑的进程；不想让它自动装的话，关掉上面的开关即可
+            （那就只下不装，安装那一下由你点）。
           </CardHint>
         </CardContent>
       </Section>

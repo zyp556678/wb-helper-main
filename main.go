@@ -294,12 +294,20 @@ func runServe(args []string) {
 	// 用 cfg.UpdateClient()：显式配了 `-proxy` 就用它，否则回落到环境变量代理。
 	// 上游对话流量刻意不读环境代理（出口 IP 影响风控），但查 GitHub 是公共服务访问，
 	// 用户开着系统代理时就该走 —— 否则表现是「检查更新一直超时」，看不出原因。
+	//
+	// 自身路径在**启动时**就记下来：dpkg / ditto 覆盖安装之后，运行时再调
+	// os.Executable() 可能拿到指向已删除旧 inode 的路径（形如 "... (deleted)"），
+	// exec 它会跑起旧版本 —— 那正是「装完还是老版本」这类问题的来源。
+	// 更新检查也用它判断安装形态（桌面版 / 命令行版），因此必须在 updater 之前取。
+	selfExe, _ := os.Executable()
 	updater := update.New(cfg, update.Options{
 		Current:     version,
 		Client:      cfg.UpdateClient(),
 		DownloadDir: filepath.Join(cfg.WorkDir, "updates"),
 		Logf:        log.Printf,
 		Events:      events,
+		ExePath:     selfExe,
+		Host:        os.Getenv(update.HostEnv),
 	})
 	updater.Start(ctx)
 
@@ -328,11 +336,6 @@ func runServe(args []string) {
 	srv.SetAccountMeta(accountmeta.New(filepath.Join(cfg.WorkDir, "wb-account-meta.json")))
 	srv.SetUpdateChecker(updater)
 	// 「安装更新 → 自我重启」的接线。
-	//
-	// 自身路径在**启动时**就记下来：dpkg / ditto 覆盖安装之后，运行时再调
-	// os.Executable() 可能拿到指向已删除旧 inode 的路径（形如 "... (deleted)"），
-	// exec 它会跑起旧版本 —— 那正是「装完还是老版本」这类问题的来源。
-	selfExe, _ := os.Executable()
 	restartCh := make(chan struct{}, 1)
 	srv.SetRestartFunc(func() {
 		select {

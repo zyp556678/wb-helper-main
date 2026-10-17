@@ -747,3 +747,21 @@ func TestDefaultDownloadMirrorPointsAtLiveHost(t *testing.T) {
 		t.Fatalf("默认加速前缀应是实测可用的 gh-proxy.org，得到 %q", DefaultDownloadMirror)
 	}
 }
+
+// 自动安装默认开启（用户要求：点一下更新就装完），但仍可显式关掉。
+func TestUpdateAutoInstallDefaultsOn(t *testing.T) {
+	c := &Config{}
+	if !c.UpdateAutoInstall() {
+		t.Fatal("未配置时自动安装应默认开启")
+	}
+	off := false
+	c.Update.AutoInstall = &off
+	if c.UpdateAutoInstall() {
+		t.Fatal("显式设为 false 时必须关闭")
+	}
+	on := true
+	c.Update.AutoInstall = &on
+	if !c.UpdateAutoInstall() {
+		t.Fatal("显式设为 true 时应开启")
+	}
+}

@@ -92,6 +92,11 @@ function main() {
     fail(`无法创建数据目录 ${dir}: ${err.message}`);
   }
 
+  // 声明安装形态：网关据此知道自己是 npm 装的，面板里只提示 `npm i -g` 升级，
+  // 不会去下载 Release 上的系统安装包（那会变成两份程序）。
+  // 见 internal/update/update.go 的 detectForm。
+  const env = { ...process.env, WB_GATEWAY_HOST: "npm" };
+
   if (autoOpen) {
     const port = portFromArgs(serveFlags) || 8317;
     // 网关启动时会先同步拉一次模型目录再监听端口，所以面板要等一会儿才可用。
@@ -101,7 +106,7 @@ function main() {
   }
 
   // stdio 继承：日志直接打到终端，Ctrl+C 也能传到子进程
-  const result = spawnSync(GATEWAY, args, { cwd: dir, stdio: "inherit" });
+  const result = spawnSync(GATEWAY, args, { cwd: dir, stdio: "inherit", env });
   if (result.error) fail(`启动失败: ${result.error.message}`);
   process.exit(result.status ?? 1);
 }

@@ -252,12 +252,16 @@ type UpdateSection struct {
 	// 真正破坏性的那一步（运行安装程序、覆盖已装好的程序并重启网关）**不在配置里**：
 	// 它必须由人在面板上点一下并确认，见 internal/update/install.go 的开头说明。
 	AutoDownload *bool `json:"auto_download"`
-	// AutoInstall 决定「安装包下好之后是否自动安装」。默认 **false**。
+	// AutoInstall 决定「安装包下好之后是否自动安装」。默认 **true**。
 	//
 	// 与 AutoDownload 的区别是本质的：下载只是往数据目录放一个文件，而安装会覆盖
-	// 已装好的程序、结束正在跑的进程、必要时提权，失败时可能留下一个既起不来也没有
-	// 回退版本的现场。所以默认关，由用户显式打开（面板上打开时会再确认一次）。
-	// 打开之后：下好 → 装 → 网关重启（Windows 上是退出，装完由向导拉起）。
+	// 已装好的程序、结束正在跑的进程、必要时提权。默认打开是因为这个产品的目标
+	// 用户就是「不想手动找安装包」——发现新版本、下载、安装、重启一条链路走完，
+	// 才符合「自动更新」的直觉。
+	//
+	// 仍然保留**显式关闭**的能力（面板开关 + config.json），因为失败时可能留下
+	// 一个既起不来也没有回退版本的现场：在意这一点的人必须能退回「只下不装」。
+	// 打开时：下好 → 装 → 网关重启（Windows 上是退出，装完由向导拉起）。
 	AutoInstall *bool `json:"auto_install"`
 	// DownloadMirror 是 Release 附件的**下载加速前缀**。默认 **开启**（DefaultDownloadMirror）。
 	//
@@ -722,12 +726,13 @@ func (c *Config) UpdateAutoDownload() bool {
 	return c.Update.AutoDownload == nil || *c.Update.AutoDownload
 }
 
-// UpdateAutoInstall 报告「安装包下好之后自动安装」是否开启（默认 **false**）。
+// UpdateAutoInstall 报告「安装包下好之后自动安装」是否开启（默认 **true**）。
 //
-// 默认关是这个功能的边界：下载只是放一个文件，安装会覆盖程序、结束进程、重启网关，
-// 失败时可能留下既起不来也没有回退版本的现场。
+// 默认开：目标用户要的就是「点一下更新就完事」。仍然可以显式关掉（只下不装）——
+// 安装会覆盖程序、结束进程、重启网关，失败时可能留下既起不来也没有回退版本的现场，
+// 在意这一点的部署需要能退回去。
 func (c *Config) UpdateAutoInstall() bool {
-	return c.Update.AutoInstall != nil && *c.Update.AutoInstall
+	return c.Update.AutoInstall == nil || *c.Update.AutoInstall
 }
 
 // DefaultDownloadMirror 是**默认启用**的下载加速前缀。
