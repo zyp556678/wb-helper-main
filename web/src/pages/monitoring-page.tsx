@@ -5,6 +5,7 @@ import {
   notifyError,
 } from "@/lib/notify";
 
+import { AccountAlertsCard } from "@/components/account-alerts-card";
 import { AccountStatusTable } from "@/components/account-status-table";
 import { MetricsSummary } from "@/components/metrics-summary";
 import { ModelStatsTable } from "@/components/model-stats-table";
@@ -147,6 +148,18 @@ export function MonitoringPage() {
           </div>
         </Card>
       ) : null}
+
+      {/* 运行状态（账号健康度与告警）放最上面：这一页的第一件事是回答
+          「现在有没有事要处理」，而不是先给一串计数（对照 v1.14.10）。 */}
+      <AccountAlertsCard
+        alerts={metrics?.alerts ?? []}
+        now={now}
+        nameOf={(id) => {
+          // 与下方账号表同一口径：昵称优先，没有才回退到凭据 ID。
+          const hit = accounts.find((a) => a.id === id);
+          return hit?.nickname || id;
+        }}
+      />
 
       <MetricsSummary summary={metrics?.summary ?? null} loading={firstLoad} />
 

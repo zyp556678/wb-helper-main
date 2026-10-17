@@ -22,6 +22,7 @@ import { AddAccountDialog } from "@/components/add-account-dialog";
 import { AccountSortToggle } from "@/components/account-sort-toggle";
 import { ApiKeyPanel } from "@/components/api-key-panel";
 import { ExportAccountsDialog } from "@/components/export-accounts-dialog";
+import { AccountAlertsCard } from "@/components/account-alerts-card";
 import { ExpiryReminderCard } from "@/components/expiry-reminder-card";
 import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
 import { LocalAppsCard, SwitchDialog } from "@/components/local-apps-card";
@@ -47,9 +48,15 @@ import {
   setAccountDisabled,
   setAccountPaused,
 } from "@/lib/api";
-import { nowSeconds, sortAccounts, toCreditPackageViews, type AccountSort } from "@/lib/format";
+import {
+  accountDisplayName,
+  sortAccounts,
+  toCreditPackageViews,
+  type AccountSort,
+} from "@/lib/format";
 import { creditResourceName } from "@/lib/credit-package-names";
 import { useSupportedTools } from "@/lib/supported-tools";
+import { useNowSeconds } from "@/lib/use-now-seconds";
 import { useVisibleInterval } from "@/lib/use-visible-interval";
 import type {
   Account,
@@ -99,7 +106,9 @@ export function AccountsPage({
   onNavigate,
 }: AccountsPageProps) {
   const { overview, accounts, loading, error, unauthorized, reload, refresh } = data;
-  const now = nowSeconds();
+  // 每秒跳动：告警卡与卡片上的「自 X 分钟前」都依赖它，
+  // 只在渲染时取一次会冻结到下一次 5 分钟刷新。
+  const now = useNowSeconds();
   // 模型限额提醒的保鲜：卡片上的倒计时靠本地时钟递减，但**新出现**的限流
   // 只能靠重新拉账号列表。按 wb-switch 的节奏 5 分钟静默刷新一次
   //（不翻 loading，不闪骨架屏；页面隐藏时由 useVisibleInterval 暂停）。
@@ -591,6 +600,19 @@ export function AccountsPage({
             </Button>
           </div>
         </Card>
+      ) : null}
+
+      {/* 账号健康告警：放在到期提醒之前 —— 失效/过期/用尽比「积分哪天到期」
+          更紧急，而且它不需要任何额外请求（overview 已带）。 */}
+      {accounts.length > 0 ? (
+        <AccountAlertsCard
+          alerts={overview?.alerts ?? []}
+          now={now}
+          nameOf={(id) => {
+            const hit = accounts.find((a) => a.id === id);
+            return hit ? accountDisplayName(hit) : id;
+          }}
+        />
       ) : null}
 
       {/*

@@ -23,12 +23,35 @@ export interface OverviewModels {
   source: string;
 }
 
+/** 一条账号健康告警（GET /panel/api/overview → alerts[]）。 */
+export interface AccountAlert {
+  account: string;
+  /** disabled / expired / exhausted / cooldown / paused。 */
+  state: string;
+  label: string;
+  severity: "urgent" | "important" | "warning" | "notice";
+  message: string;
+  /** 首次出现的 Unix 秒；0 表示未知。 */
+  since: number;
+}
+
+/** 告警汇总。 */
+export interface AlertSummary {
+  total: number;
+  /** 必须马上处理的条数（失效 / 过期 / 用尽）。 */
+  urgent: number;
+  affected_accounts: number;
+}
+
 export interface Overview {
   version: string;
   /** 网关已运行秒数。 */
   uptime_seconds: number;
   accounts: OverviewAccounts;
   models: OverviewModels;
+  /** 当前账号告警（按严重度排序）；旧后端可能不带。 */
+  alerts?: AccountAlert[];
+  alert_summary?: AlertSummary;
 }
 
 /** 站点：国内站 / 国际站。 */
@@ -529,6 +552,9 @@ export interface MetricsResponse {
   accounts: AccountMetric[];
   models: ModelMetric[];
   sticky: StickyInfo;
+  /** 账号告警（与账号页同一份台账）；旧后端可能不带。 */
+  alerts?: AccountAlert[];
+  alert_summary?: AlertSummary;
 }
 
 /** 可编辑配置块：冷却与熔断。 */

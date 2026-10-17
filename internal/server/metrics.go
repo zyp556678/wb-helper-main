@@ -75,6 +75,9 @@ func (s *Server) handlePanelMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// 模型统计：补上「当前可调度该模型的账号数」
 	models := s.metrics.Snapshot()
+	// 账号告警：与账号列表共用同一份台账，保证两处的「首次出现时间」一致。
+	alertRows := s.alertList(states, now)
+
 	modelRows := make([]map[string]any, 0, len(models))
 	for _, m := range models {
 		available := 0
@@ -118,6 +121,8 @@ func (s *Server) handlePanelMetrics(w http.ResponseWriter, r *http.Request) {
 			{"site": auth.SiteCN, "label": auth.SiteLabel(auth.SiteCN), "accounts": countSite(accounts, auth.SiteCN)},
 			{"site": auth.SiteINTL, "label": auth.SiteLabel(auth.SiteINTL), "accounts": countSite(accounts, auth.SiteINTL)},
 		},
+		"alerts":         alertRows,
+		"alert_summary":  summarizeAlerts(alertRows),
 		"last_scan_unix": s.pool.LastScan().Unix(),
 	})
 }

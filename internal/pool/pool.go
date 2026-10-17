@@ -795,12 +795,14 @@ func (p *Pool) Summary() Summary {
 	for _, a := range p.Snapshot() {
 		s.Total++
 		// 顺序即优先级：禁用 > 暂停 > 冷却 > 可用。四类互斥，和恒等于 Total。
+		// 熔断也算冷却：metrics 页与账号告警都用「冷却或熔断」这一口径，
+		// 只认 CooldownUntil 会让同一个号在摘要里显示「可用」、在告警里显示「冷却」。
 		switch {
 		case a.Disabled:
 			s.Disabled++
 		case a.Paused:
 			s.Paused++
-		case a.CooldownUntil > now.Unix():
+		case a.CooldownUntil > now.Unix() || a.BreakerUntil > now.Unix():
 			s.Cooldown++
 		default:
 			s.Active++

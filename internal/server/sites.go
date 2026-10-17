@@ -167,7 +167,7 @@ func (s *Server) handlePanelSites(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case a.Disabled:
 			agg.stat.Disabled++
-		case a.CooldownUntil > now:
+		case a.CooldownUntil > now || a.BreakerUntil > now:
 			agg.stat.Cooldown++
 		default:
 			agg.stat.Active++

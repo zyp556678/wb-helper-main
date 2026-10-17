@@ -68,6 +68,9 @@ type Server struct {
 	// WorkBuddy 客户端直连官方，它的 429 不经过网关，只能从客户端日志还原。
 	// 可选增强：nil 时只显示网关自己观测到的冷却。
 	clientLimits *clientlimits.Scanner
+	// alerts 记录账号告警的首次出现时刻（见 alerts.go）。
+	// 纯进程内台账：告警是可再生的展示信息，不落盘。
+	alerts *alertTracker
 	// accountMeta 是账号备注与显示字段（internal/accountmeta）。
 	// 可选增强：nil 时按「全员无备注、昵称显示」处理。
 	accountMeta *accountmeta.Store
@@ -120,6 +123,7 @@ func New(cfg *config.Config, p *pool.Pool, client *upstream.Client, cat *catalog
 		// 签到状态缓存：按账号 ID 存「今日是否已签到」，并落盘到工作目录
 		//（否则每次网关重启后第一次开账号页，都要对每个国内站账号各打一次上游）。
 		checkinCache: newCheckinStatusCache(),
+		alerts:       newAlertTracker(),
 		panelFS:      panelFS,
 		cfgWatch:     config.NewWatch(),
 	}
@@ -257,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	// ---- 面板：静态资源 + API ----
 	mux.HandleFunc("/panel/api/overview", s.withPanelAuth(s.handlePanelOverview))
 	mux.HandleFunc("/panel/api/accounts", s.withPanelAuth(s.handlePanelAccounts))
+	mux.HandleFunc("/panel/api/alerts", s.withPanelAuth(s.handlePanelAlerts))
 
 	// ---- 面板：登录（浏览器内 OAuth）----
 	mux.HandleFunc("/panel/api/login/sites", s.withPanelAuth(s.handleLoginSites))
@@ -811,7 +816,8 @@ func (s *Server) handlePanelOverview(w http.ResponseWriter, r *http.Request) {
 	//
 	// 只在这两个条件**同时**成立时才 503：账号数不为 0 说明加载出了东西，
 	// 个别文件读失败不该把整个面板打成不可用（那种情况在账号列表里逐个可见）。
-	if sum := s.pool.Summary(); sum.Total == 0 {
+	summary := s.pool.Summary()
+	if summary.Total == 0 {
 		if msg := s.pool.LoadError(); msg != "" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"error": map[string]any{
@@ -824,14 +830,19 @@ func (s *Server) handlePanelOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	source, _ := s.cat.Source()
+	alerts := s.AlertList()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":        Version,
 		"uptime_seconds": int64(time.Since(s.start).Seconds()),
-		"accounts":       s.pool.Summary(),
+		"accounts":       summary,
 		"models": map[string]any{
 			"count":  len(s.cat.Merged()),
 			"source": source,
 		},
+		// 运行状态（账号健康度 + 告警）放在顶层：面板首屏就要回答
+		// 「现在有没有事要处理」，而不是让它埋在某个子页里（对照 v1.14.10）。
+		"alerts":        alerts,
+		"alert_summary": summarizeAlerts(alerts),
 	})
 }
 
