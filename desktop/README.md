@@ -118,6 +118,26 @@ productName），只靠「exe 同目录 / 上一级」这类相对路径永远�
 `--config` 对数组是**替换**而非合并，这条覆盖才真正生效）。`prepare-resources.mjs`
 也据此按 `rustc -vV` 的 host 分叉：gnu 缺 DLL 硬失败，msvc 直接跳过。
 
+## Windows 安装包：本仓库自带一份 NSIS 模板
+
+`src-tauri/nsis/installer.nsi` 是 Tauri 模板的副本，`tauri.conf.json` 用
+`bundle.windows.nsis.template` 指过去。抄一份的原因是要加一处守卫：**注册表里留着
+旧安装的记录、文件却已经被删掉**时（手工删了目录、或卸载/更新中途被掐断），上游
+模板只看注册表就判定「已安装」，摆出「安装前卸载 / 请勿卸载」这页选择题 —— 而第一条
+必然失败，只弹一句「无法卸载！」再退回本页，用户多半不知道改选第二项就能继续。
+
+守卫在 `PageReinstall` 里：记录给了安装位置、而该位置下主程序已不在 → 删掉残键、
+跳过本页按全新安装继续；主程序还在的旧安装一律不碰。网关侧还有另一半
+（`internal/update/uninstall_entry.go`）：面板点的「安装并重启」会在拉起向导前先清
+同样的残键，于是向导根本不会摆出那页。
+
+**同步规矩**：模板与 `@tauri-apps/cli` 必须同版本 —— 前者抄自后者的
+`crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi`，所以 `package.json`
+里把它钉死了（不用 `^2`）。升级 CLI 时按 `nsis/installer.nsi` 文件头的四步走：取回
+新模板、合并上游改动、两个 package 文件一起改版本、最后触发一次
+`workflow_dispatch` 的 windows 桌面包构建 —— 模板语法错误只有 makensis 能发现，
+CI 是唯一会编译它的地方。
+
 ## 运行期布局
 
 安装后（Windows，每用户安装）：

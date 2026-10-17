@@ -46,7 +46,8 @@
         ],
         "displayLanguageSelector": true,
         "installMode": "currentUser",
-        "installerHooks": "./windows/hooks.nsh"
+        "installerHooks": "./windows/hooks.nsh",
+        "template": "./nsis/installer.nsi"
       }
     }
   }
