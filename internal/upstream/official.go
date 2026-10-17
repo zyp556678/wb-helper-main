@@ -28,14 +28,31 @@ import (
 // ——按小时桶、按我们解析到的 token。这份是**上游计费口径**的原始请求行，
 // 两者对照才能发现漏记、重复计、token 解析偏差。面板上会标成「官方口径」。
 //
-// 分页取舍：单页上限 3000 条，我们只取首页。面板要的是近期汇总与明细，
-// 3000 条足够覆盖；参考实现会连续翻页最多 100 轮拉全量，那是给离线导出用的，
-// 让 UI 触发会打十几轮上游，代价与收益不成比例。
+// 分页取舍：单页上限 3000 条，且**超过时上游保留区间内最早的一批**
+// （连同 `total` 一起被截断）。因此「只取首页」拿到的是窗口里最老的 3000 条，
+// 最新数据永远进不来 —— 表现为「今日消耗恒为 0，而 7 天/本月有数」。
+// 这里改成与 wb-switch 相同的**滑动窗口**扫描：
+//
+//	取满一页 → 把 startTime 推进到本轮最新一条的时间 → 再取 → 直到某轮不满一页
+//
+// 相邻两轮边界上必然重复，靠 (requestId, requestTime) 去重。
+// 全部轮次都写进同一个 ctx 超时预算：面板每刷新一次都要跑完整轮，不能让
+// 某个账号的翻页把整页拖死。
 
 const officialUsagePath = "/billing/meter/get-user-request-usage"
 
 // officialUsagePageSize 单页条数（上游上限 3000）。
-const officialUsagePageSize = 3000
+//
+// 用变量而不是常量：滑动扫描的测试要把它压小才能在一屏数据里模拟「一页装不下」。
+const officialUsagePageSizeDefault = 3000
+
+var officialUsagePageSize = officialUsagePageSizeDefault
+
+// officialUsageMaxRounds 是滑动扫描的轮数上限。
+//
+// 每轮最多 3000 条，100 轮足以覆盖单账号单窗口的任何真实量级，同时兜住
+// 「服务端异常返回同一页」的死循环。与 wb-switch 的 OFFICIAL_USAGE_MAX_ROUNDS 同值。
+const officialUsageMaxRounds = 100
 
 // officialUsageMaxRows 面板展示用的明细条数上限（**每个账号**分别计）。
 //
@@ -106,61 +123,24 @@ func (c *Client) OfficialUsage(ctx context.Context, cred *CredentialView, p *Pro
 		days = 7
 	}
 	now := time.Now()
-	reqBody := map[string]any{
-		"startTime": now.AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00",
-		"endTime":   now.Format("2006-01-02") + " 23:59:59",
-		"pageNum":   1,
-		"pageSize":  officialUsagePageSize,
-	}
-	raw, err := json.Marshal(reqBody)
+	rangeStart := now.AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
+	endTime := now.Format("2006-01-02") + " 23:59:59"
+
+	rows, reportedTotal, truncated, err := c.sweepOfficialUsage(ctx, cred, p, rangeStart, endTime)
 	if err != nil {
 		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Origin+officialUsagePath, bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	webHeaders(cred, p, "web")(req)
-
-	resp, err := c.Control.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-
-	var env struct {
-		Code int             `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, fmt.Errorf("解析官方用量响应失败 (HTTP %d): %s", resp.StatusCode, truncate(string(body), 200))
-	}
-	if env.Code != 0 {
-		return nil, fmt.Errorf("官方用量业务错误 code=%d msg=%s", env.Code, env.Msg)
-	}
-
-	// data 是一层分页对象：{total, data:[rows], ...}
-	var page struct {
-		Total int64             `json:"total"`
-		Rows  []json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(env.Data, &page); err != nil {
-		return nil, fmt.Errorf("解析官方用量分页失败: %w", err)
 	}
 
 	sum := &OfficialUsageSummary{
 		FetchedAt: now.Unix(),
-		Total:     page.Total,
-		Fetched:   int64(len(page.Rows)),
+		Total:     reportedTotal,
+		Fetched:   int64(len(rows)),
 		Days:      []OfficialUsageDay{},
 		Models:    []OfficialUsageModel{},
 		Clients:   []OfficialUsageClient{},
 		Rows:      []OfficialUsageRow{},
+		Truncated: truncated,
 	}
-	sum.Truncated = int64(len(page.Rows)) >= officialUsagePageSize
 
 	dayAgg := map[string]*OfficialUsageDay{}
 	// dayModelAgg 是「天 × 模型」的交叉聚合，用来给每天挂上模型构成。
@@ -172,17 +152,7 @@ func (c *Client) OfficialUsage(ctx context.Context, cred *CredentialView, p *Pro
 	weekStart := now.AddDate(0, 0, -6).Format("2006-01-02")
 	monthStart := now.Format("2006-01") + "-01"
 
-	for _, rawRow := range page.Rows {
-		var row struct {
-			RequestTime string  `json:"requestTime"`
-			Model       string  `json:"model"`
-			Credit      float64 `json:"credit"`
-			Client      string  `json:"client"`
-			RequestID   string  `json:"requestId"`
-		}
-		if err := json.Unmarshal(rawRow, &row); err != nil {
-			continue
-		}
+	for _, row := range rows {
 		// requestTime 形如 "2026-09-24 19:47:00"，按空格切出日期部分。
 		date := row.RequestTime
 		if i := strings.IndexByte(date, ' '); i > 0 {
@@ -274,6 +244,171 @@ func (c *Client) OfficialUsage(ctx context.Context, cred *CredentialView, p *Pro
 	sort.Slice(sum.Rows, func(i, j int) bool { return sum.Rows[i].RequestTime > sum.Rows[j].RequestTime })
 
 	return sum, nil
+}
+
+// officialUsageRow 是上游返回的一条请求记录（内部形态，JSON 键是上游的驼峰）。
+type officialUsageRow struct {
+	RequestTime string  `json:"requestTime"`
+	Model       string  `json:"model"`
+	Credit      float64 `json:"credit"`
+	Client      string  `json:"client"`
+	RequestID   string  `json:"requestId"`
+}
+
+// sweepOfficialUsage 用滑动窗口把窗口内的全部记录扫回来。
+//
+// 上游限制：单次最多返回 officialUsagePageSize 条，**超出时保留区间内最早的一批**，
+// 并且 `total` 也被截断成同一数字。所以「取一页就停」拿到的是最老的 3000 条 ——
+// 近期数据反而取不到（「今日消耗恒为 0」就是这么来的）。
+//
+// 修法与 wb-switch 一致：取满一页就把 startTime 推进到本轮**最新一条**的时间，
+// 再取下一页。相邻两轮在边界时间上必然重复，按 (requestId, requestTime) 去重。
+// 某轮不满一页即说明取完；若本轮最新时间没有前进（服务端异常返回同一页），
+// 也立即停止，避免死循环。
+//
+// 返回的 truncated 表示是否因轮数上限而提前结束 —— 那种情况下的合计不完整，
+// 上层要如实标注，而不是当成精确值。
+func (c *Client) sweepOfficialUsage(ctx context.Context, cred *CredentialView, p *Profile,
+	rangeStart, endTime string) ([]officialUsageRow, int64, bool, error) {
+
+	var (
+		out        []officialUsageRow
+		seen       = make(map[string]bool)
+		startTime  = rangeStart
+		reported   int64
+		prevNewest string
+	)
+
+	for round := 0; round < officialUsageMaxRounds; round++ {
+		page, total, err := c.fetchOfficialUsagePage(ctx, cred, p, startTime, endTime)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		// total 是上游自己报的条数；取各轮最大值（每轮都可能被截断成 3000）。
+		if total > reported {
+			reported = total
+		}
+		if len(page) < officialUsagePageSize {
+			appendUniqueRows(&out, seen, page, rangeStart, endTime)
+			return out, reported, false, nil
+		}
+		appendUniqueRows(&out, seen, page, rangeStart, endTime)
+
+		newest := newestRequestTime(page)
+		if newest == "" || newest <= prevNewest {
+			// 起点推不动：要么服务端在异常返同一页，要么时间格式不认识。
+			// 保留已取到的部分并标注不完整，比无限重试或直接报错更有用。
+			return out, reported, true, nil
+		}
+		prevNewest = newest
+		// 起点用**边界那条本身**（不是 +1 秒）：同秒可能有多条，跳过会漏。
+		// 重复由 seen 去掉。
+		startTime = newest
+	}
+	return out, reported, true, nil
+}
+
+// appendUniqueRows 把一轮结果按 (requestId, requestTime) 去重后并入 out。
+//
+// 同时按窗口两端过滤：滑动窗口的终点是先取最新一批，理论上都在窗口内，
+// 但上游对边界时间戳的解释不完全一致，超出的一律丢弃更稳妥。
+func appendUniqueRows(out *[]officialUsageRow, seen map[string]bool, rows []officialUsageRow,
+	rangeStart, endTime string) {
+	startDate := rangeStart
+	if i := strings.IndexByte(startDate, ' '); i > 0 {
+		startDate = startDate[:i]
+	}
+	endDate := endTime
+	if i := strings.IndexByte(endDate, ' '); i > 0 {
+		endDate = endDate[:i]
+	}
+	for _, row := range rows {
+		date := row.RequestTime
+		if i := strings.IndexByte(date, ' '); i > 0 {
+			date = date[:i]
+		}
+		if date < startDate || date > endDate {
+			continue
+		}
+		key := row.RequestID + "\x00" + row.RequestTime
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		*out = append(*out, row)
+	}
+}
+
+// newestRequestTime 返回一轮里最晚的 requestTime（字符串可直接比较，
+// 上游格式固定为 "2006-01-02 15:04:05"）。空的 time 字段会被忽略。
+func newestRequestTime(rows []officialUsageRow) string {
+	newest := ""
+	for _, row := range rows {
+		if row.RequestTime != "" && row.RequestTime > newest {
+			newest = row.RequestTime
+		}
+	}
+	return newest
+}
+
+// fetchOfficialUsagePage 取一页官方用量，返回解析后的行与上游自报的 total。
+func (c *Client) fetchOfficialUsagePage(ctx context.Context, cred *CredentialView, p *Profile,
+	startTime, endTime string) ([]officialUsageRow, int64, error) {
+
+	reqBody := map[string]any{
+		"startTime": startTime,
+		"endTime":   endTime,
+		"pageNum":   1,
+		"pageSize":  officialUsagePageSize,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Origin+officialUsagePath, bytes.NewReader(raw))
+	if err != nil {
+		return nil, 0, err
+	}
+	webHeaders(cred, p, "web")(req)
+
+	resp, err := c.Control.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+
+	var env struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, 0, fmt.Errorf("解析官方用量响应失败 (HTTP %d): %s", resp.StatusCode, truncate(string(body), 200))
+	}
+	if env.Code != 0 {
+		return nil, 0, fmt.Errorf("官方用量业务错误 code=%d msg=%s", env.Code, env.Msg)
+	}
+
+	// data 是一层分页对象：{total, data:[rows], ...}
+	var page struct {
+		Total int64             `json:"total"`
+		Rows  []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(env.Data, &page); err != nil {
+		return nil, 0, fmt.Errorf("解析官方用量分页失败: %w", err)
+	}
+
+	rows := make([]officialUsageRow, 0, len(page.Rows))
+	for _, rawRow := range page.Rows {
+		var row officialUsageRow
+		if err := json.Unmarshal(rawRow, &row); err != nil {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	return rows, page.Total, nil
 }
 
 // sortModelsByCredit 按消耗降序排列模型（同额时按请求数、再按名字，保证顺序稳定）。

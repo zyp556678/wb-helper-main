@@ -1754,6 +1754,7 @@ function CreditDetail({
               <span>
                 最多展示每账号最近 {official?.detail_limit_per_account ?? 0} 条请求明细；合计使用官方返回的全部{" "}
                 {formatCount(reportedTotal)} 条请求。
+                有账号的官方明细未能完整取回（分页扫描达到上限或起点无法推进），合计可能偏小。
               </span>
             </div>
           ) : null}

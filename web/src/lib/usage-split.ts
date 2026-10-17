@@ -35,7 +35,7 @@ export type UsageSplitState =
   | "no-official"
   /** 官方账本记录数少于反代计数，减不出正数（账本延迟或窗口错位）。 */
   | "ledger-below"
-  /** 官方命中上游分页上限，账本本身不完整，差值不可信。 */
+  /** 官方账本未取全（滑动扫描达到轮数上限或起点推不动），差值不可信。 */
   | "truncated";
 
 export interface UsageSplit {
@@ -137,7 +137,7 @@ export function splitUsage(
     return {
       ...partial,
       state: "truncated",
-      reason: "官方账本命中上游分页上限，本次取到的明细不完整",
+      reason: "官方账本未能完整取回（分页扫描达到上限），本次合计数偏小",
     };
   }
 
