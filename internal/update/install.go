@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"workbuddy-gateway/internal/eventlog"
 )
 
 // 本文件实现「把下载好的安装包装到本机，并让网关跑上新版本」。
@@ -75,6 +77,13 @@ type InstallResult struct {
 	Output string `json:"output,omitempty"`
 }
 
+// staleEntryHint 是「向导报了无法卸载」时用户唯一要记住的一件事。
+//
+// 单独拎出来是因为它同时出现在两处文案里（确认框与安装结果），而这句话是用户
+// 被卡住时的唯一出路：向导只看注册表就判定「已安装」，残键会让「安装前卸载」
+// 必然失败，但换一个单选项就能继续。
+const staleEntryHint = "（向导若报「无法卸载！」，说明旧安装的记录已经失效：改选「请勿卸载」继续。）"
+
 // assetNamePattern 限制安装包文件名：只允许保守字符集。
 //
 // 文件名的来源是 Release 资产的 URL（不是客户端传参），但这层校验仍然要有 ——
@@ -117,7 +126,8 @@ func planFor(goos, path string) InstallPlan {
 			Restart:   false,
 			Note: "会打开安装向导，网关随即退出以让出 bin\\*.exe 的文件锁 —— " +
 				"旧的卸载器删不掉被占用的文件，会直接报「无法卸载！」并中止安装。" +
-				"装完请在向导最后一页确认「运行」；中途取消的话网关会停着，需要手动启动一次。",
+				"装完请在向导最后一页确认「运行」；中途取消的话网关会停着，需要手动启动一次。" +
+				staleEntryHint,
 		}
 	default:
 		return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
@@ -281,10 +291,19 @@ func (c *Checker) installDarwin(ctx context.Context, path string) (InstallResult
 // `bin\wb-local-agent.exe`，于是 Tauri 的 NSIS 模板直接弹「无法卸载！」并中止 ——
 // 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚。
 //
-// 两道防线各管一段：新版安装包与卸载器里的钩子（desktop/src-tauri/windows/hooks.nsh）
+// 三道防线各管一段：新版安装包与卸载器里的钩子（desktop/src-tauri/windows/hooks.nsh）
 // 负责「以后的升级」；这里的退出负责「从任意旧版本升上来」—— 旧版本的卸载器里
-// 有没有那个钩子，我们无从判断。
+// 有没有那个钩子，我们无从判断；而 cleanStaleUninstallEntry 负责第三种现场：
+// **旧安装已经被删掉/卸载中断**，注册表却还留着记录 —— 那种情况下向导的
+// 「安装前卸载」必然失败，先把残键清掉，向导就不会再摆出那页选择题。
 func (c *Checker) installWindows(path string) (InstallResult, error) {
+	if removed, reason := cleanStaleUninstallEntry(regExec, c.logf); removed {
+		if c.events != nil {
+			c.events.Info(eventlog.ChannelSystem, "update_stale_uninstall_cleaned",
+				"清理了失效的旧卸载记录："+reason,
+				map[string]any{"reason": reason})
+		}
+	}
 	cmd := exec.Command(path)
 	if err := cmd.Start(); err != nil {
 		return InstallResult{}, fmt.Errorf("启动安装向导失败：%w", err)
@@ -294,7 +313,7 @@ func (c *Checker) installWindows(path string) (InstallResult, error) {
 	return InstallResult{
 		OK: true,
 		Detail: "安装向导已打开；网关随即退出以让出文件锁，" +
-			"装完请在向导最后一页确认「运行」（或从开始菜单重新启动）",
+			"装完请在向导最后一页确认「运行」（或从开始菜单重新启动）" + staleEntryHint,
 		Exit: true,
 	}, nil
 }

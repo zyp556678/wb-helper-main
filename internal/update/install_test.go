@@ -86,7 +86,10 @@ func TestPlanForPlatforms(t *testing.T) {
 	// Windows 上必须先退出让出文件锁：升级时安装程序会先跑**旧版本**的卸载器，
 	// 它删不掉还被占用的 bin\*.exe，会直接报「无法卸载！」并中止安装。
 	// 这条文案是用户点确认前唯一能看到的前因后果，不能省。
-	for _, want := range []string{"无法卸载", "退出"} {
+	//
+	// 「请勿卸载」那句是叠加的补救：旧安装已经被删掉/卸载中断时，残键会让向导的
+	// 「安装前卸载」必然失败，用户得知道换一个单选项就能继续（见 uninstall_entry.go）。
+	for _, want := range []string{"无法卸载", "退出", "请勿卸载"} {
 		if !strings.Contains(win.Note, want) {
 			t.Fatalf("windows 方案的说明缺少 %q：%q", want, win.Note)
 		}
