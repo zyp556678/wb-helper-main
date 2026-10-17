@@ -195,8 +195,11 @@ func (s *Scheduler) checkHourlyTasks(ctx context.Context, dayOpen bool) {
 	if cfg.CheckinEnabled() {
 		if slot, ok := dueCheckin(); ok && s.claim("checkin", slot) {
 			s.logf("[调度] 到达签到时点（%02d:00），开始签到", slotHour(slot))
-			if _, err := s.RunCheckinNow(ctx); err != nil {
-				s.logf("[调度] 签到任务失败: %v", err)
+			if err := s.runCheckinSlot(ctx); err != nil {
+				// 整轮没有任何成功（账号池为空 / 全部请求失败）时把槽位还回去，
+				// 下一个 tick 还能再试。否则一次启动期的失败会让当天彻底不再签到。
+				s.logf("[调度] 签到任务失败: %v（将在下一分钟重试）", err)
+				s.release("checkin", slot)
 			}
 		}
 	}
@@ -388,6 +391,22 @@ func (s *Scheduler) claim(task, stamp string) bool {
 	return true
 }
 
+// release 撤销一次 claim（任务整轮失败时调用）。
+//
+// 为什么必须有它：claim 在任务**开始前**占位，用来挡住同一槽位的重复触发。
+// 但占位不等于成功 —— 启动瞬间令牌还没就绪、上游抖动、账号池暂时为空，
+// 都会让这一轮什么都不做；若照样占着槽位，当天后续每小时都不会再试，
+// 用户看到的就是「自动签到完全没签」，而且日志里只有一条失败。
+//
+// 只在该槽位仍是自己占的那个时才撤销：并发下另一个槽位已经占上时不能误删。
+func (s *Scheduler) release(task, stamp string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastRun[task] == stamp {
+		delete(s.lastRun, task)
+	}
+}
+
 // LastRun 返回任务最近一次执行的小时标记（面板展示用）。
 func (s *Scheduler) LastRun(task string) string {
 	s.mu.Lock()
@@ -473,6 +492,31 @@ func (s *Scheduler) RunCheckinNow(ctx context.Context) (string, error) {
 	detail := sum.Detail()
 	s.logf("[签到] %s", detail)
 	return detail, nil
+}
+
+// runCheckinSlot 是排程用的签到入口：只有当这一轮**一条都没成功**时才报错，
+// 让调用方把占位还回去、下一个 tick 重试。
+//
+// 语义分界：
+//   - 账号池为空 → 报错（多半是启动时凭据还没加载完，重试就能好）；
+//   - 全部账号失败 → 报错（大概率是上游/网络问题，重试是唯一出路）；
+//   - 有任何一条成功或「今天已签」→ 不报错（这一轮已经达成目的，不该重跑）。
+//
+// 单个账号失败不单独触发整轮重试：签到是逐账号的，一个号失败不该让其它
+// 已经签过的号在下一分钟被再打一遍（上游对密集操作敏感）。
+func (s *Scheduler) runCheckinSlot(ctx context.Context) error {
+	sum, err := s.RunCheckinNowSummary(ctx)
+	if err != nil {
+		return err
+	}
+	if sum.Success > 0 || sum.Already > 0 {
+		return nil
+	}
+	if sum.Failed > 0 {
+		return fmt.Errorf("本轮无任何账号签到成功（失败 %d）：%s", sum.Failed, sum.FirstError)
+	}
+	// 全是 skipped：没有国内站/非企业版账号可签，属于正常情况，不重试。
+	return nil
 }
 
 // RunCheckinNowSummary 与 RunCheckinNow 同一套逻辑，返回结构化计数。
