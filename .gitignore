@@ -12,6 +12,23 @@ wb-tasks-queue.json
 config.json
 logs/
 
+# ---- 通用密钥文件（对照 wb-gateway 98056c5 的发布前隐私加固）----
+# 上面的 workbuddy*.json 只覆盖本项目凭据；这些是「任何人都可能顺手放进
+# 工作目录」的通用密钥形态，一旦被 git add . 带进仓库就是不可撤销的泄露。
+.env
+.env.*
+!.env.example
+!.env.sample
+.netrc
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+.ssh/
+backups/
+
 # ---- 本机 AI 助手的工作数据（记忆、会话、临时文件）----
 .workbuddy-ai/
 .workbuddy/
@@ -51,6 +68,8 @@ installer/windows/setup*.sed
 # gen/ 是 tauri-build 生成的权限 schema；target 已在 .toolchain/cargo-target。
 desktop/src-tauri/bin/
 desktop/src-tauri/gen/
+# 默认 cargo target 目录（未 source desktop/scripts/env.sh 时会落在这里）。
+desktop/src-tauri/target/
 # WebView2Loader.dll 是微软的第三方二进制（不是本项目代码），不入库。
 # 它由 webview2-com-sys 的 build script 解出来，跑一次 cargo build 就有了；
 # prepare-resources.mjs 会自动从 .toolchain/cargo-target/ 下找回，新克隆无需手动处理。
