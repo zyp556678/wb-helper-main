@@ -70,6 +70,10 @@ type Account struct {
 	quotaRemaining float64
 	quotaPlan      string
 	quotaPaid      bool
+	// quotaUnlimited 表示上游明确声明不限量（企业版 limitNum < 0）。
+	// 与「剩余 0」是两回事：不限量账号的 Total/Remaining 都是 0，
+	// 只看数值会把它们判成额度耗尽（积分保底会直接拦下）。
+	quotaUnlimited bool
 	quotaUpdatedAt int64
 	// quotaExpiring 是 7 天内到期的余额子集，供选号层「快过期优先」使用。
 	// 只有 paid/free 明细端点才给得出（summary 没有到期字段），
@@ -118,8 +122,10 @@ type QuotaView struct {
 	Remaining float64 `json:"remaining"`
 	Plan      string  `json:"plan"`
 	Paid      bool    `json:"paid"`
-	Exhausted bool    `json:"exhausted"`
-	UpdatedAt int64   `json:"updated_at"`
+	// Unlimited 与 Exhausted 互斥：不限量账号剩余为 0 但不是「用尽」。
+	Unlimited bool  `json:"unlimited"`
+	Exhausted bool  `json:"exhausted"`
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 type AccountState struct {
@@ -229,7 +235,7 @@ func (p *Pool) AccountsBlockedByCreditFloor(paidSites map[string]bool, model str
 		if a.IsDisabled() || !paidSites[a.Site()] || !a.CreditsKnown() {
 			continue
 		}
-		if a.Credits() >= p.creditFloor {
+		if a.Credits() >= p.creditFloor || a.CreditsUnlimited() {
 			continue
 		}
 		// 已被名单排除的账号不该算进保底的账上：两个原因同时存在时，
@@ -487,6 +493,9 @@ func (a *Account) migrateRuntimeTo(dst *Account) {
 	dst.quotaRemaining = a.quotaRemaining
 	dst.quotaPlan = a.quotaPlan
 	dst.quotaPaid = a.quotaPaid
+	// 不限量标记必须一起迁：漏掉它，企业号在凭据文件变动重建后会变成
+	// 「已知余额 0」，被积分保底与告警同时当成额度耗尽。
+	dst.quotaUnlimited = a.quotaUnlimited
 	dst.quotaUpdatedAt = a.quotaUpdatedAt
 	dst.quotaExpiring = a.quotaExpiring
 	dst.quotaSoonestExpire = a.quotaSoonestExpire
@@ -746,7 +755,8 @@ func (p *Pool) StateOf(a *Account) AccountState {
 			Remaining: a.quotaRemaining,
 			Plan:      a.quotaPlan,
 			Paid:      a.quotaPaid,
-			Exhausted: a.quotaRemaining <= 0,
+			Unlimited: a.quotaUnlimited,
+			Exhausted: a.quotaRemaining <= 0 && !a.quotaUnlimited,
 			UpdatedAt: a.quotaUpdatedAt,
 		}
 	}
@@ -768,6 +778,12 @@ type Summary struct {
 	CreditsRemaining float64 `json:"credits_remaining"`
 	// QuotaKnown 是已查到额度的账号数（用于说明上者只覆盖了部分账号）。
 	QuotaKnown int `json:"quota_known"`
+	// Unlimited 是不限量账号数（企业版 limitNum<0）。
+	//
+	// 必须单独下发：这些账号剩余恒为 0，既不进 CreditsRemaining、也不是
+	// 「没有额度」。只给 quota_known 会让「全企业号部署」显示成
+	// 「剩余 0 积分 / 来自 N 个已查额度账号」，读起来就是额度耗尽。
+	Unlimited int `json:"unlimited"`
 	// InFlight 是全部账号当前在途请求数合计。
 	InFlight int64 `json:"in_flight"`
 }
@@ -791,7 +807,13 @@ func (p *Pool) Summary() Summary {
 		}
 		if a.Quota != nil {
 			s.QuotaKnown++
-			s.CreditsRemaining += a.Quota.Remaining
+			// 不限量账号不计入「剩余积分」合计：它的数值恒为 0，加进去只会让
+			// 总数看起来比实际少，且与「额度已用尽」的账号无法区分。
+			if a.Quota.Unlimited {
+				s.Unlimited++
+			} else {
+				s.CreditsRemaining += a.Quota.Remaining
+			}
 		}
 		s.InFlight += a.InFlight
 	}

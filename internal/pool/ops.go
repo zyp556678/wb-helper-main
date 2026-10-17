@@ -112,6 +112,7 @@ func (p *Pool) refreshQuota(ctx context.Context, acc *Account, allowDisabled boo
 	acc.quotaRemaining = q.Remaining
 	acc.quotaPlan = q.Plan
 	acc.quotaPaid = q.Paid
+	acc.quotaUnlimited = q.Unlimited
 	acc.quotaUpdatedAt = now
 	// 冷却已到期时顺手把记录清干净（含 coolKind，避免留下「有 kind 无截止」的
 	// 半截状态）。
@@ -124,7 +125,7 @@ func (p *Pool) refreshQuota(ctx context.Context, acc *Account, allowDisabled boo
 	// 恢复证据是**上游重置墙钟到期**，不是余额恢复。余额刷新是周期性动作，
 	// 在这里清它们会把限流冷却的实际寿命压到一个刷新周期内 ——
 	// 撞限号会被误判健康、重新选中、再撞 429。
-	if q.Remaining > 0 && !acc.cooldownUntil.IsZero() && now >= acc.cooldownUntil.Unix() {
+	if (q.Remaining > 0 || q.Unlimited) && !acc.cooldownUntil.IsZero() && now >= acc.cooldownUntil.Unix() {
 		acc.cooldownUntil = time.Time{}
 		acc.cooldownReason = ""
 		acc.coolKind = CoolNone

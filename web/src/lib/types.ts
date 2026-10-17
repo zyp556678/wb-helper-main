@@ -14,6 +14,8 @@ export interface OverviewAccounts {
   credits_remaining: number;
   /** 已查到额度的账号数。 */
   quota_known: number;
+  /** 不限量账号数（企业版）：它们剩余恒为 0，且不参与 credits_remaining 合计。 */
+  unlimited?: number;
 }
 
 export interface OverviewModels {
@@ -54,6 +56,8 @@ export interface AccountQuota {
   paid: boolean;
   /** 后端判定的额度耗尽标记。 */
   exhausted: boolean;
+  /** 上游明确声明「不限量」（企业版）：与 exhausted 互斥。 */
+  unlimited?: boolean;
   /** Unix 秒。 */
   updated_at: number;
 }
@@ -464,6 +468,8 @@ export interface MetricsSummary {
   credits_remaining: number;
   /** 已查到额度的账号数。 */
   quota_known: number;
+  /** 不限量账号数（企业版）：它们剩余恒为 0，且不参与 credits_remaining 合计。 */
+  unlimited?: number;
 }
 
 /** 单账号运行指标（GET /panel/api/metrics → accounts[]）。 */
@@ -489,6 +495,8 @@ export interface AccountMetric {
   breaker_until: number;
   /** 未查询过额度时为 null。 */
   credits_remaining: number | null;
+  /** 上游明确声明「不限量」（企业版）：此时 remaining 恒为 0，但不是「已用尽」。 */
+  credits_unlimited?: boolean;
   /** Unix 秒，0=从未使用。 */
   last_used_at: number;
   last_error: string;
@@ -1637,6 +1645,8 @@ export interface SiteAccountStat {
   in_flight: number;
   credits_remaining: number;
   quota_known: number;
+  /** 不限量账号数（企业版）：剩余恒为 0，且不参与 credits_remaining 合计。 */
+  unlimited?: number;
 }
 
 /** 该站点上的收费模型（已按倍率降序，最多 40 条）。 */

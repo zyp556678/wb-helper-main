@@ -52,6 +52,8 @@ export interface StatsBarProps {
   cooldown: number;
   creditsRemaining: number;
   quotaKnown: number;
+  /** 不限量账号数（企业版）：它们剩余恒为 0，且不参与合计。 */
+  unlimited?: number;
   loading: boolean;
 }
 
@@ -63,6 +65,7 @@ export function StatsBar({
   cooldown,
   creditsRemaining,
   quotaKnown,
+  unlimited = 0,
   loading,
 }: StatsBarProps) {
   if (loading) {
@@ -112,8 +115,16 @@ export function StatsBar({
         />
         <StatTile
           label="剩余积分"
-          value={formatCredits(creditsRemaining)}
-          hint={quotaKnown > 0 ? `来自 ${quotaKnown} 个已查额度的账号` : "尚未查询额度"}
+          value={quotaKnown > 0 && unlimited >= quotaKnown ? "不限" : formatCredits(creditsRemaining)}
+          hint={
+            quotaKnown === 0
+              ? "尚未查询额度"
+              : unlimited >= quotaKnown
+                ? `${quotaKnown} 个账号为不限量（企业版），没有「剩余」概念`
+                : unlimited > 0
+                  ? `来自 ${quotaKnown} 个已查额度的账号（其中 ${unlimited} 个不限量，未计入合计）`
+                  : `来自 ${quotaKnown} 个已查额度的账号`
+          }
           icon={Coins}
           tone="default"
           divided

@@ -178,7 +178,9 @@ export function AccountStatusTable({ accounts, now }: AccountStatusTableProps) {
               </span>
             </TableCell>
             <TableCell className="text-right">
-              {metric.credits_remaining === null ? (
+              {metric.credits_unlimited ? (
+                <span className="text-foreground">不限</span>
+              ) : metric.credits_remaining === null ? (
                 <span className="text-muted-foreground">未查询</span>
               ) : (
                 <span className="tabular-nums text-foreground">

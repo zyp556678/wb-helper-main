@@ -74,6 +74,9 @@ type siteAccountStat struct {
 	InFlight         int64   `json:"in_flight"`
 	CreditsRemaining float64 `json:"credits_remaining"`
 	QuotaKnown       int     `json:"quota_known"`
+	// Unlimited 是不限量账号数（企业版）。这些账号剩余恒为 0、不进 CreditsRemaining，
+	// 前端据此把「剩余积分」显示成「不限」而不是 0。
+	Unlimited int `json:"unlimited"`
 }
 
 // sitePaidModel 是收费模型在该站点上的展示项。
@@ -172,7 +175,11 @@ func (s *Server) handlePanelSites(w http.ResponseWriter, r *http.Request) {
 		agg.stat.InFlight += a.InFlight
 		if a.Quota != nil {
 			agg.stat.QuotaKnown++
-			agg.stat.CreditsRemaining += a.Quota.Remaining
+			if a.Quota.Unlimited {
+				agg.stat.Unlimited++
+			} else {
+				agg.stat.CreditsRemaining += a.Quota.Remaining
+			}
 		}
 		agg.ids = append(agg.ids, a.ID)
 	}

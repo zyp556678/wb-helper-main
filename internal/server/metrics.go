@@ -26,8 +26,10 @@ func (s *Server) handlePanelMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var credits any
+		unlimited := false
 		if st.Quota != nil {
 			credits = st.Quota.Remaining
+			unlimited = st.Quota.Unlimited
 		}
 
 		row := map[string]any{
@@ -46,6 +48,7 @@ func (s *Server) handlePanelMetrics(w http.ResponseWriter, r *http.Request) {
 			"success_count":     st.SuccessCount,
 			"failure_count":     st.FailureCount,
 			"credits_remaining": credits,
+			"credits_unlimited": unlimited,
 			"last_used_at":      st.LastUsedAt,
 			"last_error":        st.LastError,
 			"max_in_flight":     0,

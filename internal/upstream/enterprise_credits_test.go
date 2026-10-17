@@ -247,6 +247,11 @@ func TestEnterpriseQuotaStillCorrect(t *testing.T) {
 			if !q.Paid {
 				t.Errorf("企业版应标记为付费")
 			}
+			// 不限量与「剩余 0」必须可区分：上层据此跳过积分保底，
+			// 面板据此显示「不限」而不是「已用尽」。
+			if q.Unlimited != tc.unlimit {
+				t.Errorf("Unlimited=%v，期望 %v", q.Unlimited, tc.unlimit)
+			}
 		})
 	}
 }

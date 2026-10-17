@@ -192,11 +192,19 @@ function SiteCard({ site, now }: { site: SiteView; now: number }) {
           />
           <StatTile
             label="剩余积分"
-            value={formatCredits(accounts.credits_remaining)}
+            value={
+              accounts.quota_known > 0 && (accounts.unlimited ?? 0) >= accounts.quota_known
+                ? "不限"
+                : formatCredits(accounts.credits_remaining)
+            }
             hint={
-              accounts.quota_known > 0
-                ? `已查 ${accounts.quota_known}/${accounts.total} 个账号`
-                : "尚未查询额度"
+              accounts.quota_known === 0
+                ? "尚未查询额度"
+                : (accounts.unlimited ?? 0) >= accounts.quota_known
+                  ? `${accounts.quota_known} 个账号为不限量（企业版）`
+                  : (accounts.unlimited ?? 0) > 0
+                    ? `已查 ${accounts.quota_known}/${accounts.total} 个账号（其中 ${accounts.unlimited} 个不限量）`
+                    : `已查 ${accounts.quota_known}/${accounts.total} 个账号`
             }
             icon={Coins}
             tone={accounts.credits_remaining > 0 ? "success" : "default"}

@@ -166,3 +166,29 @@ func TestCreditFloorCountExcludesAlreadyUnavailable(t *testing.T) {
 		t.Fatalf("已禁用账号不该计入保底统计，实际 %d", n)
 	}
 }
+
+// 不限量账号（企业版 limitNum < 0）剩余恒为 0，但**不是**触底 ——
+// 保底必须放过它，否则企业号会被永久排除在收费模型之外。
+func TestCreditFloorSkipsUnlimitedAccount(t *testing.T) {
+	p := newTestPool(t, auth.SiteCN)
+	p.SetCreditFloor(100)
+	acc := p.accounts[0]
+	acc.mu.Lock()
+	acc.quotaKnown = true
+	acc.quotaRemaining = 0
+	acc.quotaUnlimited = true
+	acc.mu.Unlock()
+
+	paid := map[string]bool{auth.SiteCN: true}
+	if p.creditFloorBlocks(acc, PickOptions{Model: "m", PaidSitesForModel: paid}) {
+		t.Fatal("不限量账号不该被积分保底拦住")
+	}
+	if n := p.AccountsBlockedByCreditFloor(paid, "m"); n != 0 {
+		t.Fatalf("不限量账号不该计入「被保底拦下」，实际 %d", n)
+	}
+	// 额度视图同样要能分辨：不限量不是「用尽」。
+	view := p.StateOf(acc).Quota
+	if view == nil || view.Exhausted || !view.Unlimited {
+		t.Fatalf("额度视图错误：%+v", view)
+	}
+}

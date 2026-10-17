@@ -618,6 +618,7 @@ export function AccountsPage({
         cooldown={stats?.cooldown ?? 0}
         creditsRemaining={stats?.credits_remaining ?? 0}
         quotaKnown={stats?.quota_known ?? 0}
+        unlimited={stats?.unlimited ?? 0}
         loading={firstLoad}
       />
 

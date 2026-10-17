@@ -334,11 +334,13 @@ func (a *Account) ClearFailureState() {
 
 // ReviveIfCreditsRecovered 额度恢复时解冻：只清余额类硬冷却，不碰熔断。
 func (a *Account) ReviveIfCreditsRecovered(remaining float64) bool {
-	if remaining <= 0 {
-		return false
-	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// 不限量账号的剩余恒为 0，但它显然没有「额度耗尽」——
+	// 只看数值会让它在签到/探测成功后也永远解不了硬冷却，只能等次日墙钟。
+	if remaining <= 0 && !a.quotaUnlimited {
+		return false
+	}
 	if a.coolKind == CoolHard && time.Now().Before(a.cooldownUntil) {
 		a.cooldownUntil = time.Time{}
 		a.cooldownReason = ""

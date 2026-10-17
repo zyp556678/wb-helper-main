@@ -89,12 +89,13 @@ func (p *Pool) AcquireForProbe(ctx context.Context, site string) (*Account, func
 		eligible := !a.disabled && a.healthyLocked(now) && a.Cred.AccessToken != ""
 		known := a.quotaKnown
 		remaining := a.quotaRemaining
+		unlimited := a.quotaUnlimited
 		a.mu.Unlock()
 
 		if !eligible {
 			continue
 		}
-		if known && remaining <= 0 {
+		if known && remaining <= 0 && !unlimited {
 			continue // 额度为 0 的账号探测必然失败
 		}
 		score := remaining
@@ -161,12 +162,17 @@ func (a *Account) SetQuotaNoLock(q upstream.Quota) {
 	a.quotaRemaining = q.Remaining
 	a.quotaPlan = q.Plan
 	a.quotaPaid = q.Paid
+	a.quotaUnlimited = q.Unlimited
 	a.quotaUpdatedAt = time.Now().Unix()
 }
 
+// CreditsUnlimitedNoLock 报告账号是否不限量。调用方必须已持有该账号的锁。
+func (a *Account) CreditsUnlimitedNoLock() bool { return a.quotaUnlimited }
+
 // ReviveIfCreditsRecoveredNoLock 额度恢复解冻。调用方必须已持有该账号的锁。
 func (a *Account) ReviveIfCreditsRecoveredNoLock(remaining float64) bool {
-	if remaining <= 0 {
+	// 同 ReviveIfCreditsRecovered：不限量账号的 0 剩余不代表用尽。
+	if remaining <= 0 && !a.quotaUnlimited {
 		return false
 	}
 	if a.coolKind == CoolHard && time.Now().Before(a.cooldownUntil) {

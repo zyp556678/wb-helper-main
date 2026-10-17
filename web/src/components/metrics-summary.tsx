@@ -7,6 +7,32 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatCredits } from "@/lib/format";
 import type { MetricsSummary as MetricsSummaryData } from "@/lib/types";
 
+/**
+ * 汇总卡上的「剩余积分」：全部账号都是不限量时显示「不限」而不是 0。
+ *
+ * 不限量账号不计入 credits_remaining（它的数值恒为 0），若照常格式化，
+ * 全企业号部署会显示成「剩余 0 积分 / 来自 N 个已查额度账号」——
+ * 读起来就是额度耗尽，而这正是要避免的误读。
+ */
+export function creditsLabel(data: MetricsSummaryData | null): string {
+  const known = data?.quota_known ?? 0;
+  const unlimited = data?.unlimited ?? 0;
+  if (known > 0 && unlimited >= known) return "不限";
+  return formatCredits(data?.credits_remaining ?? 0);
+}
+
+/** 与上面配套的说明文案：混合池要点明「其中 N 个不限量，未计入合计」。 */
+export function creditsHint(data: MetricsSummaryData | null): string {
+  const known = data?.quota_known ?? 0;
+  const unlimited = data?.unlimited ?? 0;
+  if (known === 0) return "尚未查询额度";
+  if (unlimited >= known) return `${known} 个账号为不限量（企业版），没有「剩余」概念`;
+  if (unlimited > 0) {
+    return `来自 ${known} 个已查额度的账号（其中 ${unlimited} 个不限量，未计入合计）`;
+  }
+  return `来自 ${known} 个已查额度的账号`;
+}
+
 export interface MetricsSummaryProps {
   summary: MetricsSummaryData | null;
   loading: boolean;
@@ -78,10 +104,8 @@ export function MetricsSummary({ summary, loading }: MetricsSummaryProps) {
         />
         <StatTile
           label="剩余积分"
-          value={formatCredits(data?.credits_remaining ?? 0)}
-          hint={
-            data && data.quota_known > 0 ? `来自 ${data.quota_known} 个已查额度的账号` : "尚未查询额度"
-          }
+          value={creditsLabel(data)}
+          hint={creditsHint(data)}
           icon={Coins}
           tone="default"
           divided

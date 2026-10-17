@@ -244,6 +244,11 @@ func (p *Pool) creditFloorBlocks(a *Account, opts PickOptions) bool {
 	if !a.CreditsKnown() {
 		return false
 	}
+	// 不限量账号没有「余额」可言，保底对它们不适用 —— 否则剩下的 0 会被当成触底，
+	// 企业号会被永久排除在收费模型之外。
+	if a.CreditsUnlimited() {
+		return false
+	}
 	return a.Credits() < p.creditFloor
 }
 
@@ -381,7 +386,12 @@ func weightOf(a *Account, maxCredits float64, now time.Time, g GovParams) float6
 	w := 1.0
 
 	credits, expiring := a.CreditsDetailed()
-	if maxCredits > 0 {
+	// 不限量账号的剩余恒为 0，按比例算权重会让它在混合池里几乎永远排最后
+	// （约 1.0 对 11.0），刚修完的保底豁免等于白做。给它与「满额」同档的
+	// 余额权重：它确实「用不完」，这是比任何个人号都更充裕的状态。
+	if a.CreditsUnlimited() {
+		w += 10
+	} else if maxCredits > 0 {
 		w += credits / maxCredits * 10
 	}
 	// 快过期积分加成：官方活动赠送的积分按批过期，不用就作废
@@ -447,6 +457,16 @@ func (a *Account) CreditsKnown() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.quotaKnown
+}
+
+// CreditsUnlimited 报告上游是否已明确声明该账号不限量（企业版 limitNum < 0）。
+//
+// 与 CreditsKnown 一样是「余额数值之外」的信息：不限量账号的剩余也是 0，
+// 只看数值无法与「真的用完了」区分。
+func (a *Account) CreditsUnlimited() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.quotaUnlimited
 }
 
 // CreditsDetailed 返回 (剩余积分, 其中即将过期的子集)。

@@ -192,6 +192,8 @@ export const RUNTIME_STATE_LABEL: Record<"available" | "cooldown" | "disabled", 
 export interface QuotaView {
   /** 是否已查询到额度。 */
   known: boolean;
+  /** 上游明确声明不限量（企业版）：此时不计用尽、不画进度条。 */
+  unlimited?: boolean;
   plan: string | null;
   paid: boolean;
   /** 额度已耗尽（后端标记或剩余归零）。 */
@@ -231,12 +233,16 @@ export function toQuotaView(account: Account): QuotaView {
   const total = Number(quota.total) || 0;
   const used = Number(quota.used) || 0;
   const remaining = Number(quota.remaining) || 0;
-  const exhausted = Boolean(quota.exhausted) || remaining <= 0;
+  // 不限量账号的 remaining 恒为 0，但它不是「已用尽」——
+  // 让 exhausted 在这里就为 false，下游所有按 exhausted 上色的地方才一致。
+  const unlimited = Boolean(quota.unlimited);
+  const exhausted = !unlimited && (Boolean(quota.exhausted) || remaining <= 0);
   const ratio = total > 0 ? Math.min(1, Math.max(0, used / total)) : exhausted ? 1 : 0;
   const updatedAt = Number(quota.updated_at) || 0;
 
   return {
     known: true,
+    unlimited,
     plan: quota.plan || null,
     paid: Boolean(quota.paid),
     exhausted,
@@ -244,7 +250,7 @@ export function toQuotaView(account: Account): QuotaView {
     used,
     remaining,
     ratio,
-    label: `剩余 ${formatCredits(remaining)} / 共 ${formatCredits(total)}`,
+    label: unlimited ? "不限量" : `剩余 ${formatCredits(remaining)} / 共 ${formatCredits(total)}`,
     updatedAt,
     updatedLabel: formatUnixSeconds(updatedAt),
   };

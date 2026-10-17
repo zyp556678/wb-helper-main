@@ -943,10 +943,16 @@ export function AccountCard({
         <div className="flex items-baseline gap-x-2.5 gap-y-1">
           <Coins className="size-4 shrink-0 self-center text-muted-foreground" aria-hidden="true" />
           <strong className="font-display text-[26px] font-semibold leading-none tracking-[-0.025em] tabular-nums">
-            {quota.known ? formatCredits(quota.remaining) : "—"}
+            {!quota.known ? "—" : quota.unlimited ? "不限" : formatCredits(quota.remaining)}
           </strong>
           <span className="shrink-0 text-xs text-muted-foreground">
-            {hasPackages ? `${packages.length} 个积分包` : quota.known ? "剩余积分" : "未查询"}
+            {hasPackages
+              ? `${packages.length} 个积分包`
+              : quota.known
+                ? quota.unlimited
+                  ? "不限量"
+                  : "剩余积分"
+                : "未查询"}
           </span>
           <div className="ml-auto flex shrink-0 items-center gap-1.5 self-center text-xs text-muted-foreground">
             <Clock className="size-3.5 shrink-0" aria-hidden="true" />

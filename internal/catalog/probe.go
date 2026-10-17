@@ -95,7 +95,9 @@ func (c *Catalog) probeAccountModel(ctx context.Context, acc *pool.Account, site
 	if err != nil {
 		return Probe{}, fmt.Errorf("探测前查询余额失败: %w", err)
 	}
-	if before <= 0 {
+	// 不限量账号的剩余恒为 0（企业版 limitNum<0），但它并没有「耗尽」，
+	// 不该被这道余额闸门拦在探测之外。
+	if before <= 0 && !acc.CreditsUnlimitedNoLock() {
 		return Probe{}, fmt.Errorf("账号 %s 额度已耗尽，探测无意义（先等签到或补充额度）", id)
 	}
 

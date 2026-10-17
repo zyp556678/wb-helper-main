@@ -117,6 +117,12 @@ type Quota struct {
 	Remaining float64 `json:"remaining"`
 	Plan      string  `json:"plan"` // pro | Pro试用 | 免费
 	Paid      bool    `json:"paid"`
+	// Unlimited 表示上游明确声明「不限量」（企业版 limitNum < 0）。
+	//
+	// 必须与「剩余 0」区分开：不限量账号的 Total/Remaining 都是 0，如果只按
+	// Remaining 判断，它会被判成额度耗尽 —— 选号层的积分保底会把它拦下，
+	// 面板上也会显示成「已用尽」（对照上游 v1.14.3 与企业版积分分流）。
+	Unlimited bool `json:"unlimited,omitempty"`
 }
 
 type quotaPackage struct {
@@ -259,7 +265,10 @@ func (c *Client) enterpriseQuota(ctx context.Context, p *Profile, headers func(*
 	out.Plan = "企业版"
 	out.Paid = true
 	if usage.Unlimited {
+		// 「不限量」不是「剩余 0」：Remaining 留 0 但用 Unlimited 标记，
+		// 上层据此跳过积分保底、并在面板上显示「不限」而不是「已用尽」。
 		out.Plan = "企业版（不限量）"
+		out.Unlimited = true
 		return out, nil
 	}
 	out.Total = float64(usage.Limit)
