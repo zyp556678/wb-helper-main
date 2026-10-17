@@ -833,12 +833,17 @@ const HostEnv = hostEnv
 // 顺序：启动器声明 > 可执行文件路径 > 未知。
 // 路径规则只用于兜底（例如用户直接双击了压缩包里的二进制，没有启动器），
 // 因此只认两种安装器写死的目录名，不做模糊猜测 —— 猜错会让用户装错形态。
+//
+// 归一化用显式的 `\` → `/` 替换，而不是 filepath.ToSlash：后者在 Unix 上对
+// 反斜杠是空操作，于是同一份规则在 Linux/macOS 上判不出 Windows 安装目录
+// （测试也随宿主系统漂移 —— CI 六个平台的作业都跑在 Linux 上，一眼就能看出）。
+// 规则本身与宿主无关，归一化也必须与宿主无关。
 func detectForm(host, exePath string) string {
 	switch strings.ToLower(strings.TrimSpace(host)) {
 	case formDesktop, formCLI, formNPM:
 		return strings.ToLower(strings.TrimSpace(host))
 	}
-	p := strings.ToLower(filepath.ToSlash(exePath))
+	p := strings.ToLower(strings.ReplaceAll(exePath, `\`, "/"))
 	switch {
 	// 桌面版：Tauri 每用户安装的 bin/ 资源目录。
 	case strings.Contains(p, "/workbuddy gateway/bin/"):
