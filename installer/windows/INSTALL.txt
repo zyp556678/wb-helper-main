@@ -11,10 +11,14 @@ running a downloaded .exe is blocked), open a PowerShell window here and run:
 
 Useful switches:
 
-    -Port 9000            listen on another port
+    -Port 9000            listen on another port (all launchers use it)
     -ApiKey "your-key"    require this key for the panel and /v1 endpoints
     -AutoStart            also start the gateway hidden at logon
     -Launch               open the panel when installation finishes
+
+Port and API key are written to `launch.txt` in the install folder, which both the
+shortcut launcher and the logon task read -- so they cannot drift apart. Delete
+that file to fall back to port 8317 with no key.
 
 What gets installed
 -------------------
@@ -22,6 +26,8 @@ What gets installed
         workbuddy-gateway.exe   the gateway (admin panel is embedded in it)
         wb-local-agent.exe      optional: powers the "local client" panel page
         run.cmd                 launcher used by the shortcuts
+        launch-hidden.vbs       launcher used by the logon task
+        launch.txt              port + optional API key, read by both launchers
         uninstall.ps1           uninstaller
 
     %LOCALAPPDATA%\wb-gateway

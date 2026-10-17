@@ -57,9 +57,13 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 # ---------------------------------------------------------------------------
 # Shortcuts
 # ---------------------------------------------------------------------------
+# Must match install.ps1. The bare "WorkBuddy Gateway.lnk" belongs to the
+# *desktop* package (Tauri/NSIS) and is deliberately left alone here — deleting
+# it would remove the icon of a program that is still installed.
+$shortcutName = "WorkBuddy Gateway (command line).lnk"
 $links = @(
-    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\WorkBuddy Gateway.lnk"),
-    (Join-Path ([Environment]::GetFolderPath("Desktop")) "WorkBuddy Gateway.lnk")
+    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$shortcutName"),
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) $shortcutName)
 )
 foreach ($l in $links) {
     if (Test-Path $l) {

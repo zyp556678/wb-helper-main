@@ -10,12 +10,17 @@
 ' %LOCALAPPDATA%\wb-gateway\logs\gateway.log. Without that, a background gateway that
 ' fails to start would be completely undiagnosable.
 '
+' Port and API key come from launch.txt next to this file (written by install.ps1).
+' run.cmd reads the same file, so the shortcut and the logon task cannot disagree
+' about either value. A port argument is still accepted for older scheduled tasks
+' that were registered with the number baked in.
+'
 ' Usage: wscript.exe launch-hidden.vbs [port]
 
 Option Explicit
 
-Dim sh, fso, baseDir, exePath, dataDir, logDir, logFile, port, cmd, q
-Dim wmi, procs, already
+Dim sh, fso, baseDir, exePath, dataDir, logDir, logFile, port, apiKey, cmd, q
+Dim wmi, procs, already, launchFile, stream, line, eq, key, value
 
 Set sh = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -29,6 +34,30 @@ If Not fso.FileExists(exePath) Then
 End If
 
 port = "8317"
+apiKey = ""
+
+launchFile = fso.BuildPath(baseDir, "launch.txt")
+If fso.FileExists(launchFile) Then
+    On Error Resume Next
+    Set stream = fso.OpenTextFile(launchFile, 1, False)
+    If Err.Number = 0 Then
+        Do While Not stream.AtEndOfStream
+            line = Trim(stream.ReadLine)
+            eq = InStr(line, "=")
+            If eq > 1 Then
+                key = LCase(Trim(Left(line, eq - 1)))
+                value = Trim(Mid(line, eq + 1))
+                If key = "port" And Len(value) > 0 Then port = value
+                If key = "api_key" Then apiKey = value
+            End If
+        Loop
+        stream.Close
+    End If
+    On Error Goto 0
+End If
+
+' An explicit argument still wins: a scheduled task registered by an older
+' installer carries the port on its command line.
 If WScript.Arguments.Count > 0 Then
     If Len(Trim(WScript.Arguments(0))) > 0 Then port = Trim(WScript.Arguments(0))
 End If
@@ -58,8 +87,13 @@ logFile = fso.BuildPath(logDir, "gateway.log")
 ' string is error prone (a path with spaces plus a redirect plus a quote is four
 ' levels of quoting), and this form reads exactly like the final command line.
 q = Chr(34)
-cmd = "cmd /c " & q & q & exePath & q & " serve --port " & port & " --auth-dir " & q & dataDir & q & _
-      " >> " & q & logFile & q & " 2>&1" & q
+' Declare the install form so the updater does not replace this command-line
+' install with the desktop package (see internal/update/update.go detectForm).
+' The outer pair of quotes is stripped by `cmd /c`, leaving a plain
+' `set VAR=cli&& "exe" serve ...` command line.
+cmd = "cmd /c " & q & "set WB_GATEWAY_HOST=cli&& " & q & exePath & q & " serve --port " & port & " --auth-dir " & q & dataDir & q
+If Len(apiKey) > 0 Then cmd = cmd & " --api-key " & q & apiKey & q
+cmd = cmd & " >> " & q & logFile & q & " 2>&1" & q
 
 ' 0 = hidden window, False = do not wait
 sh.Run cmd, 0, False

@@ -14,11 +14,15 @@
 
 [CmdletBinding()]
 param(
-    # Port the gateway listens on. Only loopback is bound by the launcher.
+    # Port the gateway listens on. Written into launch.txt so **every** entry point
+    # (shortcut, logon task) uses the same value -- a port that only reaches the
+    # scheduled task makes the shortcut start a second instance on the default port
+    # and both fight over the same data directory.
     [int]$Port = 8317,
 
-    # Optional API key. Empty means the panel is reachable without credentials,
-    # which is fine because the launcher only binds 127.0.0.1.
+    # Optional API key. Written into launch.txt and passed as --api-key by every
+    # launcher. Empty means the panel is reachable without credentials, which is
+    # fine because the launchers only bind 127.0.0.1.
     [string]$ApiKey = "",
 
     # Register a scheduled task that starts the gateway hidden at logon.
@@ -103,6 +107,44 @@ foreach ($f in @("app.ico", "run.cmd", "launch-hidden.vbs", "uninstall.ps1", "IN
     $src = Join-Path $srcDir $f
     if (Test-Path $src) { Copy-Item -Force $src (Join-Path $InstallDir $f) }
 }
+# launch.txt is *generated* below, not copied: a stale file from a previous install
+# would silently keep the old port / API key.
+
+# ---------------------------------------------------------------------------
+# Launch settings (port + optional API key)
+# ---------------------------------------------------------------------------
+# Written to a file instead of being baked into the shortcut / scheduled task:
+# both launchers read it, so "start from the shortcut" and "start at logon" can
+# never disagree about the port or the key.
+#
+# Why a file and not an environment variable: the scheduled task, the shortcut and
+# a user's own `run.cmd` are three different launch contexts; only a file in the
+# install dir is visible to all of them.
+$launchFile = Join-Path $InstallDir "launch.txt"
+$launchLines = @("port=$Port")
+if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
+    $launchLines += "api_key=$ApiKey"
+}
+# No BOM: the .cmd launchers parse this with plain `for /f`, and a BOM would end up
+# glued to the first value. ASCII-only, so the ANSI/UTF-8 ambiguity does not matter.
+Set-Content -Path $launchFile -Value $launchLines -Encoding ASCII
+# The file holds a secret when -ApiKey was used: restrict it to the current user.
+try {
+    $acl = Get-Acl $launchFile
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+        "FullControl", "Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $launchFile -AclObject $acl
+} catch {
+    Write-Host "    note: could not restrict permissions on launch.txt ($_)"
+}
+if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+    Write-Host "    launch settings: port $Port, no API key (loopback only)"
+} else {
+    Write-Host "    launch settings: port $Port, API key set"
+}
 
 # Read the version from the binary itself so the uninstall entry can never drift
 # from the code (a hardcoded string here would rot on the first release).
@@ -118,8 +160,16 @@ Write-Host "    version $version"
 # ---------------------------------------------------------------------------
 # Shortcuts
 # ---------------------------------------------------------------------------
+# The shortcut name is deliberately **not** "WorkBuddy Gateway": the desktop
+# package (Tauri/NSIS) creates a shortcut with exactly that name, and both
+# installers would then overwrite each other's icon and delete it on uninstall
+# while the other program is still installed. Two installs, one shortcut slot.
+#
+# The desktop build keeps the plain name because it is the form published on the
+# Release page; this command-line form is the secondary one, so it gets a suffix.
 Write-Step "Creating shortcuts"
 $shell = New-Object -ComObject WScript.Shell
+$shortcutName = "WorkBuddy Gateway (command line).lnk"
 
 function New-Shortcut([string]$linkPath) {
     $dir = Split-Path -Parent $linkPath
@@ -128,14 +178,27 @@ function New-Shortcut([string]$linkPath) {
     $lnk.TargetPath = Join-Path $InstallDir "run.cmd"
     $lnk.WorkingDirectory = $DataDir
     $lnk.IconLocation = (Join-Path $InstallDir "app.ico") + ",0"
-    $lnk.Description = "WorkBuddy Gateway - local gateway and admin panel"
+    $lnk.Description = "WorkBuddy Gateway (command line form) - local gateway and admin panel"
     $lnk.Save()
 }
 
 $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-New-Shortcut (Join-Path $startMenu "WorkBuddy Gateway.lnk")
-New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "WorkBuddy Gateway.lnk")
-Write-Host "    start menu + desktop"
+$desktopDir = [Environment]::GetFolderPath("Desktop")
+
+# Older versions of this installer used the bare name. Remove that one first:
+# leaving it behind means the desktop package's shortcut keeps getting clobbered
+# on every upgrade of either form.
+$legacyName = "WorkBuddy Gateway.lnk"
+foreach ($dir in @($startMenu, $desktopDir)) {
+    $legacy = Join-Path $dir $legacyName
+    if (Test-Path $legacy) {
+        Remove-Item -Force $legacy -ErrorAction SilentlyContinue
+    }
+}
+
+New-Shortcut (Join-Path $startMenu $shortcutName)
+New-Shortcut (Join-Path $desktopDir $shortcutName)
+Write-Host "    start menu + desktop ($shortcutName)"
 
 # ---------------------------------------------------------------------------
 # Optional: start at logon
@@ -145,8 +208,11 @@ $taskPath = Join-Path $InstallDir "launch-hidden.vbs"
 
 if ($AutoStart) {
     Write-Step "Registering logon task '$taskName'"
+    # No port argument: launch-hidden.vbs reads launch.txt, exactly like run.cmd.
+    # Baking the port in here is what made "-Port 9000" half-effective (task on
+    # 9000, shortcut on 8317, two instances, one data directory).
     $action = New-ScheduledTaskAction -Execute "wscript.exe" `
-        -Argument ('"{0}" {1}' -f $taskPath, $Port)
+        -Argument ('"{0}"' -f $taskPath)
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries -StartWhenAvailable `

@@ -62,6 +62,146 @@ pub fn probe(port: u16) -> bool {
     }
 }
 
+/// 读取运行中网关的版本（`/healthz` 的 `version` 字段）。
+///
+/// 与 `probe` 分开：那个只看状态行、读 64 字节就够；这里要的是响应体内容，
+/// 因此读完整个响应（上限 8 KiB —— 真实响应只有几百字节，超出说明对面不是我们）。
+fn running_gateway_version(port: u16) -> Option<String> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(400)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let request = format!(
+        "GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+
+    let mut body = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                body.extend_from_slice(&buf[..n]);
+                if body.len() > 8192 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let text = String::from_utf8_lossy(&body);
+    let (_, payload) = text.split_once("\r\n\r\n")?;
+    let value: serde_json::Value = serde_json::from_str(payload.trim()).ok()?;
+    let version = value.get("version")?.as_str()?.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
+/// 本程序自带网关的版本（运行 `workbuddy-gateway version`，结果缓存）。
+///
+/// 不写死在壳里：版本号在打包时才确定，硬编码会在第一次升版本时漂移，
+/// 而这正是本函数要防的那类错误。
+fn bundled_gateway_version(bin: &Path) -> Option<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mut cmd = Command::new(bin);
+            cmd.arg("version")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .stdout(Stdio::piped());
+            configure_no_window(&mut cmd);
+            let out = cmd.output().ok()?;
+            parse_version_line(&String::from_utf8_lossy(&out.stdout))
+        })
+        .clone()
+}
+
+/// 从 `WorkBuddy Gateway v0.13.2` 这样的输出里取出 `0.13.2`。
+fn parse_version_line(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let rest = token.strip_prefix('v')?;
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            Some(rest.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// 端口上已有网关时，判断它是不是本程序自带的那一份。
+///
+/// 返回 `Some(说明)` 表示**不要复用**：版本对不上，或者干脆读不出身份。
+/// 返回 `None` 表示可以复用（包括无法判定、但两边都说不出话的情形 —— 那种情况
+/// 复用不会比拒绝更糟，而拒绝会让一个能用的应用打不开）。
+///
+/// 只在端口上那个**更旧**时才拦。更新的放行：面板是网关自己内嵌的，连上去看到的是
+/// 那一版的界面，功能上自洽；把它挡在门外反而会让「先升级了命令行版、桌面壳还是旧的」
+/// 这种正常情况打不开。
+///
+/// 为什么以版本号为判据而不是 PID / 路径：端口上那个进程可能是别的用户、别的安装
+/// 形态启动的，我们没有可靠的途径去问它的路径；而 `/healthz` 一直带着 `version`，
+/// 三个平台、所有历史版本都有这个字段。
+fn version_mismatch(port: u16, bin: Option<&Path>) -> Option<String> {
+    let running = running_gateway_version(port)?;
+    // 读不到自带版本（例如绿色版没把网关放在预期位置）时不拦：那时连「谁新谁旧」
+    // 都无从判断，硬拦只会把一个本来能用的组合挡在门外。
+    let bundled = bin.and_then(bundled_gateway_version)?;
+    if !version_is_older(&running, &bundled) {
+        return None;
+    }
+    Some(format!(
+        "端口 {port} 上已经有一个网关在运行，但它的版本是 v{running}，\n\
+         而本程序自带的是 v{bundled} —— 直接连接会让你继续用旧版本，所以这里停下来。\n\n\
+         请先退出那个网关再重新打开本程序：\n\
+         · 命令行版安装的：在「任务管理器」结束 workbuddy-gateway.exe，\n\
+         或运行 Stop-ScheduledTask -TaskName WorkBuddyGateway\n\
+         · 托盘里有旧的 WorkBuddy 图标：从它的菜单里选「退出」\n\n\
+         数据目录（Windows 是 %LOCALAPPDATA%\\wb-gateway，macOS / Linux 是 ~/.wb-gateway）\n\
+         不受影响，账号与配置都还在。"
+    ))
+}
+
+/// 判断版本 a 是否比 b 旧。
+///
+/// 只比较点分数字段，忽略 `-slice8` 之类的后缀：这里要回答的是「是不是装了个旧的」，
+/// 不是完整的 semver 排序。任何一边解析不出数字时返回 false（宁可放行）——
+/// 开发版（`dev`）连自己的版本号都说不清，拦下来只会让人无从处理。
+fn version_is_older(a: &str, b: &str) -> bool {
+    let (Some(va), Some(vb)) = (numeric_version(a), numeric_version(b)) else {
+        return false;
+    };
+    // 逐段比较，缺的段按 0 算：1.2 < 1.2.1。
+    let len = va.len().max(vb.len());
+    for i in 0..len {
+        let x = va.get(i).copied().unwrap_or(0);
+        let y = vb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// 把 `0.13.2` / `v0.13.2` / `0.13.2-slice8` 解析成数字段。
+fn numeric_version(v: &str) -> Option<Vec<u64>> {
+    let core = v.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next()?;
+    let mut out = Vec::new();
+    for part in core.split('.') {
+        out.push(part.parse::<u64>().ok()?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// 面板地址。
 /// 面板地址（不带密钥）。仅用于「不知道密钥」的场景。
 pub fn panel_url(port: u16) -> String {
@@ -234,6 +374,10 @@ fn spawn_gateway(bin: &Path, port: u16, api_key: &str) -> std::io::Result<Child>
         .arg(api_key)
         .current_dir(bin.parent().unwrap_or(Path::new(".")))
         .env("WB_GATEWAY_DATA_DIR", &dir)
+        // 声明「这次是桌面壳拉起的」。网关据此判断自己属于哪种安装形态，
+        // 更新时只挑桌面版安装包 —— 否则命令行版用户会被装成桌面版，
+        // 机器上出现两份安装、快捷方式互相覆盖。
+        .env("WB_GATEWAY_HOST", "desktop")
         // 声明「stdin 是壳给的管道」，让网关在管道关闭（=壳已消亡）时自行退出。
         //
         // 为什么需要这条：壳正常退出会走 RunEvent::Exit → backend::shutdown() 杀子进程，
@@ -357,10 +501,21 @@ fn with_host_marker(url: &str) -> String {
 /// 启动流程（在后台线程执行，不阻塞事件循环）：
 ///   已就绪 → 直接复用；否则拉起 → 轮询就绪 → 导航。
 pub fn boot(app: AppHandle, port: u16) {
+    let extra_dirs = resource_dirs(&app);
+    let bin = locate("workbuddy-gateway.exe", &extra_dirs)
+        .or_else(|| locate("workbuddy-gateway", &extra_dirs));
+
     if probe(port) {
         // 已经有网关在跑（用户先前用 CLI / 安装包启动过，或上一个壳没退干净）。
         // 直接复用而不是报"端口被占用"——后者会让用户面对一个打不开的应用。
         //
+        // 但**必须核对版本**：端口上那个可能根本不是本程序自带的这份（典型来源是
+        // 命令行安装包注册的登录计划任务，或另一个旧版本的桌面版）。不核对就导航，
+        // 用户看到的是「装完新版还是旧版本号」，而面板里的更新提示还在催他升级。
+        if let Some(mismatch) = version_mismatch(port, bin.as_deref()) {
+            set_error(&app, &mismatch);
+            return;
+        }
         // 复用时不生成密钥（那个进程用的不是我们生成的），只在**已有密钥文件**时
         // 注入一次：那是我们上次启动时配的，能命中就省掉手动输入，命中不了
         // 面板会自己弹出输入框，没有副作用。
@@ -369,10 +524,7 @@ pub fn boot(app: AppHandle, port: u16) {
         return;
     }
 
-    let extra_dirs = resource_dirs(&app);
-    let Some(bin) = locate("workbuddy-gateway.exe", &extra_dirs)
-        .or_else(|| locate("workbuddy-gateway", &extra_dirs))
-    else {
+    let Some(bin) = bin else {
         set_error(
             &app,
             "未找到 workbuddy-gateway 可执行文件。\n请把它与本程序放在同一目录，或使用完整安装包。",
@@ -470,7 +622,47 @@ pub fn data_dir_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::with_host_marker;
+    use super::{numeric_version, parse_version_line, version_is_older, with_host_marker};
+
+    /// 版本行解析：真实输出是 `WorkBuddy Gateway v0.13.2`。
+    ///
+    /// 解析失败会让「版本不一致」的检查静默退化（读不到就不拦），
+    /// 于是这个功能在第一次输出格式变化时悄悄失效 —— 所以锁住它。
+    #[test]
+    fn parses_version_line() {
+        assert_eq!(
+            parse_version_line("WorkBuddy Gateway v0.13.2\n").as_deref(),
+            Some("0.13.2")
+        );
+        assert_eq!(parse_version_line("v1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse_version_line("WorkBuddy Gateway dev"), None);
+        assert_eq!(parse_version_line(""), None);
+    }
+
+    /// 只在端口上那个更旧时才拦；更新的、说不清的都放行。
+    #[test]
+    fn compares_versions_for_reuse() {
+        assert!(version_is_older("0.9.3", "0.13.2"));
+        assert!(version_is_older("0.13.1", "0.13.2"));
+        assert!(version_is_older("1.2", "1.2.1"));
+        assert!(!version_is_older("0.13.2", "0.13.2"));
+        assert!(!version_is_older("0.13.2", "0.9.3"));
+        assert!(!version_is_older("1.2.1", "1.2"));
+        // 后缀不参与比较：0.9.0-slice8 与 0.9.0 视为同一版。
+        assert!(!version_is_older("0.9.0-slice8", "0.9.0"));
+        assert!(version_is_older("0.9.0-slice8", "0.9.1"));
+        // 解析不出数字时一律放行，避免把开发版挡在门外。
+        assert!(!version_is_older("dev", "0.13.2"));
+        assert!(!version_is_older("0.13.2", "dev"));
+    }
+
+    #[test]
+    fn parses_numeric_versions() {
+        assert_eq!(numeric_version("v0.13.2"), Some(vec![0, 13, 2]));
+        assert_eq!(numeric_version("0.13.2-slice8"), Some(vec![0, 13, 2]));
+        assert_eq!(numeric_version("dev"), None);
+        assert_eq!(numeric_version(""), None);
+    }
 
     /// 标记必须落在路径与 fragment 之间：面板读到密钥后会抹掉 fragment，
     /// 标记若跟着走就丢了（那样顶栏会时有时无）。
