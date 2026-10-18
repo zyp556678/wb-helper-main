@@ -14,18 +14,19 @@ import (
 // Tauri 的 NSIS 安装向导**只看注册表**就判定「已安装」：只要
 // `HKCU\...\Uninstall\WorkBuddy Gateway` 里还有内容，它就会先摆出一页
 // 「安装前卸载 / 请勿卸载」。而安装目录被手工删掉、或卸载/更新中途被掐断
-// （断电、结束进程、用户取消）时，这个键会留下来 —— 于是「安装前卸载」必然
-// 失败（旧卸载器已不在磁盘上），向导只弹一句「无法卸载！」再退回同一页。
-// 用户多半不知道还能改选「请勿卸载」，看起来就是版本装不上去了。
+// （断电、结束进程、用户取消）时，这个键会留下来 —— 于是那一页的第一条
+// 「安装前卸载」跑向一个已经不存在的卸载器（旧版安装包在这里会弹一句
+// 「无法卸载！」就退回原页，见 installer.nsi 的本地补丁说明）。
 //
 // # 这里做什么
 //
-// 在拉起向导**之前**体检一次：键在、但它指向的卸载器已经不在了，就把这条残键
-// 删掉（连同厂商键）并按全新安装继续。判据刻意保守：卸载器还在就一律不动 ——
-// 那是向导「安装前卸载」要用的东西，真正正常的旧安装必须保持原样。
+// 在拉起安装包**之前**体检一次：键在、但它指向的卸载器已经不在了，就把这条残键
+// 删掉（连同厂商键），于是向导那一页根本不会出现，按全新安装继续。判据刻意保守：
+// 卸载器还在就一律不动 —— 那是「安装前卸载」要用的东西，正常旧安装必须保持原样。
 //
 // 安装包里的模板守卫是同一件事的另一半（`desktop/src-tauri/nsis/installer.nsi`）：
-// 这里管面板点的「安装并重启」，那里管用户自己双击安装包。
+// 这里管面板点的安装，那里管用户自己双击安装包。无人值守的静默安装（/S）压根不读
+// 注册表、也不跑页面回调，因此对她来说这条清理只是顺带把路铺平。
 //
 // 全程只在 Windows 的安装路径上被调用（installWindows），因此不需要构建标签；
 // 跨平台放着也不会跑 —— 与 installLinux / installDarwin 同一套组织方式。
@@ -38,7 +39,7 @@ const (
 	// "WorkBuddy Gateway"。改产品名就要三处一起改（这里、模板、unified 安装器）。
 	updateUninstallKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy Gateway`
 
-	// updateVendorKey 是 NSIS 记录安装位置的厂商键；安装导向导会用它的默认值
+	// updateVendorKey 是 NSIS 记录安装位置的厂商键；安装向导会用它的默认值
 	// 恢复上一次的安装目录。残键一起清掉，否则下一次安装会读到一个旧路径。
 	updateVendorKey = `HKCU\Software\workbuddy\WorkBuddy Gateway`
 )
@@ -135,7 +136,7 @@ func regExec(args ...string) (string, error) {
 // cleanStaleUninstallEntry 体检并清理残键，返回是否真的删了、以及给人看的原因。
 //
 // 失败一律不改变现场：清理只是「顺手把路铺平」，铺不动也不该让安装本身失败 ——
-// 用户仍然可以在向导里改选「请勿卸载」。
+// 用户自己双击安装包时，仍然可以在向导那一页改选「请勿卸载」继续。
 func cleanStaleUninstallEntry(run regRunner, logf func(string, ...any)) (bool, string) {
 	if logf == nil {
 		logf = func(string, ...any) {}

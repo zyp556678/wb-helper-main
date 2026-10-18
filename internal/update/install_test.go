@@ -75,21 +75,22 @@ func TestPlanForPlatforms(t *testing.T) {
 
 	win := planFor("windows", `C:\x\setup.exe`)
 	if !win.Supported || win.NeedsAuth {
-		t.Fatalf("windows 方案应为「支持 + 由安装程序提权」，实际 %+v", win)
+		t.Fatalf("windows 方案应为「支持 + 不提权」，实际 %+v", win)
 	}
-	if win.Restart {
-		t.Fatal("windows 上不该承诺自动重启：exe 被锁，重启由安装程序与用户完成")
+	// Windows 也能自动回到新版本了：/S 静默装完、/R 把应用重新拉起来，
+	// 不再有「用户去向导最后一页点运行」这一步。
+	if !win.Restart {
+		t.Fatal("windows 上装完会自动把应用拉起来，应当承诺自动重启")
 	}
-	if win.Note == "" {
-		t.Fatal("windows 方案必须提醒会弹安装向导")
+	// 命令里那两个开关就是「无人值守」的全部依据：/S 不显示页面也不执行页面回调
+	// （不会有选择题）、/R 装完拉起应用。它们必须与 installWindows 真正发出去的
+	// 参数是同一份 —— 面板上写的和实际执行的不一样，比不写更糟。
+	if !strings.Contains(win.Command, "/S") || !strings.Contains(win.Command, "/R") {
+		t.Fatalf("windows 命令应带上无人值守开关 /S /R，实际 %q", win.Command)
 	}
-	// Windows 上必须先退出让出文件锁：升级时安装程序会先跑**旧版本**的卸载器，
-	// 它删不掉还被占用的 bin\*.exe，会直接报「无法卸载！」并中止安装。
-	// 这条文案是用户点确认前唯一能看到的前因后果，不能省。
-	//
-	// 「请勿卸载」那句是叠加的补救：旧安装已经被删掉/卸载中断时，残键会让向导的
-	// 「安装前卸载」必然失败，用户得知道换一个单选项就能继续（见 uninstall_entry.go）。
-	for _, want := range []string{"无法卸载", "退出", "请勿卸载"} {
+	// 说明里要交代两件用户看不到却会经历的事：装的过程不弹任何界面、网关会先退出
+	// 让出文件锁（面板会短暂断连）。
+	for _, want := range []string{"静默", "文件锁", "重新拉起来"} {
 		if !strings.Contains(win.Note, want) {
 			t.Fatalf("windows 方案的说明缺少 %q：%q", want, win.Note)
 		}
@@ -269,6 +270,42 @@ func TestPlanWarnsNpmInstalls(t *testing.T) {
 		if got := planFor(goos, "/tmp/pkg"); !strings.Contains(got.Note, "npm i -g") {
 			t.Fatalf("%s 的方案没有提醒 npm 安装的实例：%q", goos, got.Note)
 		}
+	}
+}
+
+// TestWindowsLaunchFlags 两种 Windows 安装包的「无人值守」开关不能混用。
+//
+// 桌面版是 Tauri 的 NSIS 安装包：命令行开关 /S /R 生效（/S 静默、/R 装完拉起应用）。
+// 命令行版是 IExpress 自解压包：它只认环境变量，传命令行开关会让 install.ps1 收到
+// 不认识的位置参数而直接报错 —— 一个静默升级的修复不该把另一条安装路径弄坏。
+func TestWindowsLaunchFlags(t *testing.T) {
+	args, env := windowsLaunch(formDesktop, false)
+	if strings.Join(args, " ") != "/S /R" {
+		t.Fatalf("桌面版应当用 /S /R 调，实际 %v", args)
+	}
+	if len(env) != 0 {
+		t.Fatalf("桌面版不该依赖环境变量，实际 %v", env)
+	}
+
+	args, env = windowsLaunch(formCLI, false)
+	if len(args) != 0 {
+		t.Fatalf("命令行版不该收到命令行开关（会被当成位置参数而报错），实际 %v", args)
+	}
+	if got := strings.Join(env, " "); got != "WB_SETUP_SILENT=1 WB_SETUP_FLAGS=-Launch" {
+		t.Fatalf("命令行版的无人值守环境变量不对：%q", got)
+	}
+
+	// 用户原先开了登录自启时必须带上 -AutoStart：install.ps1 没有它就会按
+	// 「不粘性」把那个计划任务删掉，静默升级不该顺手关掉用户的开机自启。
+	_, env = windowsLaunch(formCLI, true)
+	if got := strings.Join(env, " "); got != "WB_SETUP_SILENT=1 WB_SETUP_FLAGS=-AutoStart -Launch" {
+		t.Fatalf("原先开了自启时应带上 -AutoStart：%q", got)
+	}
+
+	// 形态判不出来时按桌面版处理：仓库里 Windows 上只有这两种产物，而桌面版是
+	// 公开发行的那个；挑错形态的问题由 pickAsset 的 formAllows 负责挡。
+	if args, _ := windowsLaunch(formUnknown, false); strings.Join(args, " ") != "/S /R" {
+		t.Fatalf("形态未知时按桌面版处理，实际 %v", args)
 	}
 }
 

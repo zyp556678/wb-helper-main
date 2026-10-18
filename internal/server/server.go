@@ -187,9 +187,9 @@ func (s *Server) SetRestartFunc(fn func()) { s.restartFn = fn }
 // SetExitFunc 注入「退出网关、且不自行回来」的实现（由 main 提供）。
 //
 // 与 SetRestartFunc 分开是因为**结局不同**：重启把进程换上新版本继续服务，
-// 退出则留一个空档，等安装程序或用户把应用拉起来。只有 Windows 走退出这条路 ——
-// 那边必须先让出 `bin\*.exe` 的文件锁，否则安装程序跑旧版本卸载器时会报
-// 「无法卸载！」并中止（见 internal/update/install.go 的 installWindows）。
+// 退出则留一个空档，让安装包接管 —— 它先把我们结束掉再覆盖文件，装完把应用
+// 重新拉起来。只有 Windows 走退出这条路：那边正在运行的 `bin\*.exe` 被系统锁着，
+// 不先让出文件锁就没法覆盖（见 internal/update/install.go 的 installWindows）。
 func (s *Server) SetExitFunc(fn func()) { s.exitFn = fn }
 
 // restartDelayAfterInstall 是「安装完成 → 请求重启」之间的等待。

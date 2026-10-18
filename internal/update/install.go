@@ -10,20 +10,21 @@ import (
 	"regexp"
 	"strings"
 
+	"workbuddy-gateway/internal/autostart"
 	"workbuddy-gateway/internal/eventlog"
 )
 
 // 本文件实现「把下载好的安装包装到本机，并让网关跑上新版本」。
 //
-// # 为什么这一步不做成全自动
+// # 自动到哪一步
 //
-// 检测与下载都是**只读**的（打一次 GitHub、往数据目录放一个文件）；而安装会：
-// 覆盖已经装好的程序、结束正在跑的进程、必要时提权。它失败的样子也很难看 ——
+// 检测与下载都是**只读**的（打一次 GitHub、往数据目录放一个文件），可以全自动；
+// 而安装会覆盖已经装好的程序、结束正在跑的进程、必要时提权，失败的样子也很难看 ——
 // 可能留下一个「既起不来、也没有可回退版本」的现场，而用户的 CLI / IDE 全指着这个端口。
 //
-// 所以分界画在这里：**下载自动，安装必须由人在面板上点一下并确认**（确认框里展示
-// 将要执行的命令，用户知道会发生什么）。配置里只有 `update.auto_download` 一个开关，
-// 没有 `auto_install` —— 少一个能把自己搞挂的开关。
+// 所以分界画在「装不装」上：由用户决定（`update.auto_install`，默认开，面板上随时可关）。
+// 而**装的过程本身不需要用户再选什么** —— 下面三条路径都是无人值守的：不会弹向导、
+// 不会摆出「安装前卸载 / 请勿卸载」之类的选择题。
 //
 // # 各平台的做法与边界
 //
@@ -34,9 +35,13 @@ import (
 //   - macOS：`hdiutil attach -mountpoint <临时目录>` → `ditto <挂载>/X.app /Applications/X.app`
 //     → `hdiutil detach`。无签名，首次打开仍可能要右键「打开」；/Applications 不可写时
 //     如实报错并让用户手动拖。
-//   - Windows：启动安装向导（不静默）。安装包自带的钩子会先按路径结束占用文件的进程
-//     （含本网关与桌面壳）再覆盖文件，静默安装装完不会拉起窗口，而这里没有可靠的
-//     「装完再启动」通路 —— 所以交给向导，最后一步由用户点。UAC 也由它自己弹。
+//   - Windows：拉起安装包，让它无人值守地装完 —— 桌面版（Tauri 的 NSIS 安装包）用
+//     `/S /R`：/S 静默（NSIS 在静默模式下**不执行任何页面回调**、也不显示页面，
+//     只跑 Section 与 .onInstSuccess；本机用最小脚本实测过这三条），/R 装完把应用
+//     重新拉起来；命令行版（IExpress 自解压包）认的是 `WB_SETUP_SILENT` /
+//     `WB_SETUP_FLAGS` 环境变量（见 installer/windows/setup.cmd）。
+//     安装包自带的钩子会先按路径结束占用文件的进程（含本网关与桌面壳）再覆盖文件，
+//     本进程随即退出让出 `bin\*.exe` 的文件锁。
 
 // InstallPlan 描述「在这台机器上装这个包」会做什么，供面板在确认框里如实展示。
 //
@@ -49,11 +54,12 @@ type InstallPlan struct {
 	Command string `json:"command,omitempty"`
 	// NeedsAuth 表示会弹系统授权框。
 	NeedsAuth bool `json:"needs_auth,omitempty"`
-	// Restart 表示安装成功后网关会自行重启到新版本。
+	// Restart 表示安装成功后网关会回到新版本（面板据此显示「安装并重启」按钮）：
+	// Linux/macOS 是网关自己 exec 到新版本；Windows 是退出后由安装包把应用重新拉起来。
 	Restart bool `json:"restart,omitempty"`
 	// Reason 是「本平台不支持」的原因（Supported=false 时展示）。
 	Reason string `json:"reason,omitempty"`
-	// Note 是给用户的额外提醒（例如 macOS 无签名、Windows 会弹向导）。
+	// Note 是给用户的额外提醒（例如 macOS 无签名、Windows 会先退出让出文件锁）。
 	Note string `json:"note,omitempty"`
 }
 
@@ -66,23 +72,13 @@ type InstallResult struct {
 	Restart bool `json:"restart"`
 	// Exit 表示网关会随后**退出**、且不自行回来。
 	//
-	// 只有 Windows 走这条：那边正在运行的 .exe 被系统锁住，而安装程序在**升级**时会
-	// 先跑**旧版本**的卸载器 —— 它删不掉还被占用的 `bin\*.exe`，于是直接报
-	// 「无法卸载！」并中止安装（Tauri 的 NSIS 模板里 unableToUninstall 就是这个文案）。
-	// 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚（卸载器早就返回了）。
-	// 所以唯一可靠的办法是在启动向导之后立刻退出，把文件锁让出去。
-	// 重新启动由安装向导最后一页的「运行」完成（见 installWindows）。
+	// 只有 Windows 走这条：那边正在运行的 .exe 被系统锁住，必须由一个独立的安装程序
+	// 结束进程后再覆盖文件。所以网关在拉起安装包之后立刻退出，把文件锁让出去；
+	// 重新启动由安装包自己完成（桌面版是 /R，命令行版是 -Launch，见 installWindows）。
 	Exit bool `json:"exit,omitempty"`
 	// Output 是安装命令的输出（失败时最有价值：dpkg 会在这里说清缺什么）。
 	Output string `json:"output,omitempty"`
 }
-
-// staleEntryHint 是「向导报了无法卸载」时用户唯一要记住的一件事。
-//
-// 单独拎出来是因为它同时出现在两处文案里（确认框与安装结果），而这句话是用户
-// 被卡住时的唯一出路：向导只看注册表就判定「已安装」，残键会让「安装前卸载」
-// 必然失败，但换一个单选项就能继续。
-const staleEntryHint = "（向导若报「无法卸载！」，说明旧安装的记录已经失效：改选「请勿卸载」继续。）"
 
 // assetNamePattern 限制安装包文件名：只允许保守字符集。
 //
@@ -122,12 +118,13 @@ func planFor(goos, path string) InstallPlan {
 	case "windows":
 		plan = InstallPlan{
 			Supported: true,
-			Command:   path,
-			Restart:   false,
-			Note: "会打开安装向导，网关随即退出以让出 bin\\*.exe 的文件锁 —— " +
-				"旧的卸载器删不掉被占用的文件，会直接报「无法卸载！」并中止安装。" +
-				"装完请在向导最后一页确认「运行」；中途取消的话网关会停着，需要手动启动一次。" +
-				staleEntryHint,
+			// 展示真正会执行的命令：两个开关是**无人值守升级**的全部依据，
+			// 面板上看到它们，用户才知道点下去不会弹向导、不会有选择题。
+			Command: path + " /S /R",
+			Restart: true,
+			Note: "安装包在后台静默完成（不弹向导、不需要任何选择）。" +
+				"网关随即退出以让出 bin\\*.exe 的文件锁，装完由安装包把应用重新拉起来；" +
+				"中途失败的话网关会停着，需要手动启动一次。",
 		}
 	default:
 		return InstallPlan{Reason: "当前平台（" + goos + "）没有可用的自动安装方式，请到 Release 页手动下载安装。"}
@@ -280,22 +277,20 @@ func (c *Checker) installDarwin(ctx context.Context, path string) (InstallResult
 	}, nil
 }
 
-// installWindows 启动安装向导（**不静默**），随后由调用方让网关退出。
+// installWindows 拉起安装包，让它在无人值守的开关下装完，随后由调用方让网关退出。
 //
-// 为什么不像其它平台那样静默：Windows 上正在运行的 .exe 被锁，必须由一个提权的
-// 安装程序先结束进程再覆盖 —— 安装包自带这个钩子，而静默装完之后没有任何可靠的
-// 「重新启动应用」通路（.exe 无法像 Unix 那样 exec 自己）。
+// 为什么不在这边等它跑完：Windows 上正在运行的 .exe 被锁，安装程序必须先把我们
+// （以及桌面壳、本机代理）结束掉才能覆盖文件 —— 也就是说本进程注定会被它杀掉。
+// 装完的重启因此也不可能是「我们 exec 自己」（.exe 做不到），只能由安装包完成：
+// 这正是 /R（桌面版）与 -Launch（命令行版）在做的事。
 //
-// 为什么要**退出**（而不是像 Linux/macOS 那样自己重启）：升级时安装向导会先跑
-// **旧版本**的卸载器，它删不掉还被我们占着的 `bin\workbuddy-gateway.exe` 与
-// `bin\wb-local-agent.exe`，于是 Tauri 的 NSIS 模板直接弹「无法卸载！」并中止 ——
-// 我们自己的杀进程钩子挂在安装段里，跑到那一步已经太晚。
+// 为什么要**主动退出**（而不是像 Linux/macOS 那样自己重启）：安装包自带的杀进程
+// 钩子挂在安装段里，跑起来时我们若还活着，它就得把我们强杀 —— 日志、锁文件、
+// 子进程清理都来不及走。与其被强杀，不如自己走一遍优雅关闭再退出。
 //
-// 三道防线各管一段：新版安装包与卸载器里的钩子（desktop/src-tauri/windows/hooks.nsh）
-// 负责「以后的升级」；这里的退出负责「从任意旧版本升上来」—— 旧版本的卸载器里
-// 有没有那个钩子，我们无从判断；而 cleanStaleUninstallEntry 负责第三种现场：
-// **旧安装已经被删掉/卸载中断**，注册表却还留着记录 —— 那种情况下向导的
-// 「安装前卸载」必然失败，先把残键清掉，向导就不会再摆出那页选择题。
+// cleanStaleUninstallEntry 负责另一种现场：**旧安装已经被删掉/卸载中断**，注册表却
+// 还留着记录 —— 那种情况下安装包如果去读注册表就会摆出「安装前卸载」的选择题。
+// 无人值守安装（/S）本来不读那页，这里仍然清一次：手动双击安装包的人还是会看到它。
 func (c *Checker) installWindows(path string) (InstallResult, error) {
 	if removed, reason := cleanStaleUninstallEntry(regExec, c.logf); removed {
 		if c.events != nil {
@@ -304,18 +299,53 @@ func (c *Checker) installWindows(path string) (InstallResult, error) {
 				map[string]any{"reason": reason})
 		}
 	}
-	cmd := exec.Command(path)
-	if err := cmd.Start(); err != nil {
-		return InstallResult{}, fmt.Errorf("启动安装向导失败：%w", err)
+	// 只有命令行形态需要查自启任务：桌面版不吃这个开关，白跑一次 schtasks 没意义。
+	cliAutoStart := false
+	if c.form == formCLI {
+		cliAutoStart = autostart.CliAutoStartEnabled()
 	}
-	// 不 Wait：向导会先把本进程结束掉（这是它覆盖文件的必要步骤），
+	args, env := windowsLaunch(c.form, cliAutoStart)
+	cmd := exec.Command(path, args...)
+	if env != nil {
+		// 只 append、不覆盖：启动我们的宿主（桌面壳/服务管理器）给的环境变量还要留着。
+		cmd.Env = append(os.Environ(), env...)
+	}
+	if err := cmd.Start(); err != nil {
+		return InstallResult{}, fmt.Errorf("启动安装包失败：%w", err)
+	}
+	// 不 Wait：安装包会先把本进程结束掉（这是它覆盖文件的必要步骤），
 	// 等它退出等于永远等不到。
 	return InstallResult{
 		OK: true,
-		Detail: "安装向导已打开；网关随即退出以让出文件锁，" +
-			"装完请在向导最后一页确认「运行」（或从开始菜单重新启动）" + staleEntryHint,
+		Detail: "安装包已在后台开始安装（不需要任何选择）；网关随即退出以让出文件锁，" +
+			"装完会自动把应用重新拉起来",
 		Exit: true,
 	}, nil
+}
+
+// windowsLaunch 给出拉起 Windows 安装包时用的开关。
+//
+// 两种形态接受的「无人值守」方式不同，不能混用：
+//
+//   - 桌面版是 Tauri 的 NSIS 安装包：`/S` 静默（不显示页面、也不执行页面回调，
+//     因此不会出现「安装前卸载 / 请勿卸载」这类选择题），`/R` 装完把主程序
+//     （桌面壳）重新拉起来。少了 `/R`，静默安装装完什么都不剩 —— 用户得自己去
+//     开始菜单点一下，那就不叫自动升级了。
+//   - 命令行版是 IExpress 自解压包 + setup.cmd：它没有命令行开关这一说，认的是环境变量
+//     WB_SETUP_SILENT / WB_SETUP_FLAGS（见 installer/windows/setup.cmd）。传命令行开关
+//     反而会让 install.ps1 收到不认识的位置参数而直接报错。
+//     -Launch 让装完的网关自己跑起来；-AutoStart 要跟随用户原先的选择：
+//     install.ps1 在没有 -AutoStart 时会按「不粘性」原则把登录自启的计划任务删掉，
+//     于是静默升级会顺手关掉用户的开机自启 —— 那是升级之外的行为改变。
+func windowsLaunch(form string, cliAutoStart bool) (args, env []string) {
+	if form == formCLI {
+		flags := "-Launch"
+		if cliAutoStart {
+			flags = "-AutoStart " + flags
+		}
+		return nil, []string{"WB_SETUP_SILENT=1", "WB_SETUP_FLAGS=" + flags}
+	}
+	return []string{"/S", "/R"}, nil
 }
 
 // formatOutput 把命令输出拼成一小段可读文本（空输出返回空串）。

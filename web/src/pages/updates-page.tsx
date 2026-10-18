@@ -65,10 +65,11 @@ const RESTART_POLL_MS = 1500;
  *
  * # 自动到哪一步为止
  *
- * 检测与下载是只读的（打一次 GitHub、往数据目录放一个文件），所以都能自动；
- * **安装必须是人的一次明确动作**：它会覆盖已装好的程序、结束正在跑的进程、
- * 必要时提权，失败时可能留下一个既起不来也没有回退版本的现场。确认框里会列出
- * 将要执行的命令（由后端按平台给出），用户知道自己在同意什么。
+ * 检测、下载、安装都可以全自动（三个开关默认全开），而且安装过程本身**不需要用户在
+ * 安装包里做任何选择**（Windows 上也不再弹向导）。分界画在「要不要自动装」这个开关上：
+ * 安装会覆盖已装好的程序、结束正在跑的进程、必要时提权，失败时可能留下一个既起不来
+ * 也没有回退版本的现场 —— 关掉这个开关就退回「只下不装」。手动那条路（面板上的
+ * 「安装并重启」按钮）在确认框里列出将要执行的命令，用户知道自己在同意什么。
  */
 export function UpdatesPage() {
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
@@ -77,7 +78,7 @@ export function UpdatesPage() {
   const [error, setError] = React.useState("");
   /**
    * 点了安装之后网关的去向：`restart`（Unix：换上新二进制继续服务）或
-   * `exit`（Windows：退出以让出文件锁，等安装向导或用户把应用拉起来）。
+   * `exit`（Windows：退出以让出文件锁，装完由安装包把应用重新拉起来）。
    * 两者都会让本页暂时连不上网关，所以统一进入探活模式。
    */
   const [outcome, setOutcome] = React.useState<"" | "restart" | "exit">("");
@@ -121,8 +122,9 @@ export function UpdatesPage() {
   );
 
   // 网关重启/退出期间的探活：能拿到状态就说明新版本已经起来了，整页刷新让所有页面
-  //（含侧栏的版本号）都用新数据重建。退出那条路上这一步可能要等用户走完安装向导，
-  // 所以探活不设总时长上限 —— 页面不可见时 useVisibleInterval 自己会停。
+  //（含侧栏的版本号）都用新数据重建。退出那条路上这一步要等安装包把应用重新拉起来
+  //（Windows：退出、覆盖文件、重开应用），所以探活不设总时长上限 ——
+  // 页面不可见时 useVisibleInterval 自己会停。
   useVisibleInterval(
     () => {
       void (async () => {
@@ -302,12 +304,12 @@ export function UpdatesPage() {
             <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" aria-hidden="true" />
             <div className="min-w-0 space-y-1">
               <p className="text-sm font-medium">
-                {outcome === "exit" ? "网关已退出，等安装向导启动应用" : "网关正在重启，页面会自动恢复"}
+                {outcome === "exit" ? "网关已退出，安装完成后应用会自动启动" : "网关正在重启，页面会自动恢复"}
               </p>
               <p className="text-xs leading-5 text-muted-foreground">
                 已经装上{latest ? ` v${latest}` : "新版本"}。
                 {outcome === "exit"
-                  ? "Windows 上必须先让出文件锁，所以网关会停一会儿：请在安装向导最后一页确认「运行」（或从开始菜单重新启动应用），页面会自动接回来。"
+                  ? "Windows 上必须先让出文件锁，所以应用会停一会儿：安装包正在后台静默完成（不需要任何选择），装完会自动把应用重新拉起来，页面也会自己接回来。"
                   : "重启期间这个页面连不上网关是正常的，起来了会自动刷新。"}
               </p>
             </div>
@@ -433,8 +435,8 @@ export function UpdatesPage() {
                       <AlertDialogDescription className="space-y-3">
                         <span className="block">
                           安装会覆盖已装好的程序（网关
-                          {plan?.needs_auth ? "，并弹系统授权框临时提权" : ""}），随后网关自行重启到新版本。
-                          重启期间面板会短暂断连，几秒后自动恢复。
+                          {plan?.needs_auth ? "，并弹系统授权框临时提权" : ""}），装的过程不需要任何选择。
+                          安装期间这个页面会短暂断连，恢复后自动刷新。
                         </span>
                         {plan?.command ? (
                           <span className="block">
@@ -544,7 +546,7 @@ export function UpdatesPage() {
       <Section
         id="update-auto"
         title="自动更新"
-        description="检测与下载可以全自动；安装会覆盖已装好的程序，所以留给你点一下。"
+        description="检测、下载、安装都可以全自动；安装会覆盖已装好的程序、结束正在跑的进程，所以默认开启但随时可关。"
       >
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -601,7 +603,8 @@ export function UpdatesPage() {
                 自动安装
               </div>
               <div className="text-xs text-muted-foreground">
-                安装包下好之后直接装并重启（Windows 上是退出让出文件锁）。
+                安装包下好之后直接装并重启，全程不需要任何选择
+                （Windows 上也是：后台静默安装，不弹向导、不用点任何按钮）。
                 默认开启；它会覆盖程序、结束正在跑的进程，可随时关掉改成「只下不装」。
               </div>
             </div>
@@ -669,8 +672,8 @@ export function UpdatesPage() {
                 <AlertDialogTitle>打开「自动安装」？</AlertDialogTitle>
                 <AlertDialogDescription className="space-y-3">
                   <span className="block">
-                    打开之后：发现新版本会**自动**下载并安装，网关随即重启到新版本；
-                    Windows 上是退出以让出文件锁（装完需在向导最后一步确认运行）。
+                    打开之后：发现新版本会**自动**下载并安装，全程不需要任何选择
+                    （Windows 上也不会弹向导），网关随即回到新版本。
                   </span>
                   <span className="block">
                     安装会覆盖已装好的程序、结束正在跑的进程，必要时弹系统授权框；
@@ -694,9 +697,9 @@ export function UpdatesPage() {
           </AlertDialog>
 
           <CardHint>
-            自动检查、自动下载、自动安装三项默认全开：发现新版本即下载，下好即安装并重启。
-            安装会覆盖程序、结束正在跑的进程；不想让它自动装的话，关掉上面的开关即可
-            （那就只下不装，安装那一下由你点）。
+            自动检查、自动下载、自动安装三项默认全开：发现新版本即下载，下好即静默安装并重启，
+            全程不需要任何选择。安装会覆盖程序、结束正在跑的进程；不想让它自动装的话，
+            关掉上面的开关即可（那就只下不装，安装那一下由你自己动手）。
           </CardHint>
         </CardContent>
       </Section>

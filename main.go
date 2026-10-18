@@ -347,8 +347,8 @@ func runServe(args []string) {
 		stop()
 	})
 	// Windows 上安装更新的结局是**退出**而不是重启：正在运行的 .exe 被系统锁着，
-	// 而安装程序在升级时会先跑旧版本的卸载器 —— 不先让出文件锁，它会直接报
-	// 「无法卸载！」并中止（见 internal/update/install.go 的 installWindows）。
+	// 安装包必须先把我们结束掉才能覆盖文件；装完的新版本由安装包自己拉起来
+	// （桌面版 /R、命令行版 -Launch，见 internal/update/install.go 的 windowsLaunch）。
 	// 这里只触发优雅关闭，不置 restartCh，因此收尾时不会 exec。
 	srv.SetExitFunc(stop)
 	// 自动安装的结局钩子：与手动「安装并重启」按钮共用同一对优雅关闭回调，

@@ -528,10 +528,11 @@ func (c *Checker) autoDownload() {
 // autoInstall 在后台把**刚下好**的安装包装上（update.auto_install = true 时）。
 //
 // 安装的入口与手动按钮完全同一条（c.Install），因此防呆（路径推导、大小校验、
-// 提权确认）一个不少。安装涉及提权框与向导，跑完的结局有三类，都体现在状态里：
+// 提权确认）一个不少。安装过程本身不需要用户做任何选择，跑完的结局有三类，都体现在状态里：
 //
 //   - restart（Linux/macOS）：网关自己 exec 到新版本，面板等它回来；
-//   - exit（Windows）：网关退出让出文件锁，由安装向导把应用拉起来；
+//   - exit（Windows）：网关退出让出文件锁，由安装包把应用重新拉起来（/S /R 或
+//     -Launch，见 install.go 的 windowsLaunch）；
 //   - 失败：记事件，状态里带错误 —— 用户还能手动点一次。
 func (c *Checker) autoInstall() {
 	// CAS 防并发：两个下载同时完成（不该发生，dlMu 已串行化）或手动/自动撞车时，
@@ -816,7 +817,7 @@ const (
 	formDesktop = "desktop"
 	formCLI     = "cli"
 	// formNPM 是 npm 全局安装。它没有对应的安装包：升级必须走 npm，
-// 用 Release 上的 setup.exe / deb 覆盖只会多出一份安装。
+	// 用 Release 上的 setup.exe / deb 覆盖只会多出一份安装。
 	formNPM     = "npm"
 	formUnknown = "unknown"
 )

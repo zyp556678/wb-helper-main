@@ -144,8 +144,13 @@ productName），只靠「exe 同目录 / 上一级」这类相对路径永远�
 干活，安装器的检查已经判失败）；而 `uninstall.exe /S` 会退出码 `0`、目录清空、
 A/R 键删除、数据目录保留。补丁因此显式加 `/S`：静默卸载跑完才返回。
 
-网关侧还有第三条防线（`internal/update/uninstall_entry.go`）：面板点的「安装并重启」会在
-拉起向导前先清掉同样的残键，于是向导根本不会摆出那页。
+网关侧还有第三条防线（`internal/update/uninstall_entry.go`）：面板点的安装会在拉起安装包
+之前先清掉同样的残键，于是向导根本不会摆出那页。
+
+**自动升级怎么调这份模板**：网关不弹向导，而是 `setup.exe /S /R`
+（`internal/update/install.go` 的 `windowsLaunch`）——`/S` 让 NSIS 静默跑完（页面回调
+一个都不执行，因此不会出现任何选择题），`/R` 装完把桌面壳重新拉起来。改动页面逻辑时
+别假设它一定会执行：本机用最小脚本实测过，静默模式下只有 Section 与 `.onInstSuccess` 会跑。
 
 **同步规矩**：模板与 `@tauri-apps/cli` 必须同版本 —— 前者抄自后者的
 `crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi`，所以 `package.json`

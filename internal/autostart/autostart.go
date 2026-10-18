@@ -483,6 +483,15 @@ func taskExists(name string) bool {
 	return err == nil
 }
 
+// CliAutoStartEnabled 报告命令行安装包（installer/windows/install.ps1）注册的登录自启
+// 计划任务当前是否存在。
+//
+// 无人值守升级要用它保持用户原先的选择：install.ps1 在没有 -AutoStart 时会按
+// 「不粘性」原则把那个任务删掉，于是静默升级会顺手关掉用户的开机自启 —— 那是升级
+// 之外的行为改变。查不到（本来就没开自启、或平台没有 schtasks）一律按「没开」处理：
+// 少删一个计划任务只是少了自启，而擅自加上自启是改变用户机器上的行为。
+func CliAutoStartEnabled() bool { return taskExists(cliTaskName) }
+
 // ---------------------------------------------------------------------------
 // macOS
 // ---------------------------------------------------------------------------

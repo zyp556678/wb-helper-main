@@ -2511,11 +2511,11 @@ export interface UpdateInstallPlan {
   command?: string;
   /** 会弹系统授权框（Linux 的 pkexec）。 */
   needs_auth?: boolean;
-  /** 安装成功后网关会自行重启到新版本。 */
+  /** 安装成功后网关会回到新版本（Linux/macOS 自己重启；Windows 是退出后由安装包把应用拉起来）。 */
   restart?: boolean;
   /** 不支持自动安装时的原因。 */
   reason?: string;
-  /** 平台相关的额外提醒（macOS 无签名、Windows 会弹向导等）。 */
+  /** 平台相关的额外提醒（macOS 无签名、Windows 会先退出让出文件锁等）。 */
   note?: string;
 }
 

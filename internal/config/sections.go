@@ -261,7 +261,7 @@ type UpdateSection struct {
 	//
 	// 仍然保留**显式关闭**的能力（面板开关 + config.json），因为失败时可能留下
 	// 一个既起不来也没有回退版本的现场：在意这一点的人必须能退回「只下不装」。
-	// 打开时：下好 → 装 → 网关重启（Windows 上是退出，装完由向导拉起）。
+	// 打开时：下好 → 装 → 网关回到新版本（Windows 上是退出，装完由安装包把应用拉起）。
 	AutoInstall *bool `json:"auto_install"`
 	// DownloadMirror 是 Release 附件的**下载加速前缀**。默认 **开启**（DefaultDownloadMirror）。
 	//
