@@ -1,18 +1,26 @@
 // Package update 检查有没有新版本，并把匹配当前平台的安装包下到本地。
 //
-// # 为什么这件事只能由网关做
+// # 与面板的分工
+//
+// 面板上只有两件事可做：**看版本状态**（当前 / 最新 / 有新版本）与**点更新按钮**。
+// 检测是后台自动的（每 DefaultCheckHours 一次，代价只有一次只读 GET）；点一下按钮
+// 之后：还没下载就先把安装包下到数据目录，**下载完成接着自动安装**并把网关带到
+// 新版本。没有「自动下载」「自动安装」这类开关 —— 该不该装是用户点不点按钮的问题，
+// 而不是一个需要预先想清楚的配置。
+//
+// # 为什么检测与下载只能由网关做
 //
 // 面板的响应头里 CSP 是 `connect-src 'self'`（见 internal/server/server.go 的
 // panelSecurity），浏览器里根本发不出跨域请求；桌面壳的职责又被刻意收窄成
 // 「进程代管 + 窗口 + 托盘」，不含业务逻辑。于是「问一句有没有新版本」只有网关能做
 // —— 这也正好：出站代理（`-proxy`）只有它认，私有仓库的令牌也只有它该拿。
 //
-// # 为什么只做「检测 + 下载」，不做自更新
+// # 为什么不自己替换文件（自更新）
 //
 // 安装包是 deb / dmg / setup.exe 三种平台专用格式，没有一种是「换掉文件就完事」：
 //
-//   - Windows：正在运行的 exe 被系统锁住，必须另起一个 updater 进程等父进程退出
-//     后再替换，还要处理替换失败时的回滚；
+//   - Windows：正在运行的 exe 被系统锁住，必须由一个独立的安装程序结束进程再覆盖
+//     （见 install.go 的 installWindows）；
 //   - Linux：直接覆盖 /usr 下的文件会让 dpkg 的包数据库与磁盘内容不一致，正确做法
 //     是交给 dpkg 装新包；
 //   - macOS：App 是 bundle，要整包替换并处理 Gatekeeper 隔离属性；
@@ -20,13 +28,14 @@
 //     npm 的完整性校验（见 npm/scripts/install.js 顶部对「不联网下载二进制」的说明）。
 //
 // 更关键的是失败代价：自更新失败会留下一个「既起不来、也没有安装包可回退」的现场，
-// 而用户手里的 CLI / IDE 全都指着这个端口。所以这里停在「下好安装包 + 告诉用户
-// 装哪个文件」，最后一步交给用户点 —— 这比做一个半可靠的自更新进程诚实得多。
+// 而用户手里的 CLI / IDE 全都指着这个端口。所以每一步都交给平台自己的安装器去做，
+// 装完的结局（重启 / 退出）由 install.go 说明 —— 这比做一个半可靠的自更新进程诚实得多。
 //
 // # 更新源是 GitHub Release
 //
 // 走 api.github.com 的公开接口（仓库已公开，无需令牌）。列表接口有 60 次/小时/IP
-// 的未认证限额，所以成功后按 CheckHours 缓存，不重复问。
+// 的未认证限额，所以成功后按 CheckHours 缓存，不重复问。安装包下载**直连优先**，
+// 直连不通或慢到不可用才回退到国内镜像（见 downloadRoutes）。
 package update
 
 import (
@@ -106,21 +115,26 @@ const (
 	retryBackoff     = 300 * time.Millisecond
 )
 
-// autoDownloadTimeout 是自动下载的时限。比面板手动下载那个（10 分钟）更宽：
-// 自动下载在后台跑，等得起慢网络，而失败要再等一个检查周期才有下一次机会。
-const autoDownloadTimeout = 20 * time.Minute
+// directRouteTimeout 是「直连 github.com」这一次尝试的总时限。
+//
+// 「不通」在国内不只表现为连不上：更常见的是连上了但只有几十 KB/s。等满安装包
+// 那 10 分钟再报错对用户没有任何价值，所以在 5 分钟（9 MB ≈ 30 KB/s）就切到
+// 加速镜像 —— 那正是这个回退要覆盖的情形。
+const directRouteTimeout = 5 * time.Minute
 
-// installTimeout 是一次自动安装的时限（提权框 + dpkg/ditto 都在秒级，留足余量）。
-const installTimeout = 10 * time.Minute
+// directHeaderTimeout 是直连时「等响应头」的时限。
+//
+// TCP 层被丢 SYN（最常见的封锁形态）时，连接会一直挂着；这个值把「完全连不上」
+// 从分钟级压到 20 秒，好让镜像尽快接管。响应头到手之后就不再限速 —— 慢而能完成的
+// 下载不该被掐断。
+const directHeaderTimeout = 20 * time.Second
 
-// restartHookDelay 是「安装完成 → 触发重启/退出钩子」之间的等待，让事件日志
-// 先落一条（重启会把进程换掉，之后的日志就属于新进程了）。
-const restartHookDelay = 300 * time.Millisecond
-
-// SetRestartHook / SetExitHook 注入自动安装完成后的重启 / 退出动作。
-// server 装配时调用（main 把同一对优雅关闭回调给它，见 main.go）。
-func (c *Checker) SetRestartHook(fn func()) { c.onRestart = fn }
-func (c *Checker) SetExitHook(fn func())    { c.onExit = fn }
+// DefaultDownloadMirror 是直连失败后自动回退的国内加速前缀。
+//
+// 它不再是「默认走它」：现在的顺序是**直连优先**，只有直连这条路失败或慢到不可用
+// 才切过来（见 Download）。语义变了，所以这个常量也搬到了本包 —— 它是下载策略的
+// 一部分，不再是用户配置项。
+const DefaultDownloadMirror = "https://gh-proxy.org"
 
 // State 是一次检查的结果快照，也是面板那张卡片的全部数据来源。
 //
@@ -149,23 +163,13 @@ type State struct {
 	CheckedAt int64 `json:"checked_at,omitempty"`
 	// Checking 表示此刻有一次检查在飞（面板据此显示转圈并轮询）。
 	Checking bool `json:"checking"`
-	// AutoCheck / IntervalHours 来自当前配置，面板据此渲染开关与提示，
-	// 不必再去读 /panel/api/config。
-	AutoCheck     bool `json:"auto_check"`
-	IntervalHours int  `json:"interval_hours"`
-	// AutoDownload 来自配置：发现新版本后是否自动把安装包下到数据目录（默认 true）。
-	AutoDownload bool `json:"auto_download"`
-	// AutoInstall 来自配置：安装包下好之后是否自动安装（默认 true，见 config.UpdateSection）。
-	AutoInstall bool `json:"auto_install"`
-	// DownloadMirror 是生效中的下载加速前缀（空串 = 直连），面板据此显示当前走哪条路。
-	DownloadMirror string `json:"download_mirror,omitempty"`
 	// Downloading / Downloaded / DownloadTotal 是**下载进度**：面板据此画进度条。
 	// 只在 Downloading 为真时有意义（下载结束就清零）。
 	Downloading   bool  `json:"downloading"`
 	Downloaded    int64 `json:"downloaded_bytes,omitempty"`
 	DownloadTotal int64 `json:"download_total_bytes,omitempty"`
-	// Installing 表示此刻有一次自动安装在进行（面板据此显示「正在安装」，
-	// 并把安装按钮置灰，避免连点）。
+	// Installing 表示此刻有一次安装在跑（面板据此显示「正在安装」并把按钮置灰，
+	// 避免连点）。
 	Installing bool `json:"installing,omitempty"`
 	// LocalPath / LocalBytes 是**本地已就绪**的安装包（不存在或大小不符时为空）。
 	// 面板据此把「下载安装包」换成「安装并重启」，刷新页面也不必重新下载。
@@ -246,26 +250,13 @@ type Checker struct {
 	dlActive atomic.Bool
 	dlDone   atomic.Int64
 	dlTotal  atomic.Int64
-	// installing 表示有一次自动安装在跑（面板据此置灰安装按钮、显示「正在安装」）。
+	// installing 表示有一次安装在跑（面板据此置灰按钮、显示「正在安装」）。
+	// 由 Install 自己置位：手动点的那一次也要在状态里看得见，而且不许连点。
 	installing atomic.Bool
-	// onRestart / onExit 由 server 注入（见 SetRestartHook / SetExitHook）：
-	// 自动安装完成后触发。nil 表示没接（自动安装会完成但进程不重启 ——
-	// 只发生在没有装配 server 的场景，测试里常见）。
-	onRestart func()
-	onExit    func()
 	// inflight 非 nil 表示此刻有一次真实的检查在跑；并发的第二次请求等它，
 	// 而不是再打一次上游（见 Check 的说明）。
 	inflight chan struct{}
-	// bg 跟踪后台动作（目前只有「发现新版本就自动下载」）。
-	//
-	// 生产代码不需要等它 —— 进程退出会把一切收掉。但测试需要：goroutine 在测试
-	// 结束后还去 t.Logf（或写已被删掉的临时目录）会让 `go test` 直接 panic，
-	// 而那个 panic 看上去与用例毫无关系。用例用 WaitBackground 收尾。
-	bg sync.WaitGroup
 }
-
-// WaitBackground 等后台动作（自动下载）收尾。仅供测试使用。
-func (c *Checker) WaitBackground() { c.bg.Wait() }
 
 // New 构造 Checker。
 func New(cfg *config.Config, opt Options) *Checker {
@@ -321,26 +312,20 @@ func (c *Checker) DownloadDir() string { return c.downloadDir }
 
 // settings 从当前配置快照里取本次检查所需的参数（每次现读，改完即生效）。
 type settings struct {
-	repo           string
-	prerelease     bool
-	enabled        bool
-	autoDownload   bool
-	autoInstall    bool
-	downloadMirror string
-	hours          int
+	repo       string
+	prerelease bool
+	enabled    bool
+	hours      int
 }
 
 func (c *Checker) settings() settings {
-	s := settings{repo: DefaultRepo, hours: DefaultCheckHours, enabled: true, autoDownload: true}
+	s := settings{repo: DefaultRepo, hours: DefaultCheckHours, enabled: true}
 	cfg := c.cfgPtr.Load()
 	if cfg == nil {
 		return s
 	}
 	s.enabled = cfg.UpdateEnabled()
 	s.prerelease = cfg.UpdatePrerelease()
-	s.autoDownload = cfg.UpdateAutoDownload()
-	s.autoInstall = cfg.UpdateAutoInstall()
-	s.downloadMirror = cfg.UpdateDownloadMirror()
 	if r := strings.TrimSpace(cfg.Update.Repo); r != "" {
 		s.repo = r
 	}
@@ -367,11 +352,6 @@ func (c *Checker) State() State {
 	st := c.state
 	st.Checking = c.inflight != nil
 	c.mu.Unlock()
-	st.AutoCheck = s.enabled
-	st.IntervalHours = s.hours
-	st.AutoDownload = s.autoDownload
-	st.AutoInstall = s.autoInstall
-	st.DownloadMirror = s.downloadMirror
 	// 下载进度（面板的进度条）：原子读，不用加锁 —— 每写一个 chunk 都会更新。
 	st.Downloading = c.dlActive.Load()
 	st.Downloaded, st.DownloadTotal = 0, 0
@@ -476,103 +456,7 @@ func (c *Checker) Check(ctx context.Context, force bool) State {
 			"发现新版本 "+st.Latest+"（当前 "+c.current+"）",
 			map[string]any{"current": c.current, "latest": st.Latest, "repo": st.Repo})
 	}
-	// 发现新版本就顺手把安装包下下来（默认开，见 config.UpdateSection.AutoDownload）。
-	// 放在后台：几十 MB 会拖住这次检查的响应，而面板只想知道「有没有新版本」。
-	c.autoDownload()
 	return c.State()
-}
-
-// autoDownload 在后台把匹配本机平台的安装包下到数据目录。
-//
-// 幂等由两处保证：本地已有同大小文件时 Download 直接跳过；并发调用由 dlMu 串行化。
-// 失败只记日志、不记事件 —— 这是「顺手做的事」，每轮检查都往事件日志里刷一条告警
-// 会把真正有用的告警淹掉，而面板上仍显示「未下载」，用户可以手动点下载重试。
-func (c *Checker) autoDownload() {
-	if !c.settings().autoDownload {
-		return
-	}
-	st := c.State()
-	if st.UpdateAvailable && st.Error == "" && st.Latest != "" && st.AssetName != "" {
-		if p, _ := c.localAsset(st.AssetName, st.AssetSize); p != "" {
-			return // 已经下好了
-		}
-	} else {
-		return
-	}
-	// Add 必须在 go 之前：放在 goroutine 里的话，等待方可能先一步返回
-	//（Add 还没执行），于是「等后台收尾」变成一句空话。
-	c.bg.Add(1)
-	go func() {
-		defer c.bg.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), autoDownloadTimeout)
-		defer cancel()
-		res, err := c.Download(ctx)
-		if err != nil {
-			c.logf("[更新] 自动下载安装包失败: %v", err)
-			return
-		}
-		c.logf("[更新] 新版本安装包已就绪: %s（%.1f MiB）", res.Path, float64(res.Bytes)/(1<<20))
-		c.events.Info(eventlog.ChannelSystem, "update_downloaded",
-			"新版本 "+res.Version+" 的安装包已自动下载",
-			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
-		debuglog.Event(nil, "info", "update_auto_downloaded",
-			map[string]any{"version": res.Version, "path": res.Path, "bytes": res.Bytes})
-		// 开了「自动安装」就接着装。这是这个功能的终点，也是风险最大的一步 ——
-		// 所以默认关、且必须由用户显式打开（面板上打开时会确认一次）。
-		if c.settings().autoInstall {
-			c.autoInstall()
-		}
-	}()
-}
-
-// autoInstall 在后台把**刚下好**的安装包装上（update.auto_install = true 时）。
-//
-// 安装的入口与手动按钮完全同一条（c.Install），因此防呆（路径推导、大小校验、
-// 提权确认）一个不少。安装过程本身不需要用户做任何选择，跑完的结局有三类，都体现在状态里：
-//
-//   - restart（Linux/macOS）：网关自己 exec 到新版本，面板等它回来；
-//   - exit（Windows）：网关退出让出文件锁，由安装包把应用重新拉起来（/S /R 或
-//     -Launch，见 install.go 的 windowsLaunch）；
-//   - 失败：记事件，状态里带错误 —— 用户还能手动点一次。
-func (c *Checker) autoInstall() {
-	// CAS 防并发：两个下载同时完成（不该发生，dlMu 已串行化）或手动/自动撞车时，
-	// 只有第一个能进。
-	if !c.installing.CompareAndSwap(false, true) {
-		c.logf("[更新] 已有一次安装在跑，跳过自动安装")
-		return
-	}
-	c.installing.Store(true)
-	defer c.installing.Store(false)
-	c.events.Info(eventlog.ChannelSystem, "update_auto_install", "开始自动安装新版本", nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
-	defer cancel()
-	res, err := c.Install(ctx)
-	if err != nil {
-		c.logf("[更新] 自动安装失败: %v", err)
-		c.events.Warn(eventlog.ChannelSystem, "update_auto_install_failed",
-			"自动安装失败："+err.Error(), nil)
-		return
-	}
-	c.events.Info(eventlog.ChannelSystem, "update_installed", "自动安装完成", map[string]any{
-		"restart": res.Restart, "exit": res.Exit,
-	})
-
-	switch {
-	case res.Restart:
-		// 让 HTTP 响应先写完（虽然这里没有面板在等，但顺序保持一致），再触发重启。
-		time.AfterFunc(restartHookDelay, func() {
-			if c.onRestart != nil {
-				c.onRestart()
-			}
-		})
-	case res.Exit:
-		time.AfterFunc(restartHookDelay, func() {
-			if c.onExit != nil {
-				c.onExit()
-			}
-		})
-	}
 }
 
 func (c *Checker) runCheck(ctx context.Context, prev State) State {
@@ -583,8 +467,6 @@ func (c *Checker) runCheck(ctx context.Context, prev State) State {
 	st := State{
 		Current:         c.current,
 		Repo:            s.repo,
-		AutoCheck:       s.enabled,
-		IntervalHours:   s.hours,
 		Latest:          prev.Latest,
 		UpdateAvailable: prev.UpdateAvailable,
 		ReleaseName:     prev.ReleaseName,
@@ -958,10 +840,63 @@ type DownloadResult struct {
 	Dir string `json:"dir"`
 }
 
+// downloadRoute 是一条下载路线：直连 github.com，或直连失败后的国内加速镜像。
+type downloadRoute struct {
+	// name 给人看：日志与最终报错里都要说清走的是哪条路。
+	name string
+	// url 是这条路线实际请求的地址。
+	url string
+	// mirrorHost 是重定向白名单要额外放行的镜像主机（空 = 直连，没有额外主机）。
+	mirrorHost string
+	// direct 为真表示「直连」这条路，受总时限与响应头时限约束（见 directRouteTimeout）。
+	direct bool
+}
+
+// downloadRoutes 给出本次下载的路线顺序：**直连优先，不通（或慢到不可用）才切镜像**。
+//
+// 镜像只对 GitHub 家族的地址有意义（它就是个 GitHub 反向代理）；本地自建源、
+// 测试里的 httptest 地址都不触发回退，否则每个失败的用例都会去打真实网络。
+func (c *Checker) downloadRoutes(rawURL string) []downloadRoute {
+	routes := []downloadRoute{{name: "直连 github.com", url: rawURL, direct: true}}
+	if !isGitHubAssetURL(rawURL) {
+		return routes
+	}
+	mirrored, err := ApplyDownloadMirror(DefaultDownloadMirror, rawURL)
+	if err != nil {
+		return routes
+	}
+	host, _ := mirrorHostOf(DefaultDownloadMirror)
+	return append(routes, downloadRoute{
+		name:       "加速镜像 " + DefaultDownloadMirror,
+		url:        mirrored,
+		mirrorHost: host,
+	})
+}
+
+// isGitHubAssetURL 判断下载地址是不是 GitHub 家族的。
+func isGitHubAssetURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return isGitHubHost(u.Hostname())
+}
+
+// isGitHubHost 判断主机名是否属于 GitHub（github.com 与它托管附件的那几个域）。
+func isGitHubHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	return h == "github.com" || strings.HasSuffix(h, ".github.com") ||
+		strings.HasSuffix(h, ".githubusercontent.com")
+}
+
 // Download 把上次检查匹配到的安装包下到本地（幂等：本地已有同大小文件就跳过）。
 //
 // 只下载 State 里记着的那个地址 —— 端点不接受客户端传 URL，因此这里不存在
 // 「面板让网关去下载任意地址」的 SSRF 面。
+//
+// 下载顺序是**直连优先，不通再走国内加速镜像**（见 downloadRoutes）：国内直连
+// github.com 下几十 MB 经常只有几十 KB/s 甚至完全连不上，而这恰好是升级路上
+// 最贵的一步；反过来，无脑走第三方镜像也没必要 —— 直连能通时就不该绕道。
 func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	c.dlMu.Lock()
 	defer c.dlMu.Unlock()
@@ -980,28 +915,6 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 	if name == "" {
 		return DownloadResult{}, errors.New("安装包地址里没有可用的文件名：" + st.DownloadURL)
 	}
-	// 下载用浏览器下载链接（github.com/.../releases/download/...）。仓库是公开的，
-	// 无需令牌，也就不必绕 api.github.com 的资产端点。
-	//
-	// mirrorHost 是**实际生效的**前缀主机（前缀被拒时留空）：下载的重定向白名单
-	// 要放行它，否则配了加速前缀时请求会被自己挡下。
-	target := st.DownloadURL
-	mirrorHost := ""
-	if s := c.settings(); s.downloadMirror != "" {
-		if host, ok := mirrorHostOf(s.downloadMirror); ok {
-			mirrorHost = host
-		}
-		mirrored, err := ApplyDownloadMirror(s.downloadMirror, target)
-		if err != nil {
-			// 前缀配错（少了协议、写成了 URL 片段……）不该让下载彻底不可用：
-			// 退回直连并说明原因，用户至少还能装上。
-			c.logf("[更新] 下载加速前缀不可用（%v），本次改为直连", err)
-			mirrorHost = ""
-		} else {
-			target = mirrored
-			c.logf("[更新] 安装包走加速下载：%s", target)
-		}
-	}
 	if err := os.MkdirAll(c.downloadDir, 0o755); err != nil {
 		return DownloadResult{}, err
 	}
@@ -1013,14 +926,52 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 			Dir: c.downloadDir, Skipped: true}, nil
 	}
 
-	// 下载要能重试。安装包几十 MB，慢网络下断在 90% 是常事 —— 而断了就从头再来
-	// 是用户唯一能做的动作，不如替他做。只重试**瞬时**故障（连接被重置、响应体
-	// 提前结束），HTTP 404/403 这类确定性失败重试没有意义。
-	//
 	// 进度从这里开始记：上面那条幂等分支没下东西，不该让面板闪一下进度条。
 	c.beginProgress(st.AssetSize)
 	defer c.endProgress()
 
+	routes := c.downloadRoutes(st.DownloadURL)
+	var written int64
+	var lastErr error
+	for i, rt := range routes {
+		if i > 0 {
+			// 直连失败的**原始**原因要留住：它就是「为什么走了镜像」的答案。
+			c.logf("[更新] %s 不通或太慢（%v），改走 %s", routes[0].name, lastErr, rt.name)
+			c.events.Info(eventlog.ChannelSystem, "update_download_fallback",
+				"直连下载失败，改用加速镜像 "+DefaultDownloadMirror,
+				map[string]any{"error": errText(lastErr)})
+		}
+		routeCtx, cancel := c.routeContext(ctx, rt)
+		written, lastErr = c.downloadRoute(routeCtx, rt, dest)
+		cancel()
+		if lastErr == nil {
+			break
+		}
+		// 上层给的 ctx 没了（面板关了、请求取消）就不必再试下一条 —— 那是调用方
+		// 不想下了，不是「这条路不通」。
+		if ctx.Err() != nil {
+			return DownloadResult{}, ctx.Err()
+		}
+	}
+	if lastErr != nil {
+		return DownloadResult{}, fmt.Errorf("下载安装包失败（%s）：%w", routeNames(routes), lastErr)
+	}
+
+	c.logf("[更新] 安装包已下载: %s（%.1f MiB）", dest, float64(written)/(1<<20))
+	return DownloadResult{Path: dest, Name: name, Bytes: written, Version: st.Latest, Dir: c.downloadDir}, nil
+}
+
+// routeContext 给「直连」那条路加总时限；镜像不限时（它本来就是最后一条路，
+// 再给它设上限只会把「慢但能完成」变成失败）。
+func (c *Checker) routeContext(ctx context.Context, rt downloadRoute) (context.Context, context.CancelFunc) {
+	if !rt.direct {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, directRouteTimeout)
+}
+
+// downloadRoute 在一条路线上完成整次下载（含瞬时故障重试）。
+func (c *Checker) downloadRoute(ctx context.Context, rt downloadRoute, dest string) (int64, error) {
 	var written int64
 	var lastErr error
 	for attempt := 0; attempt <= transientRetries; attempt++ {
@@ -1029,23 +980,37 @@ func (c *Checker) Download(ctx context.Context) (DownloadResult, error) {
 			select {
 			case <-time.After(retryBackoff):
 			case <-ctx.Done():
-				return DownloadResult{}, ctx.Err()
+				return 0, ctx.Err()
 			}
 		}
-		written, lastErr = c.downloadOnce(ctx, target, dest, mirrorHost)
+		written, lastErr = c.downloadOnce(ctx, rt, dest)
 		if lastErr == nil {
-			break
+			return written, nil
 		}
+		// 只重试**瞬时**故障（连接被重置、响应体提前结束），HTTP 404/403 这类
+		// 确定性失败重试没有意义 —— 交给下一路线或如实报错。
 		if !upstream.IsTransientNetworkError(lastErr) {
-			return DownloadResult{}, fmt.Errorf("下载安装包失败：%w", lastErr)
+			return 0, lastErr
 		}
 	}
-	if lastErr != nil {
-		return DownloadResult{}, fmt.Errorf("下载安装包失败（已重试 %d 次）：%w", transientRetries, lastErr)
-	}
+	return 0, fmt.Errorf("已重试 %d 次：%w", transientRetries, lastErr)
+}
 
-	c.logf("[更新] 安装包已下载: %s（%.1f MiB）", dest, float64(written)/(1<<20))
-	return DownloadResult{Path: dest, Name: name, Bytes: written, Version: st.Latest, Dir: c.downloadDir}, nil
+// routeNames 把走过的路线拼成一句人话（失败文案里要说清都试过什么）。
+func routeNames(routes []downloadRoute) string {
+	names := make([]string, 0, len(routes))
+	for _, rt := range routes {
+		names = append(names, rt.name)
+	}
+	return "已试过 " + strings.Join(names, "、")
+}
+
+// errText 取错误的文本（nil 安全，事件日志不该因为一个 nil 崩）。
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // beginProgress / endProgress 标记一次真实下载的起止（面板的进度条）。
@@ -1080,12 +1045,12 @@ func (cw countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// applyDownloadMirror 把 Release 附件地址套上加速前缀，返回可请求的 URL。
+// ApplyDownloadMirror 把 Release 附件地址套上加速前缀，返回可请求的 URL。
 //
 // 前缀的形态是「服务 origin」：`https://gh-proxy.org/`（结尾斜杠可有可无），
 // 拼接结果是 `https://gh-proxy.org/https://github.com/...`—— 这是这类服务的约定。
-// 严格校验而不是随手拼：这个值来自用户手写的 config.json，而它**决定请求发去哪**，
-// 拼错（比如写成相对路径）会产生一个难懂的请求失败，不如在配置层就报清楚。
+// 严格校验而不是随手拼：这个值**决定请求发去哪**（默认是内置的 DefaultDownloadMirror，
+// 也可能来自调用方），拼错会产生一个难懂的请求失败，不如当场报清楚。
 func ApplyDownloadMirror(mirror, rawURL string) (string, error) {
 	m := strings.TrimSpace(mirror)
 	if m == "" {
@@ -1122,11 +1087,11 @@ func mirrorHostOf(mirror string) (string, bool) {
 	return strings.ToLower(u.Hostname()), true
 }
 
-// downloadOnce 下载一次并落盘，返回写入的字节数。
+// downloadOnce 在某条路线上下载一次并落盘，返回写入的字节数。
 //
 // 先写临时文件再改名：中途失败（网络断、磁盘满、进程被杀）不会留下一个
 // 「大小不对但看起来像安装包」的文件 —— 那种文件最容易被用户双击安装。
-func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest, mirrorHost string) (int64, error) {
+func (c *Checker) downloadOnce(ctx context.Context, rt downloadRoute, dest string) (int64, error) {
 	// 清掉上次异常退出留下的临时文件：它们不会被复用，却会一直占着几十 MB 磁盘，
 	// 而且文件名看起来像安装包。下载已由 dlMu 串行化，不会误删正在写的那个。
 	if stale, err := filepath.Glob(dest + ".part*"); err == nil {
@@ -1134,14 +1099,14 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest, mirrorHost str
 			_ = os.Remove(p)
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rt.url, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("User-Agent", "workbuddy-gateway/"+c.current)
 
-	resp, err := c.downloadClient(mirrorHost).Do(req)
+	resp, err := c.downloadClient(rt).Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -1149,7 +1114,7 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest, mirrorHost str
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case http.StatusForbidden, http.StatusNotFound:
-			return 0, fmt.Errorf("HTTP %d：下载地址不可用（Release 可能已被删除，或加速前缀指向了不存在的文件）", resp.StatusCode)
+			return 0, fmt.Errorf("HTTP %d：下载地址不可用（Release 可能已被删除，或镜像上没有这个文件）", resp.StatusCode)
 		default:
 			return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
@@ -1192,18 +1157,22 @@ func (c *Checker) downloadOnce(ctx context.Context, rawURL, dest, mirrorHost str
 //
 // 作用是防篡改：安装包地址来自上游响应，正常会被重定向到 objects.githubusercontent.com；
 // 限定主机名可以挡住「响应被篡改 → 把安装包下成任意地址的内容」。
-// 白名单必须包含**加速前缀的主机**，否则配了加速前缀时请求会被自己挡下。
+// 白名单必须包含**镜像的主机**，否则走镜像时请求会被自己挡下。
 //
 // 顺带把总超时去掉（只保留 ctx 的上限）：安装包几十 MB，60 秒的总超时
 // 在慢网络下会稳定失败，而这里的正确约束是「调用方给多久」。
-func (c *Checker) downloadClient(mirrorHost string) *http.Client {
+// 唯一例外是直连那条路的**等响应头**时限（见 directHeaderTimeout）。
+func (c *Checker) downloadClient(rt downloadRoute) *http.Client {
 	cp := *c.client
 	cp.Timeout = 0
+	if rt.direct {
+		cp.Transport = transportWithHeaderTimeout(cp.Transport)
+	}
 	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("安装包地址重定向次数过多")
 		}
-		if !allowedAssetHost(req.URL.Hostname(), mirrorHost) {
+		if !allowedAssetHost(req.URL.Hostname(), rt.mirrorHost) {
 			return fmt.Errorf("安装包地址被重定向到非预期主机 %s，已中止", req.URL.Hostname())
 		}
 		return nil
@@ -1211,11 +1180,30 @@ func (c *Checker) downloadClient(mirrorHost string) *http.Client {
 	return &cp
 }
 
+// transportWithHeaderTimeout 复制一份 Transport 并设上响应头时限。
+//
+// 为什么要复制而不是直接改：这个客户端是从配置里拿的（cfg.Control，可能带着
+// `-proxy` 的代理设置），直接改会污染其它所有出站请求。
+// Transport 为 nil 时（用默认 Transport）克隆 http.DefaultTransport —— 否则我们
+// 一设属性就把系统代理之类的默认行为丢掉了。
+func transportWithHeaderTimeout(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	tr, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	clone := tr.Clone()
+	clone.ResponseHeaderTimeout = directHeaderTimeout
+	return clone
+}
+
 // allowedAssetHost 判断下载（含重定向）的目标主机是否可信。
 //
 // 回环地址是给测试用的（httptest 监听 127.0.0.1）；GitHub 侧除了 github.com
-// 本身，附件实际由 *.githubusercontent.com 提供。mirrorHost 是当前生效的加速前缀
-// 主机（空串表示没配）—— 配了它时请求本来就要发到那儿，必须放行。
+// 本身，附件实际由 *.githubusercontent.com 提供。mirrorHost 是当次路线用的镜像
+// 主机（空串表示直连）—— 走镜像时请求本来就要发到那儿，必须放行。
 func allowedAssetHost(host, mirrorHost string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
@@ -1230,10 +1218,7 @@ func allowedAssetHost(host, mirrorHost string) bool {
 	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
 		return true
 	}
-	if h == "github.com" || strings.HasSuffix(h, ".github.com") {
-		return true
-	}
-	return strings.HasSuffix(h, ".githubusercontent.com")
+	return isGitHubHost(h)
 }
 
 // assetFileName 从下载地址里取文件名（并挡掉路径穿越）。

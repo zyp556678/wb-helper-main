@@ -4,32 +4,15 @@ import {
   CheckCircle2,
   Download,
   ExternalLink,
-  Globe,
-  HardDriveDownload,
   Info,
   Loader2,
   RefreshCw,
-  Save,
-  Sparkles,
   Wand2,
 } from "lucide-react";
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { CardHint, Section } from "@/components/section";
 import {
   checkUpdateNow,
@@ -38,10 +21,6 @@ import {
   fetchUpdateStatus,
   installUpdate,
   openExternalUrl,
-  setUpdateAutoCheck,
-  setUpdateAutoDownload,
-  setUpdateAutoInstall,
-  setUpdateMirror,
 } from "@/lib/api";
 import { formatBytes, formatRelativeTime, nowSeconds } from "@/lib/format";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -56,36 +35,31 @@ const RESTART_POLL_MS = 1500;
 /**
  * 更新页。
  *
- * # 为什么从「配置」页搬出来单独一页
+ * # 只有两件事：看状态、点更新
  *
- * 检查更新与配置页的其它内容有个根本差别：配置页整页是「偏好」，改完保存即可；
- * 这里是**动作**（检查、下载几十 MB、安装并重启），有过程、有失败态、有「网关正在
- * 重启」这种跨请求的状态。混在一堆开关中间时，用户既不容易发现它，也不容易看懂
- * 点下去会发生什么。
+ * 检测是后台自动的（每 6 小时一次只读 GET，代价低到不需要开关）；发现新版本之后
+ * 本页显示「有新版本」与一个按钮。用户点那一下就是全部的选择：**还没下载就先下，
+ * 下载完成立刻装**，装完网关回到新版本。所以这里没有「自动下载 / 自动安装」开关 ——
+ * 该不该装就是点不点按钮的问题。
  *
- * # 自动到哪一步为止
+ * # 为什么安装不需要再做一次确认
  *
- * 检测、下载、安装都可以全自动（三个开关默认全开），而且安装过程本身**不需要用户在
- * 安装包里做任何选择**（Windows 上也不再弹向导）。分界画在「要不要自动装」这个开关上：
- * 安装会覆盖已装好的程序、结束正在跑的进程、必要时提权，失败时可能留下一个既起不来
- * 也没有回退版本的现场 —— 关掉这个开关就退回「只下不装」。手动那条路（面板上的
- * 「安装并重启」按钮）在确认框里列出将要执行的命令，用户知道自己在同意什么。
+ * 安装会覆盖已装好的程序、结束正在跑的进程，但**安装过程本身不需要任何选择**
+ * （Windows 上跑 `/S /R`，不弹向导）。刚才那一次点击就是确认；再补一个「确定要装吗」
+ * 只是把同一个问题问两遍。真正需要知情的是「会短暂断连」这件事，写在按钮下面。
  */
 export function UpdatesPage() {
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
   const [loading, setLoading] = React.useState(true);
-  const [busy, setBusy] = React.useState<"" | "check" | "download" | "install" | "switch" | "mirror">("");
+  const [busy, setBusy] = React.useState<"" | "check" | "update">("");
   const [error, setError] = React.useState("");
   /**
-   * 点了安装之后网关的去向：`restart`（Unix：换上新二进制继续服务）或
+   * 点了更新之后网关的去向：`restart`（Unix：换上新二进制继续服务）或
    * `exit`（Windows：退出以让出文件锁，装完由安装包把应用重新拉起来）。
    * 两者都会让本页暂时连不上网关，所以统一进入探活模式。
    */
   const [outcome, setOutcome] = React.useState<"" | "restart" | "exit">("");
   const [installOutput, setInstallOutput] = React.useState("");
-  const [confirmOpen, setConfirmOpen] = React.useState(false);
-  /** 「自动安装」是更新链路里唯一动系统的自动化，打开前必须再确认一次。 */
-  const [confirmAutoInstall, setConfirmAutoInstall] = React.useState(false);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
     try {
@@ -107,18 +81,12 @@ export function UpdatesPage() {
   }, [load]);
 
   // 网关正在检查时轮询：包括「打开面板时后端自动补的那一次」。
-  // 自动下载也在后台跑，所以本地还没有安装包时也继续轮询 —— 否则用户要手动刷新
-  // 才能看到「已下载」，会以为开关没生效。
-  const waitingForDownload =
-    Boolean(status?.update_available) && status?.auto_download === true && !status?.local_path;
+  // 下载与安装期间也要轮询 —— 进度条与「正在安装」都靠它。
   useVisibleInterval(
     () => void load(),
     // 下载进度条跟着这个节奏走：间隔太长条会一顿一顿的，太短又刷得太凶。
     status?.downloading ? 800 : CHECK_POLL_MS,
-    Boolean(status?.checking) ||
-      Boolean(status?.downloading) ||
-      Boolean(status?.installing) ||
-      waitingForDownload,
+    Boolean(status?.checking) || Boolean(status?.downloading) || Boolean(status?.installing),
   );
 
   // 网关重启/退出期间的探活：能拿到状态就说明新版本已经起来了，整页刷新让所有页面
@@ -152,9 +120,7 @@ export function UpdatesPage() {
         // 如实转述后端给的说明，别包装成「操作失败」。
         notifyError(next.error);
       } else if (next.update_available) {
-        notifyInfo(`发现新版本 ${next.latest ?? ""}`, {
-          description: next.auto_download ? "正在后台下载安装包。" : "可在本页下载安装包。",
-        });
+        notifyInfo(`发现新版本 ${next.latest ?? ""}`, { description: "点「更新」即可下载并安装。" });
       } else {
         notifySuccess("已是最新版本");
       }
@@ -165,71 +131,27 @@ export function UpdatesPage() {
     }
   }, []);
 
-  const handleSwitch = React.useCallback(
-    async (kind: "check" | "download" | "install", next: boolean) => {
-      setBusy("switch");
-      setError("");
-      try {
-        // 后端返回保存后的真实状态（含它顺手触发的那次检查/下载），不做乐观更新：
-        // 写 config.json 可能失败，乐观更新会让开关停在用户点的那一下。
-        const next_status =
-          kind === "check"
-            ? await setUpdateAutoCheck(next)
-            : kind === "download"
-              ? await setUpdateAutoDownload(next)
-              : await setUpdateAutoInstall(next);
-        setStatus(next_status);
-      } catch (err) {
-        setError(describeError(err));
-        await load();
-      } finally {
-        setBusy("");
-      }
-    },
-    [load],
-  );
-
-  // 下载加速前缀：文本输入，失焦/回车才提交（每个字符都发请求太吵）。
-  const [mirrorInput, setMirrorInput] = React.useState<string | null>(null);
-  const mirrorDraft = mirrorInput ?? (status?.download_mirror ?? "");
-  const handleMirrorSave = React.useCallback(async () => {
-    setBusy("mirror");
-    setError("");
-    try {
-      const res = await setUpdateMirror(mirrorDraft.trim());
-      setStatus((prev) => (prev ? { ...prev, download_mirror: res.mirror } : prev));
-      notifySuccess(res.detail || "下载加速设置已保存");
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy("");
-      setMirrorInput(null);
-    }
-  }, [mirrorDraft]);
-
-  const handleDownload = React.useCallback(async () => {
-    setBusy("download");
-    setError("");
-    try {
-      const res = await downloadUpdate();
-      if (!res.ok) {
-        setError(res.detail || "下载安装包失败。");
-        return;
-      }
-      notifySuccess(res.skipped ? "安装包已存在" : "安装包已下载", { description: res.detail });
-      await load();
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy("");
-    }
-  }, [load]);
-
-  const handleInstall = React.useCallback(async () => {
-    setBusy("install");
+  /**
+   * 点一下「更新」：没下过就先下载，下载完成**接着自动安装**。
+   *
+   * 下载与安装分成两个请求（而不是后端一次做完）是因为下载要几百 MB 的进度可看、
+   * 失败要能单独重试；而安装一旦开始就不该被网络中断打断 —— 两段的失败语义不同。
+   * 顺序固定在这里，用户只需要点一次。
+   */
+  const handleUpdate = React.useCallback(async () => {
+    setBusy("update");
     setError("");
     setInstallOutput("");
     try {
+      if (!status?.local_path) {
+        const dl = await downloadUpdate();
+        if (!dl.ok) {
+          setError(dl.detail || "下载安装包失败。");
+          return;
+        }
+        notifySuccess(dl.skipped ? "安装包已就绪" : "安装包已下载", { description: "接着开始安装…" });
+        await load();
+      }
       const res = await installUpdate();
       if (!res.ok) {
         setError(res.detail || "安装失败。");
@@ -253,7 +175,7 @@ export function UpdatesPage() {
     } finally {
       setBusy("");
     }
-  }, [load]);
+  }, [load, status?.local_path]);
 
   const handleOpenRelease = React.useCallback(async () => {
     const url = status?.release_url;
@@ -270,7 +192,6 @@ export function UpdatesPage() {
   const latest = status?.latest ?? "";
   const plan = status?.install;
   const downloaded = Boolean(status?.local_path);
-  const canInstall = Boolean(status?.update_available && downloaded && plan?.supported);
   const busyAll = busy !== "" || outcome !== "" || Boolean(status?.installing);
 
   return (
@@ -279,7 +200,7 @@ export function UpdatesPage() {
         <div className="min-w-0">
           <h1 className="text-[28px] font-semibold tracking-tight">更新</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            查询发布仓库的最新版本，自动把匹配本机平台的安装包下好；确认安装后，网关会重启到新版本。
+            查询发布仓库的最新版本；点「更新」把匹配本机平台的安装包下好，下载完成会自动安装并重启网关。
           </p>
         </div>
         <Button
@@ -382,7 +303,7 @@ export function UpdatesPage() {
           {status?.installing ? (
             <p className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground" aria-live="polite">
               <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-              正在自动安装（可能弹系统授权框，装完网关会重启或退出）…
+              正在安装（可能弹系统授权框；装完网关会重启或退出）…
             </p>
           ) : null}
 
@@ -416,93 +337,62 @@ export function UpdatesPage() {
           ) : null}
 
           {status?.update_available || downloaded ? (
-            <div className="flex flex-wrap items-center gap-2">
-              {canInstall && plan?.restart ? (
-                <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-                  <AlertDialogTrigger asChild>
-                    <Button type="button" size="sm" disabled={busyAll}>
-                      {busy === "install" ? (
-                        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                      ) : (
-                        <Wand2 className="size-3.5" aria-hidden="true" />
-                      )}
-                      {busy === "install" ? "正在安装…" : "安装并重启"}
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>安装 v{latest} 并重启网关？</AlertDialogTitle>
-                      <AlertDialogDescription className="space-y-3">
-                        <span className="block">
-                          安装会覆盖已装好的程序（网关
-                          {plan?.needs_auth ? "，并弹系统授权框临时提权" : ""}），装的过程不需要任何选择。
-                          安装期间这个页面会短暂断连，恢复后自动刷新。
-                        </span>
-                        {plan?.command ? (
-                          <span className="block">
-                            <span className="text-muted-foreground">将要执行：</span>
-                            <code className="mt-1 block whitespace-pre-wrap break-all rounded-md border bg-muted/50 px-2 py-1.5 font-mono text-[11px] leading-5">
-                              {plan.command}
-                            </code>
-                          </span>
-                        ) : null}
-                        {plan?.note ? (
-                          <span className="block text-muted-foreground">{plan.note}</span>
-                        ) : null}
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>取消</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={() => {
-                          setConfirmOpen(false);
-                          void handleInstall();
-                        }}
-                      >
-                        安装并重启
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 没匹配到本机形态的安装包时不显示「更新」：后端已经把原因写进
+                    detail（npm 安装要用 npm 升级、缺平台产物要去 Release 页）。
+                    留一个点了只会报错的按钮，比不显示更让人困惑。 */}
+                {status?.update_available && status.asset_name ? (
+                  <Button type="button" size="sm" disabled={busyAll} onClick={() => void handleUpdate()}>
+                    {busy === "update" ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : downloaded ? (
+                      <Wand2 className="size-3.5" aria-hidden="true" />
+                    ) : (
+                      <Download className="size-3.5" aria-hidden="true" />
+                    )}
+                    {busy === "update"
+                      ? downloaded
+                        ? "正在安装…"
+                        : "正在下载…"
+                      : downloaded
+                        ? "安装更新"
+                        : "下载更新"}
+                  </Button>
+                ) : null}
+
+                {status?.release_url ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busyAll}
+                    onClick={() => void handleOpenRelease()}
+                  >
+                    <ExternalLink className="size-3.5" aria-hidden="true" />
+                    打开 Release 页
+                  </Button>
+                ) : null}
+              </div>
+
+              {/* 点完之后会发生什么写在这里 —— 按钮旁边是用户唯一的知情入口。 */}
+              {status?.update_available && status.asset_name ? (
+                <CardHint>
+                  {downloaded
+                    ? "安装包已就绪，点「安装更新」直接装。"
+                    : "点「下载更新」：安装包下好之后会自动开始安装。"}
+                  安装过程不需要任何选择（Windows 上也不弹向导）；网关会重启到新版本，
+                  本页会短暂断连，恢复后自动刷新。
+                </CardHint>
               ) : null}
 
-              {/* 没有匹配本机形态的安装包时不显示「下载」：后端已经把原因写进
-                  detail（npm 安装要用 npm 升级、缺平台产物要去 Release 页）。
-                  留一个点了只会报错的按钮，比不显示更让人困惑。 */}
-              {status?.update_available && !downloaded && status.asset_name ? (
-                <Button type="button" size="sm" disabled={busyAll} onClick={() => void handleDownload()}>
-                  {busy === "download" ? (
-                    <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Download className="size-3.5" aria-hidden="true" />
-                  )}
-                  {busy === "download" ? "正在下载…" : "下载安装包"}
-                </Button>
-              ) : null}
-
-              {status?.release_url ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busyAll}
-                  onClick={() => void handleOpenRelease()}
-                >
-                  <ExternalLink className="size-3.5" aria-hidden="true" />
-                  打开 Release 页
-                </Button>
+              {downloaded && status?.local_path ? (
+                <CardHint>
+                  安装包在：<span className="font-mono break-all">{status.local_path}</span>
+                  {status.local_bytes ? `（${formatBytes(status.local_bytes)}）` : ""}
+                </CardHint>
               ) : null}
             </div>
-          ) : null}
-
-          {downloaded && status?.local_path ? (
-            <CardHint>
-              安装包已就绪：<span className="font-mono break-all">{status.local_path}</span>
-              {status.local_bytes ? `（${formatBytes(status.local_bytes)}）` : ""}
-              {plan?.supported
-                ? "。点上面的「安装并重启」直接升级。"
-                : "。本平台不支持面板内安装，请手动安装这个文件。"}
-            </CardHint>
           ) : null}
 
           {plan && status?.update_available && !plan.supported && plan.reason ? (
@@ -540,167 +430,6 @@ export function UpdatesPage() {
                 : " · 尚未检查"}
             </CardHint>
           ) : null}
-        </CardContent>
-      </Section>
-
-      <Section
-        id="update-auto"
-        title="自动更新"
-        description="检测、下载、安装都可以全自动；安装会覆盖已装好的程序、结束正在跑的进程，所以默认开启但随时可关。"
-      >
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Sparkles className="size-4 text-muted-foreground" aria-hidden="true" />
-                自动检查
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {status
-                  ? `每 ${status.interval_hours} 小时在后台查一次，发现新版本会写进日志并在本页提示`
-                  : "在后台周期查询最新版本"}
-              </div>
-            </div>
-            {loading ? (
-              <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden="true" />
-            ) : (
-              <Switch
-                checked={status?.auto_check ?? false}
-                disabled={busyAll || !status}
-                onCheckedChange={(checked) => void handleSwitch("check", checked)}
-                aria-label="自动检查更新"
-              />
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <HardDriveDownload className="size-4 text-muted-foreground" aria-hidden="true" />
-                自动下载安装包
-              </div>
-              <div className="text-xs text-muted-foreground">
-                发现新版本后直接下到数据目录，打开本页就能装 ——
-                只放一个文件，不改动已安装的程序、也不重启网关。
-              </div>
-            </div>
-            {loading ? (
-              <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden="true" />
-            ) : (
-              <Switch
-                checked={status?.auto_download ?? false}
-                disabled={busyAll || !status}
-                onCheckedChange={(checked) => void handleSwitch("download", checked)}
-                aria-label="自动下载安装包"
-              />
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Wand2 className="size-4 text-muted-foreground" aria-hidden="true" />
-                自动安装
-              </div>
-              <div className="text-xs text-muted-foreground">
-                安装包下好之后直接装并重启，全程不需要任何选择
-                （Windows 上也是：后台静默安装，不弹向导、不用点任何按钮）。
-                默认开启；它会覆盖程序、结束正在跑的进程，可随时关掉改成「只下不装」。
-              </div>
-            </div>
-            {loading ? (
-              <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden="true" />
-            ) : (
-              <Switch
-                checked={status?.auto_install ?? false}
-                disabled={busyAll || !status}
-                onCheckedChange={(checked) => {
-                  // 默认已开；关掉是恢复安全状态，直接生效、不拦。
-                  // 重新打开会覆盖程序、结束进程、重启网关，先确认。
-                  if (checked) setConfirmAutoInstall(true);
-                  else void handleSwitch("install", false);
-                }}
-                aria-label="自动安装更新"
-              />
-            )}
-          </div>
-
-          <div className="space-y-1.5 border-t pt-4">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Globe className="size-4 text-muted-foreground" aria-hidden="true" />
-              下载加速
-            </div>
-            <p className="text-xs leading-5 text-muted-foreground">
-              <strong className="font-medium text-foreground">默认开启</strong>
-              ：直连 github.com 下安装包慢，实际请求会变成 前缀 + 原地址。只影响安装包下载，
-              不影响版本检查。
-              <strong className="font-medium text-foreground">清空并保存 = 退回直连</strong>
-              （安装包将不经第三方转发）。
-            </p>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input
-                value={mirrorDraft}
-                onChange={(e) => setMirrorInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void handleMirrorSave();
-                }}
-                placeholder="https://gh-proxy.org（清空 = 直连）"
-                spellCheck={false}
-                className="h-8 max-w-md font-mono text-xs"
-                aria-label="下载加速前缀"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={busy === "mirror" || mirrorDraft.trim() === (status?.download_mirror ?? "")}
-                onClick={() => void handleMirrorSave()}
-              >
-                {busy === "mirror" ? (
-                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Save className="size-3.5" aria-hidden="true" />
-                )}
-                保存
-              </Button>
-            </div>
-          </div>
-
-          <AlertDialog open={confirmAutoInstall} onOpenChange={setConfirmAutoInstall}>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>打开「自动安装」？</AlertDialogTitle>
-                <AlertDialogDescription className="space-y-3">
-                  <span className="block">
-                    打开之后：发现新版本会**自动**下载并安装，全程不需要任何选择
-                    （Windows 上也不会弹向导），网关随即回到新版本。
-                  </span>
-                  <span className="block">
-                    安装会覆盖已装好的程序、结束正在跑的进程，必要时弹系统授权框；
-                    失败时可能留下一个既起不来、也没有回退版本的现场。
-                    装在跑着重要会话的机器上时，请确认你能接受这次重启。
-                  </span>
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>取消</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={() => {
-                    setConfirmAutoInstall(false);
-                    void handleSwitch("install", true);
-                  }}
-                >
-                  打开自动安装
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-
-          <CardHint>
-            自动检查、自动下载、自动安装三项默认全开：发现新版本即下载，下好即静默安装并重启，
-            全程不需要任何选择。安装会覆盖程序、结束正在跑的进程；不想让它自动装的话，
-            关掉上面的开关即可（那就只下不装，安装那一下由你自己动手）。
-          </CardHint>
         </CardContent>
       </Section>
     </div>

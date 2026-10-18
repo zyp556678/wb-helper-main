@@ -23,30 +23,12 @@ import (
 //
 // 不调 config.Load：那会去读工作目录里的 config.json，测试结果就会随开发机上的
 // 配置变化 —— 而这里的每条断言都只该取决于测试自己写下的输入。
-//
-// **默认关掉下载加速**：加速前缀默认开启（config.DefaultDownloadMirror），
-// 而这些测试的「上游」是本地 httptest 假服务器（http://127.0.0.1:<随机端口>/dl/...）。
-// 不关的话每个下载用例都会去请求 https://ghfast.top/http://127.0.0.1:... ——
-// 跑真实互联网、等真实超时，用例从毫秒级变成分钟级，最后一个还会把整包拖到
-// 10 分钟超时（实测踩到）。本地测试指向本地服务，本就该直连。
-//
-// 关的方式是**真的走一遍配置保存**（写空串到 config.json 再重新加载），
-// 与用户在面板里「清空并保存」完全等价 —— 这样就不需要为测试造一个
-// 绕过 present 判定的后门，测的也仍是真实取值路径。
-// 需要验证加速拼接的用例自己显式打开（见 TestApplyDownloadMirror 与
-// install_test.go 的加速相关断言）。
 func testConfig(t *testing.T, sec config.UpdateSection) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{WorkDir: dir, ConfigFile: filepath.Join(dir, "config.json")}
 	cfg.ApplyDefaults()
-	// 显式关闭加速（空串 + 落盘，于是 updateMirrorPresent 为真）。
-	if _, _, err := cfg.SavePatch([]byte(`{"update":{"download_mirror":""}}`)); err != nil {
-		t.Fatalf("准备测试配置失败: %v", err)
-	}
-	// 再用调用方给的 update 段覆盖（加速仍是显式关闭，不会被默认值顶回来）。
 	cfg.Update = sec
-	cfg.Update.DownloadMirror = ""
 	return cfg
 }
 
@@ -111,12 +93,6 @@ func asset(name string, size int64, url string) map[string]any {
 
 func newChecker(t *testing.T, f *fakeGitHub, cur string, goos, goarch string, sec config.UpdateSection) *Checker {
 	t.Helper()
-	// 默认关掉「发现新版本就自动下载」：本文件里绝大多数用例都是**手工**驱动
-	// Download 并数请求次数 / 断言 skipped 的，而后台自动下载会先一步把包下好，
-	// 那些断言就量不到它们想量的事了。要测自动下载的用例自己显式打开。
-	if sec.AutoDownload == nil {
-		sec.AutoDownload = boolPtr(false)
-	}
 	c := New(testConfig(t, sec), Options{
 		Current:     cur,
 		Client:      f.Client(),
@@ -126,19 +102,15 @@ func newChecker(t *testing.T, f *fakeGitHub, cur string, goos, goarch string, se
 		DownloadDir: t.TempDir(),
 		Logf:        t.Logf,
 	})
-	// 后台自动下载可能还在跑：等它收尾，否则它会在测试结束后 t.Logf（panic）。
-	t.Cleanup(c.WaitBackground)
 	return c
 }
 
-// noAutoDownload 给测试用的 update 段：关掉「发现新版本就自动下载」。
+// updateSection 是大多数用例共用的 update 段：只指定仓库，其余全部走默认。
 //
-// 本文件大多数用例都是**手工**驱动 Download 并数请求次数 / 断言 skipped 的，而后台
-// 自动下载会抢在它们之前把包下好（断言失真），还会在用例结束后继续 t.Logf ——
-// 那会让 `go test` 直接 panic，且报错看上去与用例毫无关系。
-// 要测自动下载的用例自己显式打开（见 TestAutoDownloadDefaultsTrue）。
-func noAutoDownload() config.UpdateSection {
-	return config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)}
+// 检查本身不再顺手下载任何东西（下载是用户点出来的一步），所以用例不必再为了
+// 「别让后台下载抢跑」而关掉某个开关。
+func updateSection() config.UpdateSection {
+	return config.UpdateSection{Repo: "o/r"}
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +470,7 @@ func TestDownloadWritesAssetAtomically(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	c := New(testConfig(t, noAutoDownload()), Options{
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -637,9 +609,6 @@ func TestLoopRespectsDisabled(t *testing.T) {
 	if f.calls != 0 {
 		t.Errorf("关掉自动检查后不该发请求，实际 %d 次", f.calls)
 	}
-	if st := c.State(); st.AutoCheck {
-		t.Error("State.AutoCheck 应当如实反映配置")
-	}
 }
 
 // 大文件下载断在中间是常事：瞬时中断应当自动重试，而不是让用户从头再来。
@@ -674,7 +643,7 @@ func TestDownloadRetriesTransientFailure(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	c := New(testConfig(t, noAutoDownload()), Options{
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -718,7 +687,7 @@ func TestDownloadDoesNotRetryHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(testConfig(t, noAutoDownload()), Options{
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
 	})
@@ -739,7 +708,7 @@ func TestCheckKeepsLastResultOnFailure(t *testing.T) {
 			asset("pkg_0.9.3_amd64.deb", 10, "https://github.com/o/r/releases/download/v0.9.3/pkg.deb"),
 		},
 	}))
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", noAutoDownload())
+	c := newChecker(t, f, "0.9.2", "linux", "amd64", updateSection())
 	good := c.Check(context.Background(), true)
 	if good.Error != "" || !good.UpdateAvailable {
 		t.Fatalf("前置检查应当成功且发现更新，实际 %+v", good)
@@ -762,7 +731,7 @@ func TestCheckKeepsLastResultOnFailure(t *testing.T) {
 func TestCheckThrottlesAfterFailure(t *testing.T) {
 	f := newFakeGitHub(t)
 	f.status = http.StatusInternalServerError
-	c := newChecker(t, f, "0.9.2", "linux", "amd64", noAutoDownload())
+	c := newChecker(t, f, "0.9.2", "linux", "amd64", updateSection())
 	c.Check(context.Background(), true)
 	if f.calls != 1 {
 		t.Fatalf("第一次应当发一次请求，实际 %d", f.calls)
@@ -798,7 +767,7 @@ func TestDownloadUsesBrowserURLWithoutToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(testConfig(t, noAutoDownload()), Options{
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
 	})
@@ -837,10 +806,9 @@ func TestDownloadIsSerialized(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	// 关掉自动下载：这条用例量的是「两个并发 Download 只会真下一次」，而自动下载
-	// 也在调同一个入口 —— 它先把包下好之后，两个显式请求都会走「已存在」分支，
-	// 用例就量不到它想量的事了。
-	c := New(testConfig(t, noAutoDownload()), Options{
+	// 这条用例量的是「两个并发 Download 只会真下一次」：检查本身不再下载任何东西，
+	// 所以两个请求都能走到下载逻辑里来。
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
@@ -911,7 +879,7 @@ func TestDownloadCleansStaleTempFiles(t *testing.T) {
 		t.Fatalf("造陈旧临时文件失败: %v", err)
 	}
 
-	c := New(testConfig(t, noAutoDownload()), Options{
+	c := New(testConfig(t, updateSection()), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})

@@ -22,9 +22,9 @@ import (
 // 而安装会覆盖已经装好的程序、结束正在跑的进程、必要时提权，失败的样子也很难看 ——
 // 可能留下一个「既起不来、也没有可回退版本」的现场，而用户的 CLI / IDE 全指着这个端口。
 //
-// 所以分界画在「装不装」上：由用户决定（`update.auto_install`，默认开，面板上随时可关）。
-// 而**装的过程本身不需要用户再选什么** —— 下面三条路径都是无人值守的：不会弹向导、
-// 不会摆出「安装前卸载 / 请勿卸载」之类的选择题。
+// 所以分界画在「装不装」上：由用户点一下面板上的「更新」按钮（检测在后台自动，
+// 因为它只是每几小时一次只读 GET）。点下去之后的两步 —— 下载、安装 —— 都不需要
+// 用户再做任何选择，见下面三条路径。
 //
 // # 各平台的做法与边界
 //
@@ -189,6 +189,13 @@ func (c *Checker) Install(ctx context.Context) (InstallResult, error) {
 	if err := c.Ready(); err != nil {
 		return InstallResult{}, err
 	}
+	// 同一时刻只允许一次安装：面板连点、或「下载刚完成」与用户手动点击撞在一起时，
+	// 第二次直接拒绝 —— 两个安装程序同时覆盖同一批文件会把现场弄成最难收拾的样子。
+	// 这个标志也是状态里的 Installing（面板据此显示「正在安装」）。
+	if !c.installing.CompareAndSwap(false, true) {
+		return InstallResult{}, errors.New("已有一次安装在进行")
+	}
+	defer c.installing.Store(false)
 	st := c.State()
 	path, _ := c.localAsset(st.AssetName, st.AssetSize)
 	c.logf("[更新] 开始安装 %s（版本 %s）", path, st.Latest)

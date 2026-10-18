@@ -114,9 +114,6 @@ func (s *Server) configView() map[string]any {
 			"check_hours":        c.Update.CheckHours,
 			"repo":               c.Update.Repo,
 			"include_prerelease": c.UpdatePrerelease(),
-			"auto_download":      c.UpdateAutoDownload(),
-			"auto_install":       c.UpdateAutoInstall(),
-			"download_mirror":    c.UpdateDownloadMirror(),
 		},
 
 		// ---- 提示词与出站改写（切片 4）----

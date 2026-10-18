@@ -565,103 +565,11 @@ func TestEmptyModelsListClearsList(t *testing.T) {
 	}
 }
 
-// TestUpdateAutoDownloadRoundTrip 自动下载开关：默认开、显式关能关掉、
-// 只改其它字段不会把它重置（用指针记「显式提交」正是为了这个）。
-func TestUpdateAutoDownloadRoundTrip(t *testing.T) {
-	c := newTestConfig(t)
-	if !c.UpdateAutoDownload() {
-		t.Fatal("未配置时应默认开启自动下载")
-	}
-
-	save(t, c, `{"update":{"auto_download":false}}`)
-	if c.UpdateAutoDownload() {
-		t.Fatal("显式关掉后仍报告开启")
-	}
-
-	// 只改间隔：不能把开关带回默认值（那会让「关掉自动下载」在下次改别的设置时失效）。
-	save(t, c, `{"update":{"check_hours":12}}`)
-	if c.UpdateAutoDownload() {
-		t.Fatal("局部提交不该重置自动下载开关")
-	}
-	if c.Update.CheckHours != 12 {
-		t.Fatalf("检查间隔没生效: %d", c.Update.CheckHours)
-	}
-
-	save(t, c, `{"update":{"auto_download":true}}`)
-	if !c.UpdateAutoDownload() {
-		t.Fatal("重新打开后应当报告开启")
-	}
-	// 落盘的键名与面板/文档一致。
-	raw := readConfigJSON(t, c)
-	upd, _ := raw["update"].(map[string]any)
-	if upd["auto_download"] != true {
-		t.Fatalf("config.json 里的键不对: %#v", upd)
-	}
-}
-
-// TestUpdateDownloadMirrorDefaultAndOptOut 下载加速前缀的三态语义。
-//
-//	键不存在      → 默认加速（DefaultDownloadMirror）
-//	键存在且非空  → 用填的值
-//	键存在且为空  → 显式关闭加速，退回直连
-//
-// 空串必须有确切的含义，否则「清空并保存 = 退回直连」这条操作走不通：
-// 会被当成「没配」而让默认值又把它填回来，变成一个关不掉的开关。
-func TestUpdateDownloadMirrorDefaultAndOptOut(t *testing.T) {
-	c := newTestConfig(t)
-
-	// 一、未配置 → 默认开启加速。
-	if got := c.UpdateDownloadMirror(); got != DefaultDownloadMirror {
-		t.Fatalf("未配置时应默认开启加速（%q），得到 %q", DefaultDownloadMirror, got)
-	}
-
-	// 二、填了自定义前缀 → 用它。
-	save(t, c, `{"update":{"download_mirror":"https://mirror.example.com"}}`)
-	if got := c.UpdateDownloadMirror(); got != "https://mirror.example.com" {
-		t.Fatalf("自定义前缀没生效: %q", got)
-	}
-
-	// 三、清空并保存 → 退回直连，且**不会**被默认值重新填上。
-	save(t, c, `{"update":{"download_mirror":""}}`)
-	if got := c.UpdateDownloadMirror(); got != "" {
-		t.Fatalf("显式清空应退回直连（空串），得到 %q —— 默认值把它填回来了，开关关不掉", got)
-	}
-
-	// 四、之后改别的 update 字段，不能把「已关闭」重置回默认值。
-	save(t, c, `{"update":{"check_hours":12}}`)
-	if got := c.UpdateDownloadMirror(); got != "" {
-		t.Fatalf("局部提交不该重置下载加速设置，得到 %q", got)
-	}
-
-	// 五、重新填写能再打开。
-	save(t, c, `{"update":{"download_mirror":"https://ghfast.top"}}`)
-	if got := c.UpdateDownloadMirror(); got != "https://ghfast.top" {
-		t.Fatalf("重新填写后应生效: %q", got)
-	}
-}
-
-// TestUpdateDownloadMirrorSurvivesReload 重启后三态语义仍然成立。
-//
-// 内存里的 updateMirrorPresent 来自加载期，而「键存在且为空」必须能在
-// 重新读盘后依旧被认出来 —— 否则重启一次就把用户的「退回直连」抹掉了。
-func TestUpdateDownloadMirrorSurvivesReload(t *testing.T) {
-	c := newTestConfig(t)
-	save(t, c, `{"update":{"download_mirror":""}}`)
-
-	reloaded, err := Load(&Config{ConfigFile: c.ConfigFile, WorkDir: c.WorkDir})
-	if err != nil {
-		t.Fatalf("重新加载失败: %v", err)
-	}
-	if got := reloaded.UpdateDownloadMirror(); got != "" {
-		t.Fatalf("重启后应保持「已退回直连」，得到 %q", got)
-	}
-}
-
 // TestProbeDisabledByDefaultButOptIn 钉住价格探测的默认值：**默认关闭**，
 // 显式配置才能打开。
 //
 // 为什么默认必须关：探测会向模型发真实的生成请求（消耗积分）。默认开等于
-// 「装好就开始悄悄花用户的积分」—— 与「下载加速」那种零成本默认开不是一回事。
+// 「装好就开始悄悄花用户的积分」—— 与「检查更新」那种零成本默认不是一回事。
 // 这条断言防的是「哪次重构顺手把默认值改回 true」。
 //
 // 开关走的是**配置文件**（config.json 的顶层 models_probe），不是面板保存：
@@ -735,33 +643,5 @@ func TestModelsNPMStillDefaultsOn(t *testing.T) {
 	c := newTestConfig(t)
 	if !c.ModelsNPMEnabled() {
 		t.Fatal("npm 目录兜底应默认开启（它不消耗积分）")
-	}
-}
-
-// TestDefaultDownloadMirrorPointsAtLiveHost 默认加速前缀必须是**能连上**的那个。
-//
-// 这条不测网络（单测不打外网），只钉住「不许改回已失效的 ghfast.top」这个事实：
-// 该站在 2026-10 实测直连 TLS 握手无响应，默认值指向它会让新用户的下载永远转圈。
-func TestDefaultDownloadMirrorPointsAtLiveHost(t *testing.T) {
-	if DefaultDownloadMirror != "https://gh-proxy.org" {
-		t.Fatalf("默认加速前缀应是实测可用的 gh-proxy.org，得到 %q", DefaultDownloadMirror)
-	}
-}
-
-// 自动安装默认开启（用户要求：点一下更新就装完），但仍可显式关掉。
-func TestUpdateAutoInstallDefaultsOn(t *testing.T) {
-	c := &Config{}
-	if !c.UpdateAutoInstall() {
-		t.Fatal("未配置时自动安装应默认开启")
-	}
-	off := false
-	c.Update.AutoInstall = &off
-	if c.UpdateAutoInstall() {
-		t.Fatal("显式设为 false 时必须关闭")
-	}
-	on := true
-	c.Update.AutoInstall = &on
-	if !c.UpdateAutoInstall() {
-		t.Fatal("显式设为 true 时应开启")
 	}
 }

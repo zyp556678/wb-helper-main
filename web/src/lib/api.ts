@@ -1264,45 +1264,10 @@ export function checkUpdateNow() {
 }
 
 /**
- * 开关「自动检查」（POST /panel/api/update/auto）。
- *
- * 写的是 config.json 的 `update.enabled`（复用配置层的补丁链路），返回最新状态。
- */
-export function setUpdateAutoCheck(enabled: boolean) {
-  return request<UpdateStatus>("/update/auto", { method: "POST", body: { enabled } });
-}
-
-/**
- * 开关「自动下载」（POST /panel/api/update/auto）。
- *
- * 写的是 config.json 的 `update.auto_download`。打开时后端会顺手补一次检查，
- * 因此返回的状态里可能已经带着下载好的安装包。
- */
-export function setUpdateAutoDownload(enabled: boolean) {
-  return request<UpdateStatus>("/update/auto", { method: "POST", body: { auto_download: enabled } });
-}
-
-/**
- * 开关「自动安装」（POST /panel/api/update/auto）。
- *
- * 写的是 config.json 的 `update.auto_install`。打开之后：安装包下好即自动安装并
- * 重启（Windows 上是退出让出文件锁）。**这是更新链路里唯一真正动系统的自动化**，
- * 所以默认关。
- */
-export function setUpdateAutoInstall(enabled: boolean) {
-  return request<UpdateStatus>("/update/auto", { method: "POST", body: { auto_install: enabled } });
-}
-
-/** 设置下载加速前缀（POST /panel/api/update/mirror，传空串表示直连）。 */
-export function setUpdateMirror(mirror: string) {
-  return request<{ ok: boolean; mirror: string; detail?: string }>("/update/mirror", {
-    method: "POST",
-    body: { mirror },
-  });
-}
-
-/**
  * 下载匹配本机平台的安装包（POST /panel/api/update/download）。
+ *
+ * 这是「点一下更新」的前半段：面板在它成功返回后立刻调用 installUpdate，
+ * 所以用户只需要点一次。
  *
  * 动作型端点：<500 不抛异常，`{ok:false,detail}` 由调用方原样展示 ——
  * 「没有匹配的安装包」是确定性结果，不是故障。
@@ -1317,7 +1282,9 @@ export function downloadUpdate() {
  * 把已下载的安装包装到本机（POST /panel/api/update/install）。
  *
  * **破坏性动作**：会覆盖已装好的程序、结束正在跑的进程、必要时弹系统授权框；
- * 之后网关会自行重启（restart=true），面板要在响应拿到**之后**才开始等它回来。
+ * 安装过程本身不需要任何选择（Windows 上跑 /S /R，不弹向导）。
+ * 之后网关会自行重启（restart=true）或退出（exit=true，Windows 让出文件锁，
+ * 由安装包把应用重新拉起来），面板要在响应拿到**之后**才开始等它回来。
  *
  * 端点不接受传路径：装哪个文件由后端从当前检查结果推导，前端无法让它执行任意文件。
  * 提权框可能要等用户操作，请求可能持续很久（后端给 10 分钟）。

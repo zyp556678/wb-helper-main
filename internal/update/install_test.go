@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"workbuddy-gateway/internal/config"
-	"workbuddy-gateway/internal/eventlog"
 )
 
 // assetServer 起一个「假 Release 源 + 假安装包下载」的服务端。
@@ -44,8 +43,6 @@ func assetServer(t *testing.T, goos, name string, payload []byte, sec config.Upd
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: goos, GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
-	// 自动下载在后台跑：等它收尾，否则它会在测试结束后 t.Logf（panic）。
-	t.Cleanup(c.WaitBackground)
 	return c, dir
 }
 
@@ -133,8 +130,7 @@ func TestLocalAssetRequiresMatchingSize(t *testing.T) {
 // TestInstallRequiresDownloadedAsset 没下好之前安装必须被拒绝，并说清该做什么；
 // 这条同时守住「本地包不存在时绝不执行任何平台命令」这条边界。
 func TestInstallRequiresDownloadedAsset(t *testing.T) {
-	c, _ := assetServer(t, "linux", "pkg.deb", []byte("x"),
-		config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)})
+	c, _ := assetServer(t, "linux", "pkg.deb", []byte("x"), config.UpdateSection{Repo: "o/r"})
 	c.Check(context.Background(), true)
 
 	_, err := c.Install(context.Background())
@@ -160,8 +156,7 @@ func TestInstallRejectsWithoutUpdate(t *testing.T) {
 
 // TestInstallUnsupportedPlatform plan9 这类平台没有可执行方案时应如实拒绝。
 func TestInstallUnsupportedPlatform(t *testing.T) {
-	c, _ := assetServer(t, "plan9", "pkg.deb", []byte("x"),
-		config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)})
+	c, _ := assetServer(t, "plan9", "pkg.deb", []byte("x"), config.UpdateSection{Repo: "o/r"})
 	c.Check(context.Background(), true)
 
 	if _, err := c.Install(context.Background()); err == nil {
@@ -170,11 +165,10 @@ func TestInstallUnsupportedPlatform(t *testing.T) {
 }
 
 // TestStateExposesReadyAssetAndPlan 下好之后状态里要带「本地路径 + 本机安装方案」，
-// 面板据此把「下载」换成「安装并重启」（刷新页面也不必重新下载）。
+// 面板据此把「下载」换成「安装」（刷新页面也不必重新下载）。
 func TestStateExposesReadyAssetAndPlan(t *testing.T) {
 	const name = "workbuddy-gateway-desktop_0.9.3_amd64.deb"
-	c, _ := assetServer(t, "linux", name, []byte("deb"),
-		config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)})
+	c, _ := assetServer(t, "linux", name, []byte("deb"), config.UpdateSection{Repo: "o/r"})
 	c.Check(context.Background(), true)
 
 	if st := c.State(); st.LocalPath != "" {
@@ -191,73 +185,42 @@ func TestStateExposesReadyAssetAndPlan(t *testing.T) {
 	if !st.Install.Supported || !st.Install.Restart {
 		t.Fatalf("linux 上应给出可安装方案：%+v", st.Install)
 	}
-	// 关掉自动下载后状态要如实反映（面板据此渲染开关）。
-	c.SetConfig(testConfig(t, config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)}))
-	if st := c.State(); st.AutoDownload {
-		t.Fatal("配置关掉自动下载后状态里不该还是 true")
+	// 检测本身不再下载任何东西：这是「点更新按钮 → 下载 → 装」的第一步，
+	// 与检查解耦。这里用「检查后本地仍然没有包」把它钉住。
+	c2, dir2 := assetServer(t, "linux", name, []byte("deb"), config.UpdateSection{Repo: "o/r"})
+	c2.Check(context.Background(), true)
+	if _, err := os.Stat(filepath.Join(dir2, name)); err == nil {
+		t.Fatal("检查更新不该顺手下载安装包（下载是用户点出来的一步）")
 	}
 }
 
-// TestAutoDownloadDefaultsTrue 缺省（配置里没写 auto_download）就是「自动下载」。
+// TestDownloadRoutesPreferDirectThenMirror 下载路线：**直连优先**，只有 GitHub 家族的
+// 地址才追加镜像回退；本地/自建源不触发回退。
 //
-// 这条钉的是一个判断：下载只是往数据目录放一个文件，不改动已安装的程序；
-// 默认关的代价是用户点开面板还得等一次几十 MB 的下载。
-func TestAutoDownloadDefaultsTrue(t *testing.T) {
-	f := newFakeGitHub(t)
-	f.body = releasesJSON(mkRelease("v0.9.3", nil))
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
-		Current: "0.9.2", Client: f.Client(), APIBase: f.URL,
-		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
-	})
-	t.Cleanup(c.WaitBackground)
+// 最后一条不只是省流量：测试与自建源用的都是本地地址，若也套镜像前缀，
+// 每个失败的用例都会去打一次真实网络（这正是上一版测试里那套「显式关掉加速」
+// 的由来 —— 现在由地址本身决定，不需要开关）。
+func TestDownloadRoutesPreferDirectThenMirror(t *testing.T) {
+	c := &Checker{}
+	const raw = "https://github.com/o/r/releases/download/v1/app.deb"
 
-	if !c.State().AutoDownload {
-		t.Fatal("没配 auto_download 时应当默认开启")
+	routes := c.downloadRoutes(raw)
+	if len(routes) != 2 {
+		t.Fatalf("GitHub 地址应有「直连 + 镜像」两条路线，实际 %d：%+v", len(routes), routes)
 	}
-	if !c.settings().autoDownload {
-		t.Fatal("检查路径读到的开关也应当是开")
+	if !routes[0].direct || routes[0].url != raw {
+		t.Fatalf("第一条路线必须是原地址直连：%+v", routes[0])
 	}
-}
-
-// TestCheckAutoDownloads 发现新版本会自动把安装包下好（默认开）。
-func TestCheckAutoDownloads(t *testing.T) {
-	const name = "workbuddy-gateway-desktop_0.9.3_amd64.deb"
-	payload := []byte("deb-bytes")
-	c, dir := assetServer(t, "linux", name, payload, config.UpdateSection{Repo: "o/r"})
-
-	c.Check(context.Background(), true)
-
-	dest := filepath.Join(dir, name)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if data, err := os.ReadFile(dest); err == nil {
-			if string(data) != string(payload) {
-				t.Fatalf("自动下载的内容不对: %q", data)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("检查发现新版本后没有自动下载安装包")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if want := DefaultDownloadMirror + "/" + raw; routes[1].url != want {
+		t.Fatalf("第二条路线应是镜像拼接：%+v（期望 %s）", routes[1], want)
 	}
-}
-
-// TestCheckAutoDownloadDisabled 关掉开关后不再自动下载（手动下载仍然可用）。
-func TestCheckAutoDownloadDisabled(t *testing.T) {
-	const name = "workbuddy-gateway-desktop_0.9.3_amd64.deb"
-	c, dir := assetServer(t, "linux", name, []byte("deb"),
-		config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)})
-
-	c.Check(context.Background(), true)
-	time.Sleep(200 * time.Millisecond) // 给后台 goroutine 一点时间（它本就不该被启动）
-
-	if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-		t.Fatal("关掉自动下载后不该有文件落盘")
+	if routes[1].mirrorHost != "gh-proxy.org" {
+		t.Fatalf("镜像路线要带上主机名（重定向白名单要用）：%+v", routes[1])
 	}
-	// 关掉自动下载不影响手动下载。
-	if _, err := c.Download(context.Background()); err != nil {
-		t.Fatalf("手动下载不该受开关影响: %v", err)
+
+	local := c.downloadRoutes("http://127.0.0.1:8080/dl/app.deb")
+	if len(local) != 1 || !local[0].direct {
+		t.Fatalf("非 GitHub 地址不该回退镜像：%+v", local)
 	}
 }
 
@@ -341,16 +304,13 @@ func TestApplyDownloadMirror(t *testing.T) {
 	}
 }
 
-// TestAutoInstallFailsGracefully 端到端（不起壳、不弹授权框）：
-// auto_download + auto_install 全开时，检查 → 下载 → 自动安装 → 失败被如实记录。
+// TestInstallFailureIsReported 安装失败要**如实报错**，而且要把话说清楚
+// （面板把 err 直接显示给用户），进程不能崩。
 //
-// 「让安装失败」用 plan9：它没有任何安装方案（planFor 不支持），Install 会在碰
-// 平台命令之前就被拒 —— 测试绝不能真的调 pkexec。要验证的是失败路径本身：
-// 结局钩子不触发、事件日志里有 Warn（用户能在面板「日志」页看到为什么没装上）。
-func TestAutoInstallFailsGracefully(t *testing.T) {
+// 用 plan9 当「失败」：它没有任何安装方案，Install 会在碰平台命令之前就被拒 ——
+// 测试绝不能真的去调 pkexec。
+func TestInstallFailureIsReported(t *testing.T) {
 	dir := t.TempDir()
-	// plan9 没有安装方案 → Ready() 会拒 → 自动安装记失败事件。
-	// 这恰好覆盖「安装失败也要有痕迹、进程不能崩」的路径。
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -368,35 +328,25 @@ func TestAutoInstallFailsGracefully(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	events := eventlog.New(50)
-	c := New(testConfig(t, config.UpdateSection{
-		Repo:        "o/r",
-		AutoInstall: boolPtr(true),
-	}), Options{
+	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
-		GOOS: "plan9", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf, Events: events,
+		GOOS: "plan9", GOARCH: "amd64", DownloadDir: dir, Logf: t.Logf,
 	})
-	var restarts, exits int
-	c.SetRestartHook(func() { restarts++ })
-	c.SetExitHook(func() { exits++ })
-	t.Cleanup(c.WaitBackground)
-
 	c.Check(context.Background(), true)
-	c.WaitBackground() // 等自动下载 + 自动安装都收尾
+	if _, err := c.Download(context.Background()); err != nil {
+		t.Fatalf("下载失败: %v", err)
+	}
 
-	// 安装失败（plan9 不支持）→ 结局钩子不该被触发。
-	if restarts != 0 || exits != 0 {
-		t.Fatalf("安装失败时结局钩子不应触发，实际 restart=%d exit=%d", restarts, exits)
+	_, err := c.Install(context.Background())
+	if err == nil {
+		t.Fatal("没有安装方案的平台应当报错")
 	}
-	// 但失败要有痕迹：事件日志里应有 Warn（update_auto_install_failed）。
-	found := false
-	for _, e := range events.Query(eventlog.Query{}).Events {
-		if e.Event == "update_auto_install_failed" {
-			found = true
-		}
+	if !strings.Contains(err.Error(), "plan9") {
+		t.Fatalf("报错要说清是哪个平台没有方案，实际 %q", err.Error())
 	}
-	if !found {
-		t.Fatal("自动安装失败没有记事件")
+	// 失败之后「正在安装」标记必须复位，否则面板会一直置灰按钮。
+	if st := c.State(); st.Installing {
+		t.Fatal("安装失败后 Installing 应当复位")
 	}
 }
 
@@ -430,7 +380,7 @@ func TestDownloadReportsProgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(testConfig(t, config.UpdateSection{Repo: "o/r", AutoDownload: boolPtr(false)}), Options{
+	c := New(testConfig(t, config.UpdateSection{Repo: "o/r"}), Options{
 		Current: "0.9.2", Client: srv.Client(), APIBase: srv.URL,
 		GOOS: "linux", GOARCH: "amd64", DownloadDir: t.TempDir(), Logf: t.Logf,
 	})

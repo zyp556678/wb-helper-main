@@ -208,12 +208,6 @@ func (s *Server) requestRestart(after time.Duration) {
 	time.AfterFunc(after, s.restartFn)
 }
 
-// RequestRestart 立即请求网关重启（供自动安装的完成钩子调用，见 main.go 的接线）。
-func (s *Server) RequestRestart() { s.requestRestart(0) }
-
-// RequestExit 立即请求网关退出（供自动安装的完成钩子调用，见 main.go 的接线）。
-func (s *Server) RequestExit() { s.requestExit(0) }
-
 // requestExit 在响应写回之后请求网关退出（不重启）。
 //
 // 同样要等响应写完：否则面板只会看到一个网络错误，用户以为安装失败。
@@ -381,10 +375,8 @@ func (s *Server) Handler() http.Handler {
 	// ---- 面板：检查更新 ----
 	// 检测只能由网关代发：面板的 CSP 是 connect-src 'self'，浏览器里发不出跨域请求。
 	mux.HandleFunc("/panel/api/update", s.withPanelAuth(s.handlePanelUpdateRoute))
-	mux.HandleFunc("/panel/api/update/auto", s.withPanelAuth(s.setUpdateAutoCheck))
 	mux.HandleFunc("/panel/api/update/download", s.withPanelAuth(s.downloadUpdate))
 	mux.HandleFunc("/panel/api/update/install", s.withPanelAuth(s.installUpdate))
-	mux.HandleFunc("/panel/api/update/mirror", s.withPanelAuth(s.setUpdateMirror))
 
 	// ---- 面板：用量统计（切片 6）----
 	mux.HandleFunc("/panel/api/stats", s.withPanelAuth(s.handlePanelStats))

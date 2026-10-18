@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,13 +43,7 @@ func fakeGitHubForServer(t *testing.T, tag string) (*httptest.Server, []byte) {
 // attachChecker 给测试 Server 挂一个指向假 GitHub 的检查器。
 func attachChecker(t *testing.T, s *Server, fake *httptest.Server, dir string) *update.Checker {
 	t.Helper()
-	// 默认关掉「发现新版本就自动下载」：本文件量的是端点行为（状态、字段、开关落盘），
-	// 而后台自动下载会在用例结束后继续 t.Logf（go test 会因此 panic），
-	// 也会让「还没下载」这类前置条件在用例中途被悄悄满足。要测自动下载的用例自己打开。
-	cfg := s.config().Clone()
-	off := false
-	cfg.Update.AutoDownload = &off
-	checker := update.New(cfg, update.Options{
+	checker := update.New(s.config().Clone(), update.Options{
 		Current:     "0.9.2",
 		Client:      fake.Client(),
 		APIBase:     fake.URL,
@@ -59,7 +52,6 @@ func attachChecker(t *testing.T, s *Server, fake *httptest.Server, dir string) *
 		DownloadDir: dir,
 		Logf:        t.Logf,
 	})
-	t.Cleanup(checker.WaitBackground)
 	s.SetUpdateChecker(checker)
 	return checker
 }
@@ -128,63 +120,6 @@ func TestUpdateEndpointRejectsOtherMethods(t *testing.T) {
 	s.handlePanelUpdateRoute(rec, httptest.NewRequest(http.MethodDelete, "/panel/api/update", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("应当 405，实际 %d", rec.Code)
-	}
-}
-
-// 自动检查开关写进 config.json 的 update 段，并且不能碰其它字段。
-func TestUpdateAutoCheckPersistsToConfig(t *testing.T) {
-	s := newTestServer(t, "")
-	fake, _ := fakeGitHubForServer(t, "v0.9.3")
-	attachChecker(t, s, fake, t.TempDir())
-
-	// 先写一份带其它 update 字段的配置，验证补丁不会把它们冲掉。
-	path := filepath.Join(s.config().WorkDir, "config.json")
-	original := `{"update":{"repo":"o/r","check_hours":12}}` + "\n"
-	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
-		t.Fatalf("写配置失败: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	s.setUpdateAutoCheck(rec, httptest.NewRequest(http.MethodPost, "/panel/api/update/auto",
-		strings.NewReader(`{"enabled":false}`)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("应当 200，实际 %d（体=%s）", rec.Code, rec.Body.String())
-	}
-	if auto, _ := decodeJSONBody(t, rec)["auto_check"].(bool); auto {
-		t.Error("返回状态里 auto_check 应当已变成 false")
-	}
-	if s.config().UpdateEnabled() {
-		t.Error("内存配置也应当同步成关闭")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("读配置失败: %v", err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("配置不是合法 JSON: %v", err)
-	}
-	sec, _ := raw["update"].(map[string]any)
-	if sec["enabled"] != false {
-		t.Errorf("config.json 里的 update.enabled 应为 false，实际 %v", sec["enabled"])
-	}
-	if sec["repo"] != "o/r" || sec["check_hours"] != float64(12) {
-		t.Errorf("补丁不该冲掉其它字段，实际 %v", sec)
-	}
-}
-
-// 缺 enabled 字段必须 400：默认成 false 会让一个拼错的字段名静默关掉自动检查。
-func TestUpdateAutoCheckRequiresExplicitEnabled(t *testing.T) {
-	s := newTestServer(t, "")
-	fake, _ := fakeGitHubForServer(t, "v0.9.3")
-	attachChecker(t, s, fake, t.TempDir())
-
-	rec := httptest.NewRecorder()
-	s.setUpdateAutoCheck(rec, httptest.NewRequest(http.MethodPost, "/panel/api/update/auto",
-		strings.NewReader(`{}`)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("应当 400，实际 %d（体=%s）", rec.Code, rec.Body.String())
 	}
 }
 
@@ -284,58 +219,6 @@ func TestUpdateInstallRejectsGet(t *testing.T) {
 	}
 }
 
-// 「自动下载」开关写进 config.json 的 update.auto_download，并回最新状态。
-func TestUpdateAutoDownloadSwitchPersists(t *testing.T) {
-	s := newTestServer(t, "")
-	fake, _ := fakeGitHubForServer(t, "v0.9.3")
-	attachChecker(t, s, fake, t.TempDir())
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/panel/api/update/auto",
-		strings.NewReader(`{"auto_download":false}`))
-	req.Header.Set("Content-Type", "application/json")
-	s.setUpdateAutoCheck(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("应当 200，实际 %d（体=%s）", rec.Code, rec.Body.String())
-	}
-	if body := decodeJSONBody(t, rec); body["auto_download"] != false {
-		t.Fatalf("响应里的开关状态不对: %v", body["auto_download"])
-	}
-	// 内存与磁盘都要落下来（面板与文件监听读的是它们）。
-	if s.config().UpdateAutoDownload() {
-		t.Error("内存里的开关没关掉")
-	}
-	raw, err := os.ReadFile(s.config().ConfigFile)
-	if err != nil {
-		t.Fatalf("读 config.json 失败: %v", err)
-	}
-	if !strings.Contains(string(raw), `"auto_download": false`) {
-		t.Errorf("config.json 里没写下来: %s", raw)
-	}
-	// 自动检查开关不受影响（两个开关各管各的）。
-	if !s.config().UpdateEnabled() {
-		t.Error("只改自动下载时不该动到自动检查")
-	}
-}
-
-// 两个字段都不给 → 400。默认 false 的话，一个拼错的字段名会静默变成「关掉自动检查」。
-func TestUpdateAutoEndpointRequiresAField(t *testing.T) {
-	s := newTestServer(t, "")
-	fake, _ := fakeGitHubForServer(t, "v0.9.3")
-	attachChecker(t, s, fake, t.TempDir())
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/panel/api/update/auto", strings.NewReader(`{"enabeld":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	s.setUpdateAutoCheck(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("拼错字段名应当 400，实际 %d（体=%s）", rec.Code, rec.Body.String())
-	}
-	if !s.config().UpdateEnabled() || !s.config().UpdateAutoDownload() {
-		t.Error("被拒绝的请求不该改动任何开关")
-	}
-}
-
 // 安装成功后请求重启：回调要被调用，且是在响应写回之后。
 func TestInstallRequestsRestartAfterInstall(t *testing.T) {
 	s := newTestServer(t, "")
@@ -373,45 +256,4 @@ func TestInstallRequestsExitWhenAsked(t *testing.T) {
 	// 没有退出通路时只提示，不 panic（精简装配的实例就是这样）。
 	plain := newTestServer(t, "")
 	plain.requestExit(0)
-}
-
-// 加速前缀端点：合法值落盘、非法值 400 且不落盘、空串表示直连。
-func TestUpdateMirrorEndpoint(t *testing.T) {
-	s := newTestServer(t, "")
-	fake, _ := fakeGitHubForServer(t, "v0.9.3")
-	attachChecker(t, s, fake, t.TempDir())
-
-	post := func(body string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/panel/api/update/mirror", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.setUpdateMirror(rec, req)
-		return rec
-	}
-
-	// 合法：落盘并回显。
-	if rec := post(`{"mirror":"https://ghfast.top"}`); rec.Code != http.StatusOK {
-		t.Fatalf("合法前缀应当 200，实际 %d（体=%s）", rec.Code, rec.Body.String())
-	}
-	if got := s.config().UpdateDownloadMirror(); got != "https://ghfast.top" {
-		t.Fatalf("前缀没落盘：%q", got)
-	}
-	// 非法：400 且不落盘。
-	if rec := post(`{"mirror":"ghfast.top"}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("缺协议的前缀应当 400，实际 %d", rec.Code)
-	}
-	if got := s.config().UpdateDownloadMirror(); got != "https://ghfast.top" {
-		t.Fatalf("被拒的请求不该改动已有配置：%q", got)
-	}
-	// 空串 = 清掉（直连）。
-	if rec := post(`{"mirror":"  "}`); rec.Code != http.StatusOK {
-		t.Fatalf("空串应当 200，实际 %d", rec.Code)
-	}
-	if got := s.config().UpdateDownloadMirror(); got != "" {
-		t.Fatalf("空串应清掉前缀，实际 %q", got)
-	}
-	// 缺字段：400。
-	if rec := post(`{}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("缺 mirror 字段应当 400，实际 %d", rec.Code)
-	}
 }

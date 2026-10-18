@@ -2475,23 +2475,13 @@ export interface UpdateStatus {
   checked_at?: number;
   /** 此刻是否有一次检查在飞（面板据此轮询）。 */
   checking: boolean;
-  /** 是否开着自动检查（来自 config.json 的 update.enabled）。 */
-  auto_check: boolean;
-  /** 生效中的自动检查间隔（小时）。 */
-  interval_hours: number;
-  /** 生效中的下载加速前缀（空串 = 直连）。 */
-  download_mirror?: string;
-  /** 发现新版本后是否自动下载安装包（config.json 的 update.auto_download，默认开）。 */
-  auto_download: boolean;
-  /** 安装包下好之后是否自动安装（config.json 的 update.auto_install，默认关）。 */
-  auto_install: boolean;
   /** 此刻正在下载安装包（配合下面两个字段画进度条）。 */
   downloading: boolean;
   /** 已下载的字节数（仅在 downloading 时有意义）。 */
   downloaded_bytes?: number;
   /** 安装包总大小（服务器没给 Content-Length 时为 0 → 退化为转圈）。 */
   download_total_bytes?: number;
-  /** 此刻有一次自动安装在跑（面板据此置灰安装按钮）。 */
+  /** 此刻有一次安装在跑（面板据此置灰更新按钮、显示「正在安装」）。 */
   installing?: boolean;
   /** 本地已就绪的安装包（不存在或大小与 Release 不符时为空）。 */
   local_path?: string;

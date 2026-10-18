@@ -351,12 +351,6 @@ func runServe(args []string) {
 	// （桌面版 /R、命令行版 -Launch，见 internal/update/install.go 的 windowsLaunch）。
 	// 这里只触发优雅关闭，不置 restartCh，因此收尾时不会 exec。
 	srv.SetExitFunc(stop)
-	// 自动安装的结局钩子：与手动「安装并重启」按钮共用同一对优雅关闭回调，
-	// 这样「自动装 → 重启」与「手动装 → 重启」不会走出两条不同的路。
-	// 注意闭包里调的是 srv 的方法而不是摸 srv 的私有字段 —— 包不同（main vs server），
-	// 字段本来就摸不到；方法会做空值判断，没接通路时只记日志不崩。
-	updater.SetRestartHook(srv.RequestRestart)
-	updater.SetExitHook(srv.RequestExit)
 	// 客户端日志限流扫描（切片 19 追加）：WorkBuddy 桌面客户端直连官方，
 	// 它的模型限流不经过网关，只能从客户端日志还原（对齐 wb-switch 的扫日志兜底通路）。
 	if home, err := os.UserHomeDir(); err == nil {
