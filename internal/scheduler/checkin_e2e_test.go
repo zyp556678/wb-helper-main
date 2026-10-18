@@ -85,6 +85,13 @@ func TestCheckinSlotReleasedAfterTotalFailure(t *testing.T) {
 
 	cfg := &config.Config{WorkDir: dir}
 	cfg.ApplyDefaults()
+	// 把签到时点钉到 00:00。默认是 [9, 21]，而 dueSlot 的语义是「时点已过才算到点」
+	// （见 scheduler.go 里 dueSlot 的说明）—— 于是这个用例在**当地 9 点之前**的 runner
+	// 上必然失败：GitHub 的 ubuntu runner 用 UTC，凌晨跑 CI 时第二趟 tick 拿不到 due
+	// 槽位，断言「失败后应重试」就会红（2026-10-18 的 release 运行正是这样挂的）。
+	// 这里要测的是「整轮失败后槽位被归还、下一 tick 还能再试」，与时点选择无关，
+	// 所以把时钟依赖去掉。
+	cfg.Schedule.CheckinHours = []int{0}
 	client := &upstream.Client{Control: &http.Client{Transport: rt}, ChatHTTP: &http.Client{Transport: rt}}
 	p := pool.New(cfg, client)
 	p.Load()
