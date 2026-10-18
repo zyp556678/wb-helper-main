@@ -7,7 +7,7 @@
 ;           @tauri-apps/cli 同版本（抄来时与上游逐字节一致，唯一改动是下面标了
 ;           「本地补丁」的那一处）。
 ;
-; 本地改动 —— 一共两处，都只服务于「Windows 上手动双击安装包升级」这条路：
+; 本地改动 —— 一共三处，都只服务于「Windows 上手动双击安装包升级」这条路：
 ;
 ; 一、PageReinstall 里的「残键守卫」：
 ;
@@ -29,6 +29,18 @@
 ;
 ;   另一半防线在网关侧：internal/update/uninstall_entry.go —— 面板点的「安装并重启」
 ;   会在拉起向导之前先清掉同样的残键，于是向导根本不会摆出那页。
+;
+; 三、PageLeaveReinstall 的 reinst_uninstall 里，调用旧卸载器时**去掉上游惯例的
+;   `_?=<安装目录>`，并显式加 `/S`**：
+;
+;   本机实测（0.14.1 的卸载器、同一份安装目录）三种姿势：
+;     · `uninstall.exe _?=<目录>` → 退出码 -1、一个文件都不删、注册表不动；
+;     · `uninstall.exe`（交互） → 3 秒内返回 0 但什么都没删 —— 父进程只是把
+;       自己复制到 %TEMP% 就返回了，安装器的 ${FileExists} 检查随即判失败；
+;     · `uninstall.exe /S`（静默） → 退出码 0，安装目录清空、A/R 键删除、
+;       数据目录保留。
+;   静默调用会把整件事做完才返回，向导随后复制新文件即可；也顺带免掉了
+;   「卸载向导与安装向导先后出现」的困惑（用户已在上一页确认过卸载）。
 ;
 ; 升级 Tauri CLI 时怎么同步：
 ;   1) 从新版本的 tag 取回上游模板（路径同上），与本地这份 diff；
@@ -425,8 +437,32 @@ Function PageLeaveReinstall
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
       ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
       ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
-      StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
+      ; ---- 本地补丁（第三处）：旧卸载器要**静默**调用，且不追加 `_?=` ----
+      ; 本机在 0.14.1 的卸载器上把三种姿势都试了一遍（同一份安装、同一份目录）：
+      ;   · `uninstall.exe _?=<目录>`（上游的写法）→ 退出码 -1，一个文件都不删，
+      ;     注册表也不动 —— 安装器于是只弹「无法卸载！」；
+      ;   · `uninstall.exe`（交互、无参数）→ 父进程把自己复制到 %TEMP% 后 3 秒内
+      ;     返回 0，可什么都没删：临时副本还没来得及干活，安装器的
+      ;     ${FileExists} 检查就已经判失败了；
+      ;   · `uninstall.exe /S`（静默、无参数）→ 退出码 0，安装目录清空、
+      ;     A/R 键删除、数据目录保留。
+      ; 所以这里显式加 /S：静默卸载不需要第二个界面、删得也干净（实测目录清空、
+      ; A/R 键删除、数据目录保留）；代价只是少一次卸载向导的确认 —— 对升级本来就是
+      ; 想要的（用户已在上一页确认过），也顺带避免了两个向导窗口先后出现。
+      StrCpy $R1 "$R1 /S"
       ExecWait '$R1' $0
+      ; 但静默卸载同样会「把自己复制到 %TEMP%、由副本干活」，父进程随即返回 ——
+      ; 只等 ExecWait 等于在副本动工前就往下走，后面的 ${FileExists} 检查会再次
+      ; 判失败、照样弹「无法卸载！」。轮询到主程序真的消失（最多 60 秒），
+      ; 才算「等到卸载完成」。
+      StrCpy $R2 0
+      ${Do}
+        ${IfNot} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+          ${ExitDo}
+        ${EndIf}
+        Sleep 500
+        IntOp $R2 $R2 + 1
+      ${LoopUntil} $R2 >= 120
     ${EndIf}
 
     BringToFront
