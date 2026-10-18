@@ -43,6 +43,112 @@
 
 完整的实现进度与设计取舍见 [PROGRESS.md](PROGRESS.md)。
 
+## 界面一览
+
+面板共 13 页（源码在 `web/src/pages/`，导航定义在 `web/src/lib/navigation.ts`）。
+下面是每页在本机的真实截图；截图里的账号昵称统一替换成了「示例账号 A/B/C」，
+本机路径也做了遮蔽 —— 界面本身没有任何改动。
+
+### 账号 · 账号管理
+
+凭据、积分与签到状态的统一入口：导入备份 / 导出、按档位与站点筛选、每个账号的积分包明细，
+以及「设为 WorkBuddy / 设为 CLI / 切站点 / 刷新积分」这些日常动作。顶部是**积分到期提醒**
+（按最近到期批次倒排，给出日均需耗与 7 天内合计），下面是账号卡片列表。
+
+![账号管理](docs/screenshots/01-accounts.png)
+![账号卡片列表](docs/screenshots/01-accounts-b.png)
+
+### 监控
+
+账号池的实时运行状态：总数 / 可用 / 冷却 / 禁用 / 在途请求 / 剩余积分，逐账号的站点、状态、
+在途上限、成功失败计数，模型请求统计与会话粘性快照（每 5 秒自动刷新）。
+
+![监控](docs/screenshots/02-monitoring.png)
+
+### 模型与档位
+
+目录双源合并的结果（实时接口 + npm 静态目录）：模型按档位分桶（免费 / 低价 / 中价 / 高价）、
+搜索与筛选、必要的接入信息（Base URL 与 API Key），以及每个模型的「探测价格」入口。
+
+![模型与档位](docs/screenshots/03-models.png)
+![模型目录](docs/screenshots/03-models-b.png)
+
+### 双站视图
+
+国内站与国际站的账号分布、模型覆盖与价格结论对照：两侧的账号数与目录模型数、逐模型的倍率
+实测结论（用来确认调度到底在往哪一侧倾斜；两站在上游是两套独立的域名、凭据与计费）。
+
+![双站视图](docs/screenshots/04-sites.png)
+
+### 任务中心
+
+成长任务的待办与自动完成：执行队列、可领奖 / 可自动完成 / 可报名 / 需人工处理 / 已完成的
+分档计数、逐账号的连登与旅行状态，以及「一键完成 / 补活跃 / 猫咪出发 / 抽奖 / 连登管家」动作。
+
+![任务中心](docs/screenshots/05-tasks.png)
+
+### 用量统计（Token 统计）
+
+请求来源拆分（经过网关 vs 官方直连）、数据来源切换（网关反代 / WorkBuddy / CLI / IDE）、
+Token 总览与按天的堆叠趋势图、全年的 Token 活跃度热力图。
+
+![用量统计](docs/screenshots/06-stats.png)
+![Token 趋势](docs/screenshots/06-stats-b.png)
+
+### 积分统计
+
+剩余积分 / 今日 / 近 7 天 / 本月消耗四个总量，官方积分消耗与本地观察消耗两组图表，
+以及「按模型分类」的消耗排行（每行给出积分数、请求数与占比）。
+
+![积分统计](docs/screenshots/07-credits.png)
+![按模型分类](docs/screenshots/07-credits-b.png)
+
+### 关联会话
+
+把同一份会话在多个账号下的副本列出来，按「待同步 / 有分歧 / 内容一致」分类，可复制或同步到
+其它账号；左侧是 WorkBuddy / CodeBuddy 插件 / CodeBuddy IDE 三种来源。
+
+![关联会话](docs/screenshots/08-sessions.png)
+
+### 本机客户端
+
+本机 WorkBuddy 客户端的数据概览（会话、项目、技能、数据占用）、客户端目录与版本、日志，
+以及本机数据库文件的大小与修改时间 —— 全部**只读**，数据由本机代理进程提供。
+
+![本机客户端](docs/screenshots/09-local.png)
+
+### 配置
+
+治理参数：冷却与熔断、账号池（并发上限 / 熔断阈值 / 闲置补偿 / 积分保底 / 免费站点优先）、
+会话粘性、定时任务、入站 HTTP、签到日志、外观、支持工具、通知与错误日志。能热生效的改动
+保存即应用，需要重启的会在保存后提示。
+
+![配置](docs/screenshots/10-config.png)
+![配置 · 账号池与会话粘性](docs/screenshots/10-config-b.png)
+![配置 · 签到日志](docs/screenshots/10-config-c.png)
+
+### 更新
+
+只显示版本状态与一个「更新」按钮：后台每 6 小时自动检查一次，点一下就把匹配本机平台的安装包
+下好并安装（下载完成自动装、网关回到新版本）。安装过程不需要任何选择；下载直连 GitHub 优先，
+不通或慢到不可用才自动回退国内镜像。
+
+![更新](docs/screenshots/11-updates.png)
+
+### 日志
+
+网关事件日志（出站改写、拦截重试、账号治理、更新、启动等），按级别与频道筛选、按关键词搜索；
+环形缓冲默认保留 500 条，新的在前。
+
+![日志](docs/screenshots/12-logs.png)
+
+### 请求流水
+
+每次对话请求一条记录：状态码、结局、耗时、TTFB、token；进程内最近 100 条 + 磁盘归档
+（最多 500 条），可按成功 / 上游拒绝 / 流中断以及账号、模型筛选。账号已脱敏为「昵称(uid8)」。
+
+![请求流水](docs/screenshots/13-requests.png)
+
 ## 安装方式
 
 四条路，装的是同一个网关。除容器外都不需要管理员权限。
@@ -60,13 +166,24 @@
 | macOS Apple Silicon | `workbuddy-gateway-desktop_<版本>_arm64.dmg` | 拖进 `/Applications` | `~/.wb-gateway` |
 | Linux x86_64 | `workbuddy-gateway-desktop_<版本>_amd64.deb` | `/usr/bin` + `/usr/lib/WorkBuddy Gateway/` | `~/.wb-gateway` |
 
-构建入口（三个都需要 Rust 工具链 —— 桌面壳是 Tauri 应用，三个平台各绑一套 WebView，
-**无法交叉编译**）：
+### 在哪台机器上打（本项目固定分工）
+
+| 产物 | 在哪打 | 入口 |
+| --- | --- | --- |
+| Windows 桌面版 `setup.exe` + 绿色版 zip | **本机（Windows）** | `bash scripts/build-desktop.sh`（windows-gnu 路线，见下）或 `./installer/windows/build-desktop-setup.sh`（MSVC） |
+| Linux 桌面版 `.deb` | **WSL（Ubuntu）** | `./installer/linux/build-desktop-deb.sh`（依赖清单与四个坑见 `DEPLOY.md` 第八节） |
+| macOS 桌面版 `.dmg` | **CI（macOS runner）** | 打 tag 时 `.github/workflows/release.yml` 的 `macos-desktop-dmg` 作业 |
+| 三端命令行发行包（tar.gz / zip） | 本机任意平台 | `./scripts/release.sh`（纯 Go 交叉编译，不需要别的工具链） |
+
+这么分的原因只有一个：桌面壳是 Tauri 应用，三个平台各绑一套 WebView
+（WebKitGTK / WKWebView / WebView2），**无法交叉编译** —— Linux 要在 Linux 上链接
+WebKitGTK，macOS 的 `.dmg` 还要 `hdiutil` 与 Xcode 工具链。Go 那一层没有这个限制，
+所以 `release.sh` 在哪都能跑。
 
 ```bash
-./installer/windows/build-desktop-setup.sh    # 需 MSVC
-./installer/macos/build-desktop-pkg.sh        # 只能在 macOS 上跑
-./installer/linux/build-desktop-deb.sh        # 需 WebKitGTK 开发包
+./installer/windows/build-desktop-setup.sh    # Windows，需 MSVC
+./installer/linux/build-desktop-deb.sh        # Linux / WSL，需 WebKitGTK 开发包
+./installer/macos/build-desktop-pkg.sh        # 只能在 macOS 上跑（本地没有 Mac 就交给 CI）
 ```
 
 打 tag 时 `.github/workflows/release.yml` 会用三个平台的 runner 各构建一次，只把这三种

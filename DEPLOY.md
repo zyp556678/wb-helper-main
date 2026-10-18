@@ -381,3 +381,88 @@ systemd 下确认系统时区正确。
 上游报余额不足 / 限流 / 令牌失效时，只会改用**同站的另一个账号**，绝不跨站。
 该站账号全部不可用时直接返回 503，而不是借用另一站 —— 跨站意味着账单出现在
 你可能并不打算付费的那一侧。反之指定国际站时同理。这条约束有端到端测试锁住。
+
+## 八、本机打包：三端分别在哪打
+
+桌面壳是 Tauri 应用，三个平台各绑一套 WebView（WebKitGTK / WKWebView / WebView2），
+**无法交叉编译**。所以分工固定成下面这样（2026-10 实测通过）：
+
+| 产物 | 在哪打 | 入口 |
+| --- | --- | --- |
+| Windows 桌面版 `setup.exe` + 绿色版 zip | 本机（Windows） | `bash scripts/build-desktop.sh`，或 `./installer/windows/build-desktop-setup.sh`（MSVC 路线） |
+| Linux 桌面版 `.deb` | WSL（Ubuntu） | `./installer/linux/build-desktop-deb.sh` |
+| macOS 桌面版 `.dmg` | CI（macOS runner） | `release.yml` 的 `macos-desktop-dmg` 作业 |
+| 三端命令行发行包（tar.gz / zip） | 本机任意平台 | `./scripts/release.sh`（纯 Go 交叉编译） |
+
+### Linux 桌面版：WSL 路线
+
+一次性准备（Windows 侧，`wsl --install` 需要管理员；WSL 本体已装时通常不必重启）：
+
+```powershell
+wsl --install -d Ubuntu-24.04     # 或 26.04
+```
+
+WSL 里装构建依赖 —— 与 CI 的 `linux-desktop-deb` 作业同一份清单：
+
+```bash
+sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+  libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf \
+  build-essential pkg-config curl git ca-certificates nodejs npm
+```
+
+把仓库放进 **WSL 自己的文件系统**（不要在 `/mnt/d` 上直接构建：DrvFs 上编译 400 个 crate
+明显更慢，而且那份 `.toolchain` 是 Windows 工具链，不能共用）：
+
+```bash
+SRC=/mnt/d/<仓库路径>
+git -C "$SRC" archive --format=tar HEAD | (mkdir -p ~/wb-helper-main && cd ~/wb-helper-main && tar -xf -)
+cd ~/wb-helper-main && mkdir -p dist
+cp "$SRC"/dist/workbuddy-gateway_<版本>_linux_amd64.tar.gz dist/
+tar -xzf dist/workbuddy-gateway_<版本>_linux_amd64.tar.gz -C dist/
+chmod +x dist/linux_amd64/workbuddy-gateway dist/linux_amd64/wb-local-agent
+tar -czf dist/workbuddy-gateway_<版本>_linux_amd64.tar.gz -C dist linux_amd64
+```
+
+Rust 走 rsproxy（本机网络会把 `static.rust-lang.org` 的内容替换成「同样大小的另一份文件」，
+`desktop/scripts/env.sh` 里有同样的记录）：
+
+```bash
+export RUSTUP_HOME=$PWD/.toolchain/rust CARGO_HOME=$PWD/.toolchain/cargo
+export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+curl -sSfL https://rsproxy.cn/rustup-init.sh \
+  | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+mkdir -p .toolchain/cargo && cat > .toolchain/cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+EOF
+```
+
+然后构建（`npm install` 用国内源；产物落在 `dist/`）：
+
+```bash
+cd desktop && npm install --no-audit --no-fund --registry=https://registry.npmmirror.com && cd ..
+bash installer/linux/build-desktop-deb.sh
+# → dist/workbuddy-gateway-desktop_<版本>_amd64.deb
+```
+
+**四个坑**（按顺序避开即可，都是实测踩出来的）：
+
+1. **先解开 Go 发行包，再 `npm install`**：`desktop/package.json` 的 `prepare` 钩子会跑
+   `prepare-resources.mjs`，Go 二进制不在位时它直接失败；
+2. **用 `git archive` 取源码，不要在 `/mnt/d` 上构建**：Windows 工作区是 CRLF，
+   WSL 的原生 bash/sed 不认 —— 表面症状是 `set -euo pipefail` 报 `invalid option name`，
+   更隐蔽的是 `sed` 会从 `main.go` 里解析出带 `\r` 的版本号，于是脚本误判「没有发行包」
+   并去调 `go build`（WSL 里通常没装 Go）；
+3. **tar 要重打一份带可执行位的**：Windows 生成的 tar 不存 Unix 权限，解包出来是 0644，
+   而构建脚本会检查 `-x`（解包后 `chmod +x` 也行，但重打 tar 一劳永逸 ——
+   否则脚本的「发行包比二进制新就重新解包」会把权限再打回 0644）；
+4. **Rust 与 crates 都走 rsproxy**：见上。
+
+### macOS 桌面版
+
+本地没有 Mac 时不用折腾：推 tag 触发 `release.yml`，`macos-desktop-dmg` 作业在 `macos-14`
+runner 上构建 `.dmg`，产物随 Release 一起发布；也可以在 Actions 页面手动 Run workflow，
+从那次运行的 artifacts 里取。
