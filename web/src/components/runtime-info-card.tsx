@@ -52,6 +52,9 @@ export function RuntimeInfoCard({ config }: { config: PanelConfig }) {
         <Row label="调试日志">
           <BoolText value={config.debug_enabled} />
         </Row>
+        <Row label="完整请求正文">
+          <BoolText value={config.debug_full_requests ?? false} />
+        </Row>
         <Row label="模型黑名单">
           {blocklist.length > 0 ? blocklist.join("、") : "未配置"}
         </Row>

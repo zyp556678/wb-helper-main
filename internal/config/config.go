@@ -3,12 +3,13 @@
 // 配置分两层：
 //   - 启动层（Addr/Port/APIKey/凭据来源）：只能由命令行指定，改动需重启。
 //   - 运行层（上游超时/调试日志/模型黑白名单/治理与调度）：可由工作目录 config.json 覆盖。
-//     其中治理与调度、模型名单、上游超时都能**热生效**（面板保存即生效，手动改文件
-//     由文件监听接管，见 server.watchConfigLoop）；`server.read_timeout` 与
-//     `debug.enabled` 仍是装配期字段，改了要重启。
+//     其中治理与调度、模型名单、上游超时、调试开关都能**热生效**（面板保存即生效，
+//     手动改文件由文件监听接管，见 server.watchConfigLoop）；只有 `server.read_timeout`
+//     仍是装配期字段，改了要重启。
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -64,6 +65,64 @@ type ServerSection struct {
 	ReadTimeout string `json:"read_timeout"`
 }
 
+// debugFileConfig 是 config.json 的 debug 段。
+//
+// 对格式的宽容是刻意的（对照 wb-gateway v1.14.21）：这个段是排障时才手工编辑的，
+// 一次笔误（写成 "debug": null、把 true 写成 "true"、多一层嵌套）不该让整个
+// 网关起不来。非对象 / 非布尔一律按 false 处理，未知子字段忽略。
+// 两种拼写都接受：full_requests（本项目的 snake_case 风格）与 fullRequests
+// （上游 config.json 的写法），后者为重、前者优先。
+type debugFileConfig struct {
+	Enabled      bool `json:"enabled"`
+	FullRequests bool `json:"full_requests"`
+}
+
+func (d *debugFileConfig) UnmarshalJSON(data []byte) error {
+	*d = debugFileConfig{}
+	raw := bytes.TrimSpace(data)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil // 非对象值按全 false 处理，不阻断启动；未知字段同样忽略。
+	}
+	d.Enabled = tolerantConfigBool(object["enabled"])
+	full := object["full_requests"]
+	if len(full) == 0 {
+		full = object["fullRequests"]
+	}
+	d.FullRequests = tolerantConfigBool(full)
+	return nil
+}
+
+// tolerantConfigBool 把常见的手写形态折算成布尔：true/false、0/1、"true"/"false"、
+// "1"/"0"、"yes"/"on"。其余一律 false —— 调试开关宁可少开，不可因解析歧义误开。
+func tolerantConfigBool(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte(`""`)) {
+		return false
+	}
+	var value bool
+	if json.Unmarshal(raw, &value) == nil {
+		return value
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case "true", "1", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
+	var number float64
+	if json.Unmarshal(raw, &number) == nil {
+		return number == 1
+	}
+	return false
+}
+
 // runtimeFile 是 config.json 的结构（工作目录下可选）。
 type runtimeFile struct {
 	Upstream struct {
@@ -79,9 +138,7 @@ type runtimeFile struct {
 		TransientRetries      *int `json:"transientRetries"`
 		TransientRetriesSnake *int `json:"transient_retries"`
 	} `json:"upstream"`
-	Debug struct {
-		Enabled bool `json:"enabled"`
-	} `json:"debug"`
+	Debug debugFileConfig `json:"debug"`
 	Models struct {
 		Blocklist []string `json:"blocklist"`
 		Allowlist []string `json:"allowlist"`
@@ -232,6 +289,9 @@ type Config struct {
 	// TransientRetryBackoff 是重试间隔（测试可调小）。
 	TransientRetryBackoff time.Duration
 	DebugEnabled          bool
+	// DebugFullRequests 是 `debug.full_requests`：把入站与出站请求正文的
+	// **完整脱敏副本**写进调试事件流。默认关、可热改；只有 debug.enabled 也打开时生效。
+	DebugFullRequests bool
 	ModelBlock            []string
 	ModelAllow            []string
 	// ModelAccountRules 是「模型 → 可用凭据文件」名单，键为小写去空格的模型名。
@@ -361,6 +421,7 @@ func (cfg *Config) resetRuntimeDefaults() {
 	cfg.RequestRetentionDays = 7
 	cfg.RequestArchiveMaxMB = 100
 	cfg.DebugEnabled = false
+	cfg.DebugFullRequests = false
 	cfg.ModelBlock = nil
 	cfg.ModelAllow = nil
 	cfg.ModelAccountRules = nil
@@ -404,6 +465,7 @@ func (cfg *Config) loadRuntimeFile() error {
 			cfg.TransientRetries = *n
 		}
 		cfg.DebugEnabled = f.Debug.Enabled
+		cfg.DebugFullRequests = f.Debug.FullRequests
 		cfg.ModelBlock = f.Models.Blocklist
 		cfg.ModelAllow = f.Models.Allowlist
 		cfg.ModelAccountRules = parseModelAccountRules(f.Models.Accounts)

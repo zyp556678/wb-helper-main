@@ -61,6 +61,9 @@ type RecordInput struct {
 	TotalTokens int64
 	// TTFTMs <= 0 表示没有首字样本（非流式聚合取不到），不计入均值而不计为 0。
 	TTFTMs int64
+	// LatencyMs 是端到端总耗时（毫秒）；<= 0 表示没有样本，不计入均值。
+	// 与 TTFTMs 分开记：首字快但整体慢，和首字就慢，是两类问题。
+	LatencyMs int64
 	// Site 是本次请求所用账号的站点（cn / intl），空表示未知。
 	// 它是**请求的属性**（同一个请求只会打一个站），所以按站点分桶不会重复计数。
 	Site string
@@ -86,6 +89,12 @@ type Counter struct {
 	OutputTokens int64 `json:"output_tokens,omitempty"`
 	TTFTSumMs    int64 `json:"ttft_sum_ms,omitempty"`
 	TTFTCount    int64 `json:"ttft_count,omitempty"`
+	// LatencySumMs / LatencyCount 是端到端总耗时的累计与样本数。
+	// 单独记一份而不是复用 TTFTSumMs：首字与总耗时回答的是两个问题
+	//（「多久看到第一个字」与「整条答完多久」），混用会把慢在生成阶段的请求
+	// 误判成慢在排队阶段。
+	LatencySumMs int64 `json:"latency_sum_ms,omitempty"`
+	LatencyCount int64 `json:"latency_count,omitempty"`
 }
 
 // add 累加一次请求。
@@ -107,6 +116,19 @@ func (c *Counter) add(in RecordInput) {
 		c.TTFTSumMs += in.TTFTMs
 		c.TTFTCount++
 	}
+	if in.LatencyMs > 0 {
+		c.LatencySumMs += in.LatencyMs
+		c.LatencyCount++
+	}
+}
+
+// AvgLatencyMs 返回平均总耗时；无样本时返回 nil（前端显示「-」而不是 0）。
+func (c *Counter) AvgLatencyMs() *float64 {
+	if c.LatencyCount == 0 {
+		return nil
+	}
+	v := float64(c.LatencySumMs) / float64(c.LatencyCount)
+	return &v
 }
 
 // AvgTTFTMs 返回平均首字延迟；无样本时返回 nil（前端显示「-」而不是 0）。
@@ -712,6 +734,76 @@ func (s *Store) Query(hours int) Snapshot {
 	return snap
 }
 
+// ModelWindowStat 是某个模型在滑动窗口内的**持久化**汇总。
+//
+// 与 metrics.ModelSnapshot 的分工：那个是进程内滚动窗口（重启即清零），
+// 回答「现在快不快」；这个来自 wb-stats.json 的小时桶，回答「近几小时累计多少」，
+// 重启后仍然成立。面板的模型页用后者，才不会一重启就把历史读数抹成 0。
+type ModelWindowStat struct {
+	Model    string `json:"model"`
+	Requests int64  `json:"requests"`
+	// Success 由 Requests - Failures 推出，不单独落盘 —— 两个数各自维护
+	// 迟早会出现「成功 + 失败 ≠ 请求数」的自相矛盾。
+	Success      int64    `json:"success"`
+	Failures     int64    `json:"failures"`
+	Tokens       int64    `json:"tokens"`
+	AvgTTFTMs    *float64 `json:"avg_ttft_ms"`
+	AvgLatencyMs *float64 `json:"avg_latency_ms"`
+}
+
+// ModelWindow 返回最近 hours 小时内按模型聚合的持久化统计。
+//
+// 窗口口径：小时桶按自然小时切分，因此实际覆盖 [nowHour-hours+1, nowHour]
+// 这 hours 个整小时（含当前尚未结束的小时）。它比「恰好 now-hours 这一秒」
+// 最多宽一小时——换来的是不必逐请求落盘。对「近 5 小时」这类展示足够，
+// 但不要拿它做精确计费。
+func (s *Store) ModelWindow(hours int) map[string]ModelWindowStat {
+	if hours <= 0 {
+		hours = 5
+	}
+	if hours > retentionHours {
+		hours = retentionHours
+	}
+	nowHour := time.Now().Unix() / 3600
+	from := nowHour - int64(hours) + 1
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	agg := map[string]*Counter{}
+	for h := from; h <= nowHour; h++ {
+		b, ok := s.doc.Hours[key(h)]
+		if !ok {
+			continue
+		}
+		for model, c := range b.Models {
+			if c == nil {
+				continue
+			}
+			dst := agg[model]
+			if dst == nil {
+				dst = &Counter{}
+				agg[model] = dst
+			}
+			mergeCounter(dst, c)
+		}
+	}
+
+	out := make(map[string]ModelWindowStat, len(agg))
+	for model, c := range agg {
+		out[model] = ModelWindowStat{
+			Model:        model,
+			Requests:     c.Requests,
+			Success:      c.Requests - c.Failures,
+			Failures:     c.Failures,
+			Tokens:       c.Tokens,
+			AvgTTFTMs:    c.AvgTTFTMs(),
+			AvgLatencyMs: c.AvgLatencyMs(),
+		}
+	}
+	return out
+}
+
 // Purge 清空全部统计（面板上的「重置统计」用）。
 func (s *Store) Purge() error {
 	s.mu.Lock()
@@ -791,6 +883,8 @@ func mergeCounter(dst, src *Counter) {
 	dst.OutputTokens += src.OutputTokens
 	dst.TTFTSumMs += src.TTFTSumMs
 	dst.TTFTCount += src.TTFTCount
+	dst.LatencySumMs += src.LatencySumMs
+	dst.LatencyCount += src.LatencyCount
 }
 
 // dailyWindow 返回按天视图的窗口 [from, nowDay]，两端都是**本地日索引**（闭区间）。

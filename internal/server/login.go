@@ -38,6 +38,40 @@ type loginSession struct {
 	Status    string
 	Err       string
 	Account   string // 成功后落盘的账号 ID
+	// EndedAt 是会话进入终态（ok / expired / error）的时刻。
+	// 零值表示还在进行中；终态会话不会立刻删除，见 loginSessionRetention。
+	EndedAt time.Time
+}
+
+// loginSessionRetention 是会话进入终态后在内存里多保留的时间。
+//
+// 为什么需要它：CLI 直接持有 *loginSession，不依赖会话表；而网页只拿到 id，
+// 必须再查一次才能看到 expired / error / ok。若一进终态就删除，前端最后一次
+// 轮询几乎总是拿到「会话不存在」，表现为「链接失效了但控制台还在等」。
+const loginSessionRetention = 2 * time.Minute
+
+// finish 把会话置为终态并记录结束时刻（重复调用以第一次为准）。
+func (s *loginSession) finish(status, errText string) {
+	if s == nil {
+		return
+	}
+	if s.EndedAt.IsZero() {
+		s.EndedAt = time.Now()
+	}
+	s.Status = status
+	s.Err = errText
+}
+
+// remainingSeconds 返回授权链接的剩余有效秒数（不早于 0）。
+func (s *loginSession) remainingSeconds(now time.Time) int {
+	if s == nil || !s.EndedAt.IsZero() {
+		return 0
+	}
+	remaining := int(s.ExpiresAt.Sub(now).Seconds())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // loginStore 保存进行中的登录会话。
@@ -56,11 +90,15 @@ func newLoginStore() *loginStore {
 // gc 清理已完成或已超时较久的会话。
 func (s *loginStore) gc(now time.Time) {
 	for id, sess := range s.sessions {
-		deadline := sess.ExpiresAt
-		if sess.Status == loginOK {
-			deadline = deadline.Add(5 * time.Minute)
+		// 终态会话：结束后只保留 loginSessionRetention，让最后一次轮询读到结果。
+		if !sess.EndedAt.IsZero() {
+			if now.After(sess.EndedAt.Add(loginSessionRetention)) {
+				delete(s.sessions, id)
+			}
+			continue
 		}
-		if now.After(deadline.Add(30 * time.Minute)) {
+		// 进行中的会话：超过有效期 30 分钟后清掉（防止没人轮询时永久占内存）。
+		if now.After(sess.ExpiresAt.Add(30 * time.Minute)) {
 			delete(s.sessions, id)
 		}
 	}
@@ -145,11 +183,13 @@ func (s *Server) handleLoginStart(w http.ResponseWriter, r *http.Request) {
 	s.logf("[登录] 发起 %s 登录，等待授权（%v 有效）", prof.Label, ttl.Round(time.Second))
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"login_id":   sess.ID,
-		"site":       site,
-		"site_label": prof.Label,
-		"auth_url":   sess.AuthURL,
-		"expires_in": int(ttl.Seconds()),
+		"login_id":          sess.ID,
+		"site":              site,
+		"site_label":        prof.Label,
+		"auth_url":          sess.AuthURL,
+		"expires_in":        int(ttl.Seconds()),
+		"remaining_seconds": sess.remainingSeconds(now),
+		"expires_at":        sess.ExpiresAt.Unix(),
 	})
 }
 
@@ -161,8 +201,10 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := s.logins.get(id)
 	if sess == nil {
+		// 用 expired 而不是 error：语义上「这次登录已经结束，重新发起即可」，
+		// 前端据此显示重试入口，而不是一个看起来像故障的错误。
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": loginError, "error": "登录会话不存在或已失效，请重新发起",
+			"status": loginExpired, "error": "登录会话不存在或已失效，请重新发起", "remaining_seconds": 0,
 		})
 		return
 	}
@@ -170,9 +212,9 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		s.writeLoginOK(w, sess)
 		return
 	}
-	if time.Now().After(sess.ExpiresAt) {
-		sess.Status = loginExpired
-		sess.Err = "登录已超时，请重新发起"
+	now := time.Now()
+	if now.After(sess.ExpiresAt) {
+		sess.finish(loginExpired, "登录已超时，请重新发起")
 		s.writeLoginOK(w, sess)
 		return
 	}
@@ -183,13 +225,18 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 
 	tok, ok, err := s.client.PollToken(ctx, prof, sess.State)
 	if err != nil {
-		sess.Status = loginError
-		sess.Err = "查询登录状态失败: " + err.Error()
+		sess.finish(loginError, "查询登录状态失败: "+err.Error())
 		s.writeLoginOK(w, sess)
 		return
 	}
 	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"status": loginPending})
+		// 轮询接口每次都要能回答「还剩多久」：否则前端只能按开始时的
+		// expires_in 自己算，页面放置一段时间后会显示过期的倒计时。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":            loginPending,
+			"remaining_seconds": sess.remainingSeconds(now),
+			"expires_at":        sess.ExpiresAt.Unix(),
+		})
 		return
 	}
 
@@ -208,8 +255,7 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		expiresAt, tok.Domain, info.UID, info.EnterpriseID, info.Nickname)
 
 	if err := cred.SaveFull(); err != nil {
-		sess.Status = loginError
-		sess.Err = "登录成功但保存凭据失败: " + err.Error()
+		sess.finish(loginError, "登录成功但保存凭据失败: "+err.Error())
 		s.writeLoginOK(w, sess)
 		return
 	}
@@ -223,7 +269,7 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 	// 顺带领一次性 trial 加油包（已领过是幂等的，不算失败）。
 	s.ensureIntlRegistration(ctx, cred.AccountID())
 
-	sess.Status = loginOK
+	sess.finish(loginOK, "")
 	sess.Account = cred.AccountID()
 	s.logf("[登录] %s 登录成功，账号 %s（%s），凭据已写入 %s",
 		prof.Label, displayName(info.Nickname, info.UID), cred.AccountID(), path)
@@ -258,7 +304,13 @@ func (s *Server) ensureIntlRegistration(ctx context.Context, accountID string) {
 
 // writeLoginOK 输出终态或 pending 之外的状态。
 func (s *Server) writeLoginOK(w http.ResponseWriter, sess *loginSession) {
-	payload := map[string]any{"status": sess.Status}
+	payload := map[string]any{
+		"status":            sess.Status,
+		"remaining_seconds": sess.remainingSeconds(time.Now()),
+	}
+	if !sess.ExpiresAt.IsZero() {
+		payload["expires_at"] = sess.ExpiresAt.Unix()
+	}
 	if sess.Err != "" {
 		payload["error"] = sess.Err
 	}

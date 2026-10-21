@@ -708,6 +708,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			if cl := m.ContextLength(); cl > 0 {
 				item["context_length"] = cl
 			}
+			if m.MaxInputTokens > 0 {
+				item["max_input_tokens"] = m.MaxInputTokens
+			}
 			if m.MaxOutputTokens > 0 {
 				item["max_output_tokens"] = m.MaxOutputTokens
 			}

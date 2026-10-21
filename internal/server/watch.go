@@ -74,9 +74,9 @@ func (s *Server) reloadConfigIfChanged() {
 
 // restartRequiredFields 报告两份配置之间「改了但本轮不会生效」的字段。
 //
-// 只有两个：`server.read_timeout` 与 `debug.enabled` —— 前者约束的是 http.Server
-// 这个启动时构造一次的组件，后者决定了调试事件流的落盘开关（启动时决定）。
-// 其余运行层字段都由 applyRuntimeConfig 或各自的钩子热生效。
+// 现在只剩 `server.read_timeout`：它约束的是 http.Server 这个启动时构造一次的组件。
+// 调试开关（debug.enabled / debug.full_requests）已改为热生效 ——
+// sink 开合由 applyRuntimeConfig 里的 debuglog.Apply 负责，重复调用是幂等的。
 func restartRequiredFields(oldC, newC *config.Config) []string {
 	var out []string
 	if oldC == nil || newC == nil {
@@ -84,9 +84,6 @@ func restartRequiredFields(oldC, newC *config.Config) []string {
 	}
 	if oldC.Server.ReadTimeout != newC.Server.ReadTimeout {
 		out = append(out, "server.read_timeout")
-	}
-	if oldC.DebugEnabled != newC.DebugEnabled {
-		out = append(out, "debug.enabled")
 	}
 	return out
 }

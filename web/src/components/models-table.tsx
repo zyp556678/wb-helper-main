@@ -1,6 +1,7 @@
 import { FlaskConical, Loader2 } from "lucide-react";
 
 import { CopyIconButton, useCopy } from "@/components/copy-button";
+import { ContextWindow } from "@/components/context-window";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -30,19 +31,38 @@ import { cn } from "@/lib/utils";
  * 而操作列要塞下「探测价格」按钮 + 启用开关。不写死时浏览器会把富余宽度分给
  * 内容少的那两列（于是倍率列大段留白），同时把操作列压到卡片右边缘上。
  *
- * 各列宽度之和（236+84+84+116+116+76+76+152+196 = 1136）与表格的
- * min-w-[1136px] 一致，因此**不会因为写死列宽而多出一次横向滚动**。
+ * 各列宽度之和（236+84+84+116+116+76+76+196+196 = 1180）与表格的
+ * min-w-[1180px] 一致，因此**不会因为写死列宽而多出一次横向滚动**。
  * 倍率列从 96 加到 116、模型列从 220 加到 236，是为了给新增的复制按钮腾位子 ——
  * 按钮不挤进单元格时表格不会重排，但压到临界宽度会开始截断倍率文案。
+ * 档位列从 152 加到 196：档位改为中英双语的「低 low」形态后，三档并排需要这些宽度。
  */
 const COL = {
   model: "w-[236px]",
   number: "w-[84px]",
   multiplier: "w-[116px]",
   count: "w-[76px]",
-  reasoning: "w-[152px]",
+  reasoning: "w-[196px]",
   actions: "w-[196px]",
 } as const;
+
+/** 双语列头：中文在上、英文在下；英文用小号灰字，不抢主标签。 */
+function HeadLabel({
+  zh,
+  en,
+  align = "left",
+}: {
+  zh: string;
+  en: string;
+  align?: "left" | "right";
+}) {
+  return (
+    <span className={cn("flex flex-col leading-tight", align === "right" && "items-end")}>
+      <span>{zh}</span>
+      <span className="text-[10px] font-normal text-muted-foreground">{en}</span>
+    </span>
+  );
+}
 
 /** 倍率文案按 verdict 上色：免费走品牌绿，收费走琥珀，未知走灰。 */
 function multiplierTone(verdict: string): string {
@@ -117,34 +137,51 @@ function ReasoningCell({ model }: { model: PanelModel }) {
 
   if (efforts.length > 0) {
     return (
-      <span className="inline-flex flex-wrap items-center gap-1">
-        {efforts.map((effort) => {
-          const isDefault = effort === fallback;
-          return (
-            <Badge
-              key={effort}
-              variant={isDefault ? "default" : "outline"}
-              className={cn(!isDefault && "text-muted-foreground")}
-            >
-              {REASONING_EFFORT_LABEL[effort] ?? effort}
-            </Badge>
-          );
-        })}
-      </span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex cursor-help flex-wrap items-center gap-1">
+            {efforts.map((effort) => {
+              const isDefault = effort === fallback;
+              return (
+                <Badge
+                  key={effort}
+                  variant={isDefault ? "default" : "outline"}
+                  className={cn(!isDefault && "text-muted-foreground")}
+                >
+                  {effortLabel(effort)}
+                </Badge>
+              );
+            })}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[300px] space-y-0.5 text-xs">
+          <div>实心 = 默认档 · Filled = default</div>
+          <div>低 low · 中 medium · 高 high · 最高 max · 极简 minimal</div>
+          <div className="text-muted-foreground">
+            客户端按 reasoning_effort 传这些值 · Pass one of these as reasoning_effort
+          </div>
+        </TooltipContent>
+      </Tooltip>
     );
   }
 
   if (fallback) {
     return (
       <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <Badge variant="default">{REASONING_EFFORT_LABEL[fallback] ?? fallback}</Badge>
+        <Badge variant="default">{effortLabel(fallback)}</Badge>
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="cursor-default text-xs text-muted-foreground">默认档</span>
+            <span className="cursor-default text-xs text-muted-foreground">默认档 Default</span>
           </TooltipTrigger>
-          <TooltipContent side="top" className="max-w-[300px]">
-            上游只下发了默认档（reasoning.effort）。可选档位列表要特定客户端指纹才会返回，
-            因此这里列不出全部档位，不代表该模型只支持这一档。
+          <TooltipContent side="top" className="max-w-[300px] space-y-1">
+            <div>
+              上游只下发了默认档（reasoning.effort）。可选档位列表要特定客户端指纹才会返回，
+              因此这里列不出全部档位，不代表该模型只支持这一档。
+            </div>
+            <div className="text-muted-foreground">
+              Only the default effort was published; the full list is withheld by the upstream,
+              not a sign that other tiers are unsupported.
+            </div>
           </TooltipContent>
         </Tooltip>
       </span>
@@ -152,6 +189,12 @@ function ReasoningCell({ model }: { model: PanelModel }) {
   }
 
   return <span className="text-muted-foreground">-</span>;
+}
+
+/** 档位双语标签：中文 + 上游原始值（客户端要传的就是后者）。 */
+function effortLabel(effort: string): string {
+  const zh = REASONING_EFFORT_LABEL[effort];
+  return zh ? `${zh} ${effort}` : effort;
 }
 
 export interface ModelsTableProps {
@@ -192,18 +235,36 @@ export function ModelsTable({
   const { copiedKey, copy } = useCopy();
 
   return (
-    <Table className="min-w-[1136px]">
+    <Table className="min-w-[1180px]">
       <TableHeader>
         <TableRow>
-          <TableHead className={COL.model}>模型</TableHead>
-          <TableHead className={cn(COL.number, "text-right")}>上下文</TableHead>
-          <TableHead className={cn(COL.number, "text-right")}>最大输出</TableHead>
-          <TableHead className={COL.multiplier}>国内站倍率</TableHead>
-          <TableHead className={COL.multiplier}>国际站倍率</TableHead>
-          <TableHead className={cn(COL.count, "text-right")}>可用账号</TableHead>
-          <TableHead className={cn(COL.count, "text-right")}>请求数</TableHead>
-          <TableHead className={COL.reasoning}>档位</TableHead>
-          <TableHead className={cn(COL.actions, "text-right")}>操作</TableHead>
+          <TableHead className={COL.model}>
+            <HeadLabel zh="模型" en="Model" />
+          </TableHead>
+          <TableHead className={cn(COL.number, "text-right")}>
+            <HeadLabel zh="上下文" en="Context" align="right" />
+          </TableHead>
+          <TableHead className={cn(COL.number, "text-right")}>
+            <HeadLabel zh="最大输出" en="Max output" align="right" />
+          </TableHead>
+          <TableHead className={COL.multiplier}>
+            <HeadLabel zh="国内站倍率" en="CN multiplier" />
+          </TableHead>
+          <TableHead className={COL.multiplier}>
+            <HeadLabel zh="国际站倍率" en="Intl multiplier" />
+          </TableHead>
+          <TableHead className={cn(COL.count, "text-right")}>
+            <HeadLabel zh="可用账号" en="Accounts" align="right" />
+          </TableHead>
+          <TableHead className={cn(COL.count, "text-right")}>
+            <HeadLabel zh="请求数" en="Requests" align="right" />
+          </TableHead>
+          <TableHead className={COL.reasoning}>
+            <HeadLabel zh="档位" en="Effort" />
+          </TableHead>
+          <TableHead className={cn(COL.actions, "text-right")}>
+            <HeadLabel zh="操作" en="Actions" align="right" />
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -247,7 +308,7 @@ export function ModelsTable({
                 </div>
               </TableCell>
               <TableCell className="text-right tabular-nums text-foreground">
-                {formatCount(model.context_length)}
+                <ContextWindow model={model} exact />
               </TableCell>
               <TableCell className="text-right tabular-nums text-foreground">
                 {formatCount(model.max_output_tokens)}

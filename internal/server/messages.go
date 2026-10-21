@@ -119,6 +119,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.Body.Close()
+	// 完整请求诊断：Anthropic 原始请求（早于转 chat 与出站改写）。
+	s.fullRequestIncoming(r, bodyBytes)
 	if debuglog.Enabled() {
 		fields := debuglog.BodyFingerprint(bodyBytes)
 		debuglog.Event(r, "debug", "request_body_read_completed", fields)
@@ -173,6 +175,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// 与 chat / responses 完全同一条管线（不共用的话三个入口的治理行为会漂移）。
 	upstreamBytes, prep := s.prepareOutboundBody(rawBody, false)
 	s.logOutbound(modelName, "", trace, prep)
+	s.fullRequestOutbound(r, modelName, false, rawBody, upstreamBytes)
 
 	sessionKey := session.Key(chatReq)
 	pinID := s.sticky.Lookup(sessionKey)
@@ -1094,6 +1097,7 @@ func (s *Server) recordMessagesRequest(r *http.Request, mode, modelName string, 
 		OutputTokens: outputTokens,
 		TotalTokens:  total,
 		TTFTMs:       ttft.Milliseconds(),
+		LatencyMs:    time.Since(started).Milliseconds(),
 	})
 }
 

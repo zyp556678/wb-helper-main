@@ -772,7 +772,8 @@ type Patch struct {
 		Allowlist []string `json:"allowlist"`
 	} `json:"models"`
 	Debug *struct {
-		Enabled *bool `json:"enabled"`
+		Enabled      *bool `json:"enabled"`
+		FullRequests *bool `json:"full_requests"`
 	} `json:"debug"`
 }
 
@@ -962,14 +963,26 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 	if p.Server != nil {
 		applyPresent(&c.Server, p.Server, "server", present)
 	}
+	if p.Debug != nil {
+		// debug 段的两个开关都在这里落地：
+		//   - enabled 是装配期字段（事件流 sink 在启动时建），热改只改内存值，
+		//     SavePatch 会把它列进 need_restart；
+		//   - full_requests 是请求期读取的开关（debuglog.SetFullRequests），真热生效。
+		if p.Debug.Enabled != nil {
+			c.DebugEnabled = *p.Debug.Enabled
+		}
+		if p.Debug.FullRequests != nil {
+			c.DebugFullRequests = *p.Debug.FullRequests
+		}
+	}
 }
 
 // hotFields 是可**热生效**的配置段前缀（保存后立即生效，不需要重启）。
 //
 // 治理与调度参数、模型名单都在此列；上游超时也在此列 —— 它的生效方式是
 // 克隆 Transport（见 transport.go），不属于装配期字段了。
-// 仍然需要重启的是 `server.read_timeout`（http.Server 只在启动时构造一次）与
-// `debug.enabled`（调试事件流的落盘开关在启动时决定）。
+// 仍然需要重启的是 `server.read_timeout`（http.Server 只在启动时构造一次）；
+// 调试开关已改为热生效：debuglog.Apply 负责按配置开合 sink，重复调用幂等。
 var hotFields = []string{"cooldown", "pool", "session_sticky", "schedule", "models", "prompt", "local", "tasks", "update", "upstream"}
 
 // SavePatch 把补丁写入 config.json 并返回 (已热生效字段, 需重启字段)。
@@ -1057,7 +1070,14 @@ func (c *Config) SavePatch(body []byte) ([]string, []string, error) {
 		needRestart = append(needRestart, "server.read_timeout")
 	}
 	if _, ok := patchMap["debug"]; ok {
-		needRestart = append(needRestart, "debug")
+		// debug 段整体热生效：enabled 由 debuglog.Apply 开/关 sink，
+		// full_requests 是请求期读取的原子开关；两者都不需要重启。
+		if present["debug.enabled"] {
+			applied = append(applied, "debug.enabled")
+		}
+		if present["debug.full_requests"] {
+			applied = append(applied, "debug.full_requests")
+		}
 	}
 	return applied, needRestart, nil
 }

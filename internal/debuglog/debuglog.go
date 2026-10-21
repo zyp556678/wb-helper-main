@@ -42,6 +42,7 @@ type fileSink struct {
 	mu     sync.Mutex
 	file   *os.File
 	path   string
+	dir    string
 	opened time.Time
 }
 
@@ -64,7 +65,7 @@ func Enable(dir string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &fileSink{file: f, path: path, opened: time.Now()}
+	s := &fileSink{file: f, path: path, dir: dir, opened: time.Now()}
 	mu.Lock()
 	old := sink
 	sink = s
@@ -81,6 +82,38 @@ func Enable(dir string) (func(), error) {
 		mu.Unlock()
 		s.close()
 	}, nil
+}
+
+// Apply 按配置同步事件流的开关状态（幂等）。
+//
+// 与 Enable 的区别：Enable 是「打开一个新 sink」，Apply 是「让当前状态等于配置」——
+// 配置每次保存都会调用它，已开且目录相同就什么都不做，避免反复关闭/重开日志文件。
+// 目录变了（例如工作目录迁移）才重开。
+func Apply(enabled bool, dir string) error {
+	mu.RLock()
+	cur := sink
+	mu.RUnlock()
+
+	if !enabled {
+		Close()
+		return nil
+	}
+	if cur != nil && cur.dir == dir {
+		return nil
+	}
+	_, err := Enable(dir)
+	return err
+}
+
+// Close 关闭当前事件流（没有打开时是空操作）。
+func Close() {
+	mu.Lock()
+	s := sink
+	sink = nil
+	mu.Unlock()
+	if s != nil {
+		s.close()
+	}
 }
 
 // Enabled 报告事件流是否打开（未打开时调用方不必构造 fields）。

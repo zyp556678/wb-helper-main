@@ -46,7 +46,7 @@ import (
 )
 
 // version 是网关版本号。
-const version = "0.14.2"
+const version = "0.14.3"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -363,15 +363,15 @@ func runServe(args []string) {
 	// 调试事件流：debug.enabled 打开时按行落 `debug-YYYY-MM-DD.jsonl`
 	// （请求进入/返回、鉴权被拒、模型被策略挡下、上游重试…）。
 	debuglog.SetVersion(version)
-	if cfg.DebugEnabled {
-		closeDebug, err := debuglog.Enable(cfg.WorkDir)
-		if err != nil {
-			log.Printf("[debug] 事件流开启失败（其余功能不受影响）: %v", err)
-		} else {
-			defer closeDebug()
-			log.Printf("[debug] 事件流已开启: %s", debuglog.Path())
-		}
+	// 两个开关都交给 server 的 applyRuntimeConfig 统一同步（热生效）；
+	// 这里只做启动时的首次应用，并保证进程退出时关闭 sink。
+	if err := debuglog.Apply(cfg.DebugEnabled, cfg.WorkDir); err != nil {
+		log.Printf("[debug] 事件流开启失败（其余功能不受影响）: %v", err)
+	} else if debuglog.Enabled() {
+		log.Printf("[debug] 事件流已开启: %s", debuglog.Path())
 	}
+	defer debuglog.Close()
+	debuglog.SetFullRequests(cfg.DebugFullRequests && cfg.DebugEnabled)
 
 	// 请求级观测：内存指标始终启用；JSONL 归档默认开（只写脱敏元数据，
 	// 且队列满会丢弃而非阻塞请求，所以默认开的代价很低，而默认关会让排障没有历史可查）。

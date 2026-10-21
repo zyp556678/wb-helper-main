@@ -45,6 +45,8 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.Body.Close()
+	// 完整请求诊断：记的是客户端原始请求，早于协议转换与出站改写。
+	s.fullRequestIncoming(r, bodyBytes)
 
 	var respReq map[string]any
 	if err := json.Unmarshal(bodyBytes, &respReq); err != nil {
@@ -89,6 +91,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamBytes, prep := s.prepareOutboundBody(rawBody, false)
 	s.logOutbound(modelName, "", trace, prep)
+	s.fullRequestOutbound(r, modelName, false, rawBody, upstreamBytes)
 
 	sessionKey := session.Key(chatReq)
 	pinID := s.sticky.Lookup(sessionKey)
@@ -102,6 +105,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		if b, _ := s.prepareOutboundBody(rawBody, true); len(b) > 0 {
 			degradedBody = b
+			s.fullRequestOutbound(r, modelName, true, rawBody, b)
 			return b
 		}
 		return nil
@@ -481,6 +485,7 @@ func (s *Server) aggregateResponses(w http.ResponseWriter, r *http.Request, resp
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		TotalTokens:  total,
+		LatencyMs:    time.Since(started).Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "responses/aggregate",
 		0, time.Since(started), total, outputTokens, false)
@@ -895,6 +900,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 		OutputTokens: outputTokens,
 		TotalTokens:  total,
 		TTFTMs:       ttft.Milliseconds(),
+		LatencyMs:    time.Since(started).Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "responses/stream",
 		ttft, time.Since(started), total, outputTokens, interrupt)

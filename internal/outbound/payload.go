@@ -23,7 +23,9 @@ import (
 //  7. 工具序列自愈 —— 必须在 role 归一之后：developer→system 会影响消息拓扑判定。
 //  8. 思维链开关与档位降级 —— 注入的默认档要经过降级管线，所以注入在降级之前。
 //  9. reasoning_content 回填 —— 依赖第 8 步注入后的 thinking 状态。
-//  10. 指纹脱敏 —— 放最后：前面所有步骤写入的内容都在此统一过一遍。
+//  10. system 开头身份前缀净化 —— 必须在指纹脱敏之前：脱敏会改这段文本，
+//     之后偏移 0 的匹配就抓不到了。且不受脱敏开关约束（见 sanitizeprefix.go）。
+//  11. 指纹脱敏 —— 放最后：前面所有步骤写入的内容都在此统一过一遍。
 type Options struct {
 	// PromptMode 见 prompt.go 的三个常量；空串等价于 passthrough。
 	PromptMode string
@@ -56,6 +58,9 @@ type Result struct {
 	SystemInjected bool `json:"system_injected"`
 	// Sanitized 表示是否真的改动了内容（命中指纹）。
 	Sanitized bool `json:"sanitized"`
+	// SystemPrefixSanitized 是被改写开头的 system 消息条数（上游按 system 开头
+	// 做渠道校验，命中即整单拦截）。非零表示本次请求本来会被上游拒收。
+	SystemPrefixSanitized int `json:"system_prefix_sanitized,omitempty"`
 	// ToolRepair 是工具序列自愈的统计。
 	ToolRepair ToolRepairReport `json:"tool_repair"`
 	// ToolPatternsFixed 是被修掉的非标正则转义处数（`pattern` 值 + `patternProperties` 键）。
@@ -184,7 +189,15 @@ func Prepare(body []byte, opts Options) Result {
 		res.ReasoningBackfilled = backfillReasoningMessages(obj)
 	}
 
-	// 10. 指纹脱敏
+	// 10. system 开头的身份前缀净化
+	// 放在指纹脱敏**之前**、且不受 Sanitize 开关约束：上游那条是按 system 开头
+	// 逐字匹配的渠道校验，命中即整单拦截（11128）。先于脱敏做，是因为脱敏若先
+	// 改动了这段文本，后面的偏移 0 匹配就抓不到了。
+	if msgs, ok := obj["messages"].([]any); ok {
+		res.SystemPrefixSanitized = sanitizeSystemPrefixes(msgs)
+	}
+
+	// 11. 指纹脱敏
 	if opts.Sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			res.Sanitized = sanitizeMessages(msgs)

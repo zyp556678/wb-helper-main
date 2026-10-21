@@ -52,6 +52,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.Body.Close()
+	// 完整请求诊断（debug.full_requests 打开时才落盘）：必须在任何改写之前，
+	// 记下的才是客户端真正发来的东西。
+	s.fullRequestIncoming(r, bodyBytes)
 
 	var reqObj map[string]any
 	if err := json.Unmarshal(bodyBytes, &reqObj); err != nil {
@@ -99,6 +102,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamBytes, prep := s.prepareOutboundBody(rawBody, false)
 	s.logOutbound(modelName, "", trace, prep)
+	s.fullRequestOutbound(r, modelName, false, rawBody, upstreamBytes)
 
 	// 会话粘性：同一会话尽量复用同一账号，保证多轮对话不跳号
 	sessionKey := session.Key(reqObj)
@@ -116,6 +120,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if b, _ := s.prepareOutboundBody(rawBody, true); len(b) > 0 {
 			degradedBody = b
+			s.fullRequestOutbound(r, modelName, true, rawBody, b)
 			return b
 		}
 		return nil
@@ -336,6 +341,9 @@ func (s *Server) dispatchRouted(w http.ResponseWriter, r *http.Request, modelNam
 		if resp.StatusCode >= 400 {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
+			// 完整请求诊断：上游拒绝时把错误正文（脱敏后）记下来 ——
+			// 这是「为什么被拒」唯一的一手线索，普通日志只有分类后的短句。
+			s.fullRequestUpstreamError(r, modelName, resp.StatusCode, errBody)
 			class := upstream.Classify(resp.StatusCode, string(errBody))
 			lastErr = fmt.Sprintf("HTTP %d %s", resp.StatusCode, class.Message)
 			s.logf("[%s] 账号 %s 上游返回 %d（分类=%s）",
@@ -725,6 +733,9 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 		OutputTokens: outputTokens,
 		TotalTokens:  total,
 		TTFTMs:       ttft.Milliseconds(),
+		// 端到端总耗时随请求一起落进统计桶：模型页近 5 小时窗口要能显示
+		// 「平均耗时」，而重启之后只有持久化数据可用（内存指标会清零）。
+		LatencyMs: time.Since(started).Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "chat/stream",
 		ttft, time.Since(started), total, outputTokens, interrupted)
@@ -787,6 +798,7 @@ func (s *Server) aggregateChatResponse(w http.ResponseWriter, r *http.Request, r
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		TotalTokens:  total,
+		LatencyMs:    time.Since(started).Milliseconds(),
 	})
 	s.logRequest(r, modelName, accountLogLabel(acc), "chat/aggregate",
 		0, time.Since(started), total, outputTokens, false)

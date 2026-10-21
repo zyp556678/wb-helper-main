@@ -46,7 +46,9 @@ export function useModels(): ModelsData {
     inFlight.current = true;
     if (!silent) setLoading(true);
     try {
-      const [nextCatalog, nextConfig] = await Promise.all([fetchModels(), fetchConfig()]);
+      // 模型页固定取「近 5 小时」的**落盘**统计：进程内指标一重启就清零，
+      // 而模型卡片上的请求数与平均耗时恰恰是重启后最想确认的。
+      const [nextCatalog, nextConfig] = await Promise.all([fetchModels("5h"), fetchConfig()]);
       setCatalog(nextCatalog);
       // Go 侧 nil slice 会序列化成 null，这里兜底成空数组。
       setFilter({

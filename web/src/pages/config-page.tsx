@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PillGroup, Section } from "@/components/section";
+import { DebugLogCard } from "@/components/debug-log-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -1433,6 +1434,14 @@ export function ConfigPage() {
               </ConfigRow>
             </CardContent>
           </Section>
+
+          {/* 调试日志：两个开关生效方式不同（enabled 需重启 / full_requests 热生效），
+              界面文案必须写清，否则「打开了却没日志」会被当成 bug。 */}
+          <DebugLogCard
+            enabled={config?.debug_enabled ?? false}
+            fullRequests={config?.debug_full_requests ?? false}
+            onSaved={() => void load()}
+          />
 
           {/* 签到日志（批次 5）：读本地台账，纯只读、不打上游。 */}
           <Section

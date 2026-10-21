@@ -1,6 +1,7 @@
 import { Brain, FlaskConical, Image as ImageIcon, Loader2, Wrench } from "lucide-react";
 
 import { CopyIconButton, useCopy } from "@/components/copy-button";
+import { ContextWindow } from "@/components/context-window";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -291,9 +292,9 @@ export function ModelCard({
       </div>
 
       <div className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-t px-4 py-2.5 text-xs text-muted-foreground">
-        <span className="tabular-nums">上下文 {formatTokenCompact(model.context_length)}</span>
-        <span className="tabular-nums">输出 {formatTokenCompact(model.max_output_tokens)}</span>
-        <span className="tabular-nums">账号 {model.available_accounts}</span>
+        <ContextWindow model={model} prefix="上下文 Context " />
+        <span className="tabular-nums">输出 Output {formatTokenCompact(model.max_output_tokens)}</span>
+        <span className="tabular-nums">账号 Accounts {model.available_accounts}</span>
         {/* 运行指标：总量之外还要看「行不行」—— 失败计数与最近状态才是那个答案，
             平均首字则回答「慢不慢」。三者都没有时只显示请求数，不摆一堆 0。 */}
         <Tooltip>
@@ -305,6 +306,7 @@ export function ModelCard({
           </TooltipTrigger>
           <TooltipContent side="top">
             <div className="space-y-0.5 text-xs">
+              <div>近 5 小时（落盘统计，重启后仍在）</div>
               <div>请求 {model.requests} · 成功 {model.success ?? 0} · 失败 {model.failed ?? 0}</div>
               <div>累计 token {formatTokenCompact(model.tokens ?? 0)}（上游 usage）</div>
               <div>
@@ -316,9 +318,9 @@ export function ModelCard({
             </div>
           </TooltipContent>
         </Tooltip>
-        <span className="inline-flex items-center gap-1" title="推理档位">
+        <span className="inline-flex items-center gap-1" title="思考强度 / Reasoning effort">
           <Brain className="size-3.5" aria-hidden="true" />
-          {reasoningLabel(reasoning, efforts, fallback)}
+          思考 Effort {reasoningLabel(reasoning, efforts, fallback)}
         </span>
         {model.supports_tool_call ? (
           <Tooltip>
@@ -370,12 +372,18 @@ export function ModelCard({
   );
 }
 
-/** 档位文案：有档位列表就列全，只有默认档就标「默认档」，完全不支持才写「—」。 */
+/** 档位文案：有档位列表就列全（中英双语），只有默认档就标「默认档 default」。 */
 function reasoningLabel(reasoning: ModelView["reasoning"], efforts: string[], fallback: string): string {
   if (reasoning === "none") return "—";
+  const label = (effort: string) => {
+    const zh = REASONING_EFFORT_LABEL[effort];
+    return zh ? `${zh} ${effort}` : effort;
+  };
   if (efforts.length > 0) {
-    return efforts.map((effort) => REASONING_EFFORT_LABEL[effort] ?? effort).join("/");
+    const list = efforts.map(label).join(" / ");
+    // 默认档单独标出来，和表格里「实心 = 默认档」保持同一口径。
+    return fallback ? `${list}（默认 default：${label(fallback)}）` : list;
   }
-  if (fallback) return `${REASONING_EFFORT_LABEL[fallback] ?? fallback}（默认档）`;
-  return "默认档";
+  if (fallback) return `${label(fallback)}（默认档 default）`;
+  return "默认档 default";
 }

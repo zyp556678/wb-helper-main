@@ -1,12 +1,13 @@
 {
-  "_说明": "本文件是 config.json 的示例。网关**热加载**它：保存后 1 秒内自动生效（read_timeout 与 debug 需重启）。",
+  "_说明": "本文件是 config.json 的示例。网关**热加载**它：保存后 1 秒内自动生效（仅 server.read_timeout 需重启）。",
   "upstream": {
     "headerTimeoutSeconds": 300,
     "idleTimeoutSeconds": 120,
     "transientRetries": 2
   },
   "debug": {
-    "enabled": false
+    "enabled": false,
+    "full_requests": false
   },
   "models": {
     "blocklist": [],

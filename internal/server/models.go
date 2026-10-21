@@ -9,6 +9,7 @@ import (
 	"workbuddy-gateway/internal/auth"
 	"workbuddy-gateway/internal/catalog"
 	"workbuddy-gateway/internal/metrics"
+	"workbuddy-gateway/internal/stats"
 )
 
 // 本文件是模型目录相关的面板接口与后台刷新（切片 3）。
@@ -47,7 +48,21 @@ func (s *Server) reloadLoop(ctx context.Context) {
 // -----------------------------------------------------------------------------
 
 // handlePanelModels 返回模型目录 + 倍率 + 探测台账 + 运行指标。
+//
+// range 只接受两种值：
+//
+//	""    进程内指标（默认，保持既有契约）
+//	"5h"  改读 wb-stats.json 的近 5 小时窗口 —— 服务重启后仍然有数
+//
+// 为什么需要 5h：进程内指标重启即清零，而模型页上「这个模型最近跑了多少」
+// 恰恰是重启后最想确认的东西。上游 v1.14.21 的做法就是给模型列表加这个参数。
 func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
+	rangeParam := strings.TrimSpace(r.URL.Query().Get("range"))
+	if rangeParam != "" && rangeParam != "5h" {
+		writeJSON(w, http.StatusBadRequest, errBody("range 只能是 5h"))
+		return
+	}
+
 	source, fetchedAt := s.cat.Source()
 	models := s.cat.Merged()
 	now := time.Now()
@@ -58,6 +73,11 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 	statsByModel := map[string]metrics.ModelSnapshot{}
 	for _, st := range s.metrics.Snapshot() {
 		statsByModel[st.Model] = st
+	}
+	// 近 5 小时窗口的持久化统计（range=5h 时才查，避免每次打开模型页都做一次全表聚合）。
+	var windowStats map[string]stats.ModelWindowStat
+	if rangeParam == "5h" && s.stats != nil {
+		windowStats = s.stats.ModelWindow(5)
 	}
 
 	// 探测汇总
@@ -147,8 +167,13 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 			"name":               m.Name,
 			"description":        m.Description,
 			"context_length":     m.ContextLength(),
-			"max_output_tokens":  m.MaxOutputTokens,
-			"max_allowed_size":   m.MaxAllowedSize,
+			// context_length 是**默认档**（上游 contextWindow.defaultLength），
+			// 可选档位与最大输入分开展示：deepseek-v4.1-flash 默认 300K、可选
+			// 300K/600K/1M、最大输入 1M —— 只给默认值时面板会把它说小。
+			"context_length_options": m.ContextWindowOptions,
+			"max_input_tokens":       m.MaxInputTokens,
+			"max_output_tokens":      m.MaxOutputTokens,
+			"max_allowed_size":       m.MaxAllowedSize,
 			"available_accounts": available,
 			"requests":           s.metrics.RequestsFor(m.ID),
 			"blocked":            blocked,
@@ -159,22 +184,47 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 			"tags":               m.Tags,
 			"vendor":             m.Vendor,
 		}
-		// 运行指标：没有请求记录时**不写 0**，让前端能区分「没跑过」与「跑了但全失败」。
-		if st, ok := statsByModel[m.ID]; ok {
+		// 运行指标：
+		//   - 计数类（请求/成功/失败/token/均值）在 range=5h 时来自持久化统计；
+		//     否则来自进程内滚动窗口（旧行为保持不变）。
+		//   - 最近状态与最近请求时刻只存在于进程内（持久化桶不记单次结果），
+		//     两个模式共用。
+		if rangeParam == "5h" {
+			if ws, ok := windowStats[m.ID]; ok {
+				row["requests"] = ws.Requests
+				row["success"] = ws.Success
+				row["failed"] = ws.Failures
+				row["tokens"] = ws.Tokens
+				row["avg_ttft_ms"] = ws.AvgTTFTMs
+				row["avg_total_ms"] = ws.AvgLatencyMs
+			} else {
+				// 窗口内确实没有这个模型的记录：与下面「没跑过」的表示保持一致，
+				// 不用 0 冒充样本（前端据此显示「-」）。
+				row["requests"] = int64(0)
+				row["success"] = int64(0)
+				row["failed"] = int64(0)
+				row["tokens"] = int64(0)
+				row["avg_ttft_ms"] = nil
+				row["avg_total_ms"] = nil
+			}
+		} else if st, ok := statsByModel[m.ID]; ok {
 			row["requests"] = st.Requests
 			row["success"] = st.Success
 			row["failed"] = st.Failures
 			row["tokens"] = st.TokensTotal
 			row["avg_ttft_ms"] = st.AvgTTFTMs
 			row["avg_total_ms"] = st.AvgTotalMs
-			row["last_request_at"] = st.LastRequestAt
-			row["last_status"] = st.LastStatus
 		} else {
 			row["success"] = int64(0)
 			row["failed"] = int64(0)
 			row["tokens"] = int64(0)
 			row["avg_ttft_ms"] = nil
 			row["avg_total_ms"] = nil
+		}
+		if st, ok := statsByModel[m.ID]; ok {
+			row["last_request_at"] = st.LastRequestAt
+			row["last_status"] = st.LastStatus
+		} else {
 			row["last_request_at"] = int64(0)
 			row["last_status"] = ""
 		}
@@ -205,6 +255,7 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 		"model_count":            len(models),
 		"sites":                  sites,
 		"models":                 rows,
+		"range":                  rangeParam,
 		"probe_summary":          summary,
 		"probe_interval_seconds": int(catalog.ProbeInterval.Seconds()),
 	})

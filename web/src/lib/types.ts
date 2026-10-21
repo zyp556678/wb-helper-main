@@ -374,14 +374,18 @@ export interface LoginStartResponse {
   auth_url: string;
   /** 授权链接有效期，秒。 */
   expires_in: number;
+  /** 剩余秒数（与服务端时钟对齐，倒计时以此为准）。 */
+  remaining_seconds?: number;
+  /** 授权链接过期时刻（Unix 秒）。 */
+  expires_at?: number;
 }
 
 /** 轮询登录结果，按 status 分支；ok 时附带已热加载的账号。 */
 export type LoginPollResponse =
-  | { status: "pending" }
-  | { status: "ok"; account: Account }
-  | { status: "expired"; error?: string }
-  | { status: "error"; error?: string };
+  | { status: "pending"; remaining_seconds?: number; expires_at?: number }
+  | { status: "ok"; account: Account; remaining_seconds?: number; expires_at?: number }
+  | { status: "expired"; error?: string; remaining_seconds?: number; expires_at?: number }
+  | { status: "error"; error?: string; remaining_seconds?: number; expires_at?: number };
 
 export interface RemoveAccountResponse {
   ok: boolean;
@@ -714,6 +718,8 @@ export interface PanelConfig {
   /** 入站 HTTP 参数（保存后需重启生效）。后端未下发时按缺省 300s 兜底。 */
   server?: ConfigServer;
   debug_enabled: boolean;
+  /** debug.full_requests：完整请求正文记录（请求期读取，保存即生效）。 */
+  debug_full_requests?: boolean;
   models_filter: ConfigModelsFilter;
   cooldown: ConfigCooldown;
   pool: ConfigPool;
@@ -759,6 +765,11 @@ export interface ConfigPatch {
   prompt?: Partial<Omit<ConfigPrompt, "effective_text_preview">>;
   /** 模型黑白名单；传整个名单数组，后端以 config.models_filter 为权威值。 */
   models?: Partial<ConfigModelsFilter>;
+  /** 调试日志段：enabled 需重启，full_requests 热生效。 */
+  debug?: {
+    enabled?: boolean;
+    full_requests?: boolean;
+  };
 }
 
 export interface SaveConfigResponse {
@@ -845,8 +856,12 @@ export interface PanelModel {
   name: string;
   /** 上游中文描述（有中文时优先）；空串=上游未给。 */
   description: string;
-  /** 0 = 上游未标注。 */
+  /** 默认上下文窗口（上游 contextWindow.defaultLength）；0 = 上游未标注。 */
   context_length: number;
+  /** 上游声明的可选窗口档位（contextWindow.supportedLengths）；null / 空 = 未下发。 */
+  context_length_options?: number[] | null;
+  /** 上游声明的最大输入窗口；可能大于 context_length（后者是默认档）。0 = 未标注。 */
+  max_input_tokens?: number;
   /** 0 = 上游未标注。 */
   max_output_tokens: number;
   /** 上游允许的最大请求尺寸；0 = 未标注。 */
@@ -863,7 +878,7 @@ export interface PanelModel {
   supports_tool_call: boolean;
   /** 当前可调度该模型的账号数（已计入账号冷却与模型级冷却）。 */
   available_accounts: number;
-  /** 本进程累计请求数。 */
+  /** 指标窗口内的请求数（模型页取落盘统计的近 5 小时；其它调用方为进程内累计）。 */
   requests: number;
   /** 成功 / 失败次数（失败含选号失败、上游中断、聚合失败等）。 */
   success?: number;
@@ -921,6 +936,8 @@ export interface ModelsResponse {
   model_count: number;
   sites: ModelSiteSummary[];
   models: PanelModel[];
+  /** 指标窗口："" = 进程内；"5h" = 落盘统计的近 5 小时。 */
+  range?: "" | "5h";
   probe_summary: ProbeSummary;
 }
 

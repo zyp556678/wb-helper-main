@@ -24,6 +24,14 @@ import sys
 import time
 import zipfile
 
+# 中文 Windows 的控制台默认是 GBK：脚本里的「✓ / ✗」在 GBK 下会抛
+# UnicodeEncodeError —— 包其实已经打包成功，却以退出码 1 结束，看起来像失败。
+# 启动时把标准输出统一切到 UTF-8，避免这类「假失败」。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # 仓库根目录按脚本位置推导，不写死绝对路径。
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")

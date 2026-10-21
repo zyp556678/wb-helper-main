@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"workbuddy-gateway/internal/config"
+	"workbuddy-gateway/internal/debuglog"
 	"workbuddy-gateway/internal/pool"
 )
 
@@ -48,7 +49,8 @@ func (s *Server) configView() map[string]any {
 			"idle_timeout_seconds":   int(c.IdleTimeout.Seconds()),
 			"proxy":                  c.ProxyURL != "",
 		},
-		"debug_enabled": c.DebugEnabled,
+		"debug_enabled":       c.DebugEnabled,
+		"debug_full_requests": c.DebugFullRequests,
 		"models_filter": map[string]any{
 			"blocklist": c.ModelBlock,
 			"allowlist": c.ModelAllow,
@@ -196,8 +198,8 @@ func (s *Server) storeConfig(next *config.Config) {
 
 // applyRuntimeConfig 把配置同步到治理层与粘性表。
 // 上游超时**不在这里**：它由 Transport 外壳在每次请求时比对当前快照自行生效
-// （见 config.HotTransport），换快照就够了。仍需重启的只有
-// `server.read_timeout` 与 `debug.enabled`（保存接口会在 need_restart 里如实告知）。
+// （见 config.HotTransport），换快照就够了。仍需重启的只有 `server.read_timeout`
+// （保存接口会在 need_restart 里如实告知）；调试开关在下面热同步。
 func (s *Server) applyRuntimeConfig() {
 	c := s.config()
 	s.pool.SetConfig(c)
@@ -212,6 +214,14 @@ func (s *Server) applyRuntimeConfig() {
 	if s.tasks != nil {
 		s.tasks.SetConfig(c)
 	}
+	// 调试事件流与完整请求诊断都是**热生效**的：
+	//   - Apply 幂等：已开且目录相同就什么都不做，已关就关闭；
+	//   - full_requests 只是请求期读取的原子开关。
+	// 两个开关都关时 FullRequestEnabled 恒为假，不会产生任何正文记录。
+	if err := debuglog.Apply(c.DebugEnabled, c.WorkDir); err != nil {
+		s.logf("[debug] 事件流开关应用失败（其余功能不受影响）: %v", err)
+	}
+	debuglog.SetFullRequests(c.DebugFullRequests && c.DebugEnabled)
 	// 更新检查器同样持有配置快照：检查间隔、是否自动检查、私有仓库令牌都来自配置，
 	// 不换入新快照就会出现「面板改了开关、后台照旧」。
 	if s.updates != nil {

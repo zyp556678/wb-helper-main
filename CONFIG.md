@@ -9,7 +9,7 @@
     "idleTimeoutSeconds": 120,
     "transientRetries": 2
   },
-  "debug":    { "enabled": false },
+  "debug":    { "enabled": false, "full_requests": false },
   "models":   { "blocklist": [], "allowlist": [], "accounts": {} },
   "logging":  { "request_archive_enabled": true, "request_retention_days": 7, "request_archive_max_mb": 100 },
   "server":   { "read_timeout": "300s" },
@@ -27,9 +27,9 @@
 - **文件是运行层的唯一真源**：从文件里删掉一个键，它就回到默认值（不会留着旧值继续生效）；
 - 坏的配置（语法错误、非法取值）**不会中断服务**：保留上一份有效配置并按内容只告警一次，
   修好再保存即可；
-- 只有两个字段仍然要重启：`server.read_timeout`（`http.Server` 只在启动时构造一次）
-  与 `debug.enabled`（调试事件流的落盘开关在启动时决定）。改到它们时日志会明说
-  「需重启进程才生效」，面板保存的响应里也带 `need_restart`。
+- 只有 `server.read_timeout` 仍然要重启（`http.Server` 只在启动时构造一次）。
+  改到它时日志会明说「需重启进程才生效」，面板保存的响应里也带 `need_restart`。
+  调试开关（`debug.enabled` / `debug.full_requests`）都已改为热生效。
 
 启动日志里会打印 `配置热加载: <路径> 的改动 1 秒内自动生效`。
 
@@ -70,7 +70,19 @@
   上面这段配置下，`old-account.json` 对所有模型都不可用（全局层），
   `deepseek-v4.1-flash` 最终只允许 `intl-a.json`，`hy3` 被两层同时排除，
   未在 `accounts` 里出现的模型只受全局层约束。
-- `debug.enabled`：调试事件流（`debug-YYYY-MM-DD.jsonl`）的总开关。**装配期字段：改动需重启进程。**
+- `debug.enabled`：调试事件流（`debug-YYYY-MM-DD.jsonl`）的总开关。**热生效**：
+  保存后约 1 秒内开/关 sink（`debuglog.Apply` 幂等，不会反复重开文件）。
+  该段对格式容错：`null` / 空对象 / 空字符串 / `0`、`1` / `"true"`、`"false"` 都能解析，
+  写坏也不会阻断启动（按 `false` 处理）。
+- `debug.full_requests`：**完整请求正文**记录开关（默认 `false`，**热生效**，需 `debug.enabled` 同时打开）。
+  打开后对 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 记录三类事件到同一个
+  `debug-YYYY-MM-DD.jsonl`：`full_request_incoming`（客户端原始请求头与正文）、
+  `full_request_outbound`（出站改写后的正文，附处理前后 HMAC 摘要与 `body_changed`）、
+  `full_request_upstream_error`（上游 4xx/5xx 错误正文）。管理配置、登录与凭据接口
+  **即使开关打开也不记录正文**。已知凭据（Authorization / api_key / token / cookie / 密码 / 私钥 /
+  URL userinfo 与敏感 query）会被脱敏，但提示词、代码与图片仍属敏感数据，且无法保证识别
+  正文里任意写法的秘密——按需临时开启、排查完立即关闭。单条正文上限 512 KiB（超出截断并标记）。
+  两种拼写都接受：`full_requests` 与上游写法 `fullRequests`。
 - `server.read_timeout`：入站请求读取（含 body 上传）的总时长上限，默认 `300s`；`"0"` = 不限制；
   负值或不可解析的写法会**拒绝启动**（静默钳 0 等于把保护悄悄关掉）。大上下文 / 文件块经反代链
   慢速上传被掐成 `400 read body: ... i/o timeout` 时调大它。属装配期字段：**改动需重启进程**。

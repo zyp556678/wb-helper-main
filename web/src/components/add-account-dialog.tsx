@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -28,9 +28,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { describeError, fetchLoginSites, isAbortError, openExternalUrl, pollLogin, startLogin } from "@/lib/api";
 import type { AccountSite, LoginSite, LoginStartResponse } from "@/lib/types";
 import { cn, copyToClipboard } from "@/lib/utils";
+import { useNowSeconds } from "@/lib/use-now-seconds";
 
 /** 轮询间隔：后端建议 1.5~2 秒。 */
 const POLL_INTERVAL_MS = 2000;
+
+/** 秒 → mm:ss（倒计时用）。 */
+function formatCountdown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
 
 type Phase = "sites" | "waiting" | "error";
 
@@ -60,6 +68,16 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
   const [login, setLogin] = useState<LoginStartResponse | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /** 授权链接的过期时刻（Unix 秒）；0 表示还没有会话。 */
+  const [deadline, setDeadline] = useState(0);
+  /** 轮询的瞬时失败提示：只提示，不改变等待态（一次抖动不该让用户重扫）。 */
+  const [pollWarning, setPollWarning] = useState<string | null>(null);
+  /** 复制失败时用来选中链接文本，方便手动 Ctrl+C。 */
+  const authUrlRef = useRef<HTMLButtonElement | null>(null);
+  const now = useNowSeconds();
+
+  const remainingSeconds = deadline > 0 ? Math.max(0, deadline - now) : 0;
+  const linkExpired = phase === "waiting" && deadline > 0 && remainingSeconds <= 0;
 
   // 关闭时复位，保证下次打开从第一步开始。
   useEffect(() => {
@@ -69,6 +87,8 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
       setErrorText(null);
       setStarting(false);
       setCopied(false);
+      setDeadline(0);
+      setPollWarning(null);
     }
   }, [open]);
 
@@ -104,6 +124,13 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
       try {
         const result = await pollLogin(login.login_id, controller.signal);
         if (cancelled) return;
+        setPollWarning(null);
+
+        // 服务端每次都会给「还剩多久」：以它为准，避免前端用开始时间推算，
+        // 页面挂久了倒计时和真实有效期会分叉。
+        if (typeof result.expires_at === "number" && result.expires_at > 0) {
+          setDeadline(result.expires_at);
+        }
 
         if (result.status === "pending") return;
         if (result.status === "ok") {
@@ -120,8 +147,10 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
         setPhase("error");
       } catch (error) {
         if (cancelled || isAbortError(error)) return;
-        setErrorText(describeError(error));
-        setPhase("error");
+        // 轮询失败**不**结束等待：网络抖动 / 网关重启都会走到这里，
+        // 直接切错误态等于让用户重扫二维码。保留上次结果并继续轮询，
+        // 真正的失败由服务端返回的 status 决定。
+        setPollWarning(`查询登录进度失败，正在重试：${describeError(error)}`);
       }
     };
 
@@ -140,10 +169,17 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
   async function pickSite(site: AccountSite) {
     setStarting(true);
     setErrorText(null);
+    setPollWarning(null);
     try {
       const result = await startLogin(site);
       setLogin(result);
       setPhase("waiting");
+      // 优先用服务端的 expires_at；旧后端只给 expires_in 时按本地时钟折算。
+      const expiresAt =
+        typeof result.expires_at === "number" && result.expires_at > 0
+          ? result.expires_at
+          : Math.floor(Date.now() / 1000) + result.expires_in;
+      setDeadline(expiresAt);
     } catch (error) {
       setErrorText(describeError(error));
       setPhase("error");
@@ -156,12 +192,30 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
     if (!login) return;
     const ok = await copyToClipboard(login.auth_url);
     if (!ok) {
-      notifyError("复制失败，请手动选择链接复制");
+      // 剪贴板在非安全上下文（局域网 http 面板）与桌面壳 WebView 里都可能失败。
+      // 失败时把链接文本选中：用户按一次 Ctrl+C 就行，不必手动拖选。
+      selectAuthUrl();
+      notifyError("复制失败，已选中链接，请按 Ctrl+C 手动复制");
       return;
     }
     setCopied(true);
     notifySuccess("已复制授权链接");
     window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  /** 选中授权链接文本（复制失败时的兜底，与上游 clearAddAccountArtifacts 同思路）。 */
+  function selectAuthUrl() {
+    const node = authUrlRef.current;
+    if (!node) return;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    } catch {
+      // 选中失败不影响提示，用户仍可手动拖选。
+    }
   }
 
   /**
@@ -191,10 +245,11 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
     setLogin(null);
     setErrorText(null);
     setPhase("sites");
+    setDeadline(0);
+    setPollWarning(null);
   }
 
   const stepIndex = phase === "waiting" ? 1 : phase === "error" ? 1 : 0;
-  const expiresMinutes = login ? Math.max(1, Math.round(login.expires_in / 60)) : 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -323,13 +378,21 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
                     // 说成「用手机扫码」会让人以为扫完就自动加好，实际还要在页面里登录一次。
                     "国际站在浏览器中完成授权（手机扫码会打开手机浏览器，也可以点下面的按钮在本机浏览器打开）"
                   : "国内站用微信 / 企业微信扫码授权，或在浏览器中打开下面的链接"}
-                {expiresMinutes > 0 ? `（约 ${expiresMinutes} 分钟内有效）` : ""}
+                {deadline > 0
+                  ? remainingSeconds > 0
+                    ? `（剩余 ${formatCountdown(remainingSeconds)}，超时后需重新获取）`
+                    : "（链接已失效，请重新获取）"
+                  : ""}
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  ref={authUrlRef}
                   onClick={() => void openAuthUrl()}
-                  className="min-w-0 flex-1 truncate text-left font-mono text-xs text-primary-ink underline-offset-4 hover:underline"
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-left font-mono text-xs underline-offset-4 hover:underline",
+                    linkExpired ? "text-muted-foreground" : "text-primary-ink",
+                  )}
                   title={login.auth_url}
                 >
                   {login.auth_url}
@@ -350,6 +413,21 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: AddAccountDial
                   <ExternalLink className="size-3.5" />
                 </Button>
               </div>
+              {linkExpired ? (
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  <span>登录链接已失效；重新发起会生成新的二维码与链接。</span>
+                  <Button type="button" variant="outline" size="sm" onClick={restart}>
+                    <RefreshCw className="size-3.5" />
+                    重新发起
+                  </Button>
+                </div>
+              ) : null}
+              {pollWarning ? (
+                <div className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+                  <AlertCircle className="size-3.5 shrink-0" />
+                  <span className="min-w-0 break-all">{pollWarning}</span>
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}

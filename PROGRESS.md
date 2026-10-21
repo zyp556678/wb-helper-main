@@ -327,8 +327,8 @@ Windows / Linux 的桌面版不再使用系统标题栏：壳启动时去掉窗�
 - **坏配置不中断服务**：语法错误 / 非法取值时保留上一份有效配置，并按内容只告警一次，修好再保存即可。
 - **面板保存与文件监听共用一个摘要游标**：面板自己刚写的内容不会被监听循环当成外部改动重放一遍，
   省掉一次无意义的换快照与日志噪音。
-- 仍需重启的只有 `server.read_timeout`（`http.Server` 只在启动时构造一次）与
-  `debug.enabled`（调试事件流的落盘开关在启动时决定），改到时日志与面板响应如实说明。
+- 仍需重启的只有 `server.read_timeout`（`http.Server` 只在启动时构造一次）；
+  调试开关（`debug.enabled` / `debug.full_requests`）已改为热生效，改到时日志与面板响应如实说明。
 - **上游超时热改**：`http.Transport` 的字段不能在活跃请求期间原地改，所以每次 RoundTrip
   比对一次当前快照，**只有真的变了**才克隆一份换上去 —— 新请求用新超时、正在读取的旧流
   继续用旧的那份读到底、被换下来的那份回收空闲连接（不打断已建立的流）。
@@ -398,6 +398,55 @@ Windows / Linux 的桌面版不再使用系统标题栏：壳启动时去掉窗�
   走 localStorage）、v1.14.13 扫码加账号（早已有）、v1.14.14 去掉刷新令牌到期列（本项目
   卡片早已改用「积分有效期区间」而非 token 到期）、v1.14.8 告警按日志排序（无日志文件）、
   wb2api-panel 的 `prompt_cache_key` 回退（本项目不注入该字段）。
+
+**上游跟进（2026-10-21，wb-gateway v1.14.20 / v1.14.21）**：
+
+本轮只有 wb-gateway 有新提交（v1.14.20 网页登录超时提示、v1.14.21 提示词前缀净化与完整请求诊断）；
+wb2api-panel 与 wb-switch 仍停在 2026-10-12，无新增。
+
+- **system 开头身份前缀净化**（`internal/outbound/sanitizeprefix.go`，对照 v1.14.21）：
+  上游按 system 消息**开头**做提示词级渠道校验，`You are an AI agent powered by DeepSeek Harness`
+  出现在偏移 0 就会被整单拦下（11-128）。处理方式是等义改写为中性的
+  `You are an AI agent powered by a large language model`：只认偏移 0（前导空白不跳过）、
+  匹配忽略大小写、替换后正文逐字保留；数组形态只处理第一个文本块，图片等非文本块不碰。
+  **不受 `prompt.sanitize` 开关约束**——它属于「让请求通过」而不是「脱敏」
+  （同 `normalizeToolPatterns` 的定位）；关掉脱敏的用户依然需要它。
+  放在指纹脱敏**之前**执行：脱敏会改动这段文本，先跑脱敏会让偏移 0 的匹配抓不到。
+  命中条数记入出站事件（`system_prefix_sanitized` / `system_prefix_rule`），**不记提示词正文**。
+- **登录超时提示与复制链接**（`internal/server/login.go` + `web/src/components/add-account-dialog.tsx`，
+  对照 v1.14.20）：会话进入终态后在内存里多保留 2 分钟（`loginSessionRetention`）——
+  网页只拿到 id，必须再查一次才能看到 `expired / error / ok`；一进终态就删会让最后一次轮询
+  读到「会话不存在」，表现成「链接失效了但页面还在等」。轮询接口每次返回 `remaining_seconds`
+  与 `expires_at`，前端据此显示 `m:ss` 倒计时；倒计时归零时就地给出「重新发起」，
+  不必等轮询再报错。复制失败（局域网 http 面板 / 桌面 WebView 常见）时自动选中链接文本，
+  用户按一次 Ctrl+C 即可。轮询**瞬时失败不再切换错误态**：保留上次结果并继续重试，
+  真正的失败由服务端返回的 status 决定——一次网络抖动不该让人重扫二维码。
+- **模型页近 5 小时窗口改读落盘统计**（`internal/stats` + `internal/server/models.go`，
+  对照 v1.14.21）：`/panel/api/models?range=5h` 时，模型行上的请求 / 成功 / 失败 / token /
+  平均首字 / 平均总耗时改读 `wb-stats.json` 的小时桶，服务重启后仍然有数；
+  `last_status` / `last_request_at` 仍来自进程内指标（持久化桶不记单次结果）。
+  为此给统计 `Counter` 增加了 `LatencySumMs` / `LatencyCount`（端到端总耗时，
+  与首字分开累计），并在 chat / responses / messages 的完成路径写入 `LatencyMs`。
+  旧统计文件缺这两个字段时按 0 处理（`omitempty`，向后兼容）。`range` 只接受 `5h`，
+  其它值 400（与上游一致，不静默当成默认）。面板模型页固定请求 `range=5h`。
+- **完整请求诊断日志**（`internal/debuglog/fullrequest.go` + `internal/server/debugrequest.go`，
+  对照 v1.14.21）：新增 `debug.full_requests` 开关（默认为关、**热生效**，且要求
+  `debug.enabled` 也打开）。记录三类事件到同一个 `debug-YYYY-MM-DD.jsonl`：
+  `full_request_incoming`（入站请求头 + 正文）、`full_request_outbound`（出站改写后的正文，
+  附处理前后 HMAC 摘要与 `body_changed`，降级重试额外带 `degraded_attempt`）、
+  `full_request_upstream_error`（上游 4xx/5xx 错误正文）。
+  **不记录成功响应正文**（SSE 逐帧复制昂贵且会把答案写进日志；排障缺的是「我发出去什么」）。
+  脱敏：敏感字段名整值遮蔽（Authorization / api_key / token / cookie / password / secret / 私钥…）、
+  文本级 token 与 PEM 私钥规则、URL userinfo 与敏感 query；单条正文上限 512 KiB。
+  与 `internal/reqlog` 的分界：reqlog 归档**永不写正文**（有测试守着），
+  完整请求日志是独立开关、独立事件，两者不混。
+- **debug 段容错解析**（`internal/config/config.go`，对照 v1.14.21）：`debug` 缺失 / `null` /
+  空对象 / 空字符串 / `0`、`1` / `"true"`、`"false"` / 未知子字段全部容错，写坏按 `false`
+  处理且不阻断启动；同时接受 `full_requests` 与 `fullRequests` 两种拼写。
+- **未跟随**：v1.14.21 的网页日志查看器读取上限与「完整比对应读服务器文件」属其自带
+  admin 页面形态，本项目面板是 React 且日志页走 `GET /panel/api/logs`，没有对应改造点；
+  v1.14.20 的 `addAccountQr` 清空动作在本项目的 React 对话框里等价于切换 phase（组件直接卸载），
+  无需单独实现。
 
 **切片 1（账号与登录）已完成**：
 

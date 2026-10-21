@@ -330,7 +330,7 @@ print(resp.choices[0].message.content)
 
 运行时配置见 [CONFIG.md](CONFIG.md)。工作目录下的 `config.json` 覆盖运行层字段，
 可复制 `config.example.json` 起步。**改完保存即生效（1 秒内自动热加载，不需要重启）**，
-只有 `server.read_timeout` 与 `debug.enabled` 例外。
+只有 `server.read_timeout` 例外（`http.Server` 只在启动时构造一次）。
 
 ## 安全提示
 

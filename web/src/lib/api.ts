@@ -895,9 +895,14 @@ export function runSchedulerTask(task: SchedulerTask, opts?: { respectWindow?: b
   });
 }
 
-/** 模型目录快照（GET /panel/api/models）。 */
-export function fetchModels() {
-  return request<ModelsResponse>("/models");
+/**
+ * 模型目录快照（GET /panel/api/models）。
+ *
+ * range="5h" 时，模型行上的请求 / token / 首字 / 总耗时改读**落盘统计**的近 5 小时窗口，
+ * 服务重启后仍然有数；不传则沿用进程内指标（旧行为）。
+ */
+export function fetchModels(range?: "5h") {
+  return request<ModelsResponse>(`/models${range ? `?range=${encodeURIComponent(range)}` : ""}`);
 }
 
 /** 强制刷新模型目录（POST /panel/api/models/refresh）。 */
