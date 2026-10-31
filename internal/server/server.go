@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +65,10 @@ type Server struct {
 	// creditWatch 是积分本地观察台账（internal/creditwatch）。
 	// 可选增强：nil 时静默跳过，官方接口挂掉时页面只是没有本地回退口径。
 	creditWatch *creditwatch.Store
+	// listenerMu / listenerSwap 支持「保存配置时热切换监听端口」（对照 v1.14.38）。
+	// 实现由 main 注入（只有它能持有 net.Listener），nil 时降级为「改端口需重启」。
+	listenerMu   sync.RWMutex
+	listenerSwap ListenerSwapper
 	// clientLimits 扫描客户端日志里的模型限流（internal/clientlimits）。
 	// WorkBuddy 客户端直连官方，它的 429 不经过网关，只能从客户端日志还原。
 	// 可选增强：nil 时只显示网关自己观测到的冷却。

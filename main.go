@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -395,7 +397,6 @@ func runServe(args []string) {
 	printBanner(cfg, p, n)
 
 	httpSrv := &http.Server{
-		Addr:    cfg.ListenAddr(),
 		Handler: srv.Handler(),
 		// ReadTimeout 覆盖整个请求读取（含 body 上传），防慢速 body 拖死连接。
 		// 缺省 300s（server.read_timeout 可改，"0" = 不限制）：旧值 120s 会掐掉大上下文 /
@@ -410,11 +411,15 @@ func runServe(args []string) {
 		WriteTimeout: 0,
 	}
 
-	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("HTTP 服务异常退出: %v", err)
-		}
-	}()
+	// 监听地址显式创建，而不是 ListenAndServe：热切换端口需要在进程内换 listener
+	// （见下面的 listenerSwapper 与 server.ListenerSwapper）。
+	ln, err := net.Listen("tcp", cfg.ListenAddr())
+	if err != nil {
+		log.Fatalf("监听 %s 失败: %v", cfg.ListenAddr(), err)
+	}
+	swapper := &listenerSwapper{srv: httpSrv, ln: ln}
+	srv.SetListenerSwapper(swapper)
+	swapper.serve(ln)
 
 	<-ctx.Done()
 	log.Printf("收到退出信号，正在关闭网关…")
@@ -433,6 +438,48 @@ func runServe(args []string) {
 		reExecSelf(selfExe)
 	default:
 	}
+}
+
+// listenerSwapper 持有当前 net.Listener，支持在进程内换监听地址
+// （对照 wb-gateway v1.14.38 的「监听端口安全热切换」）。
+//
+// 语义要点：
+//   - **先建新监听，再关旧的**：新端口被占用时旧端口完全不受影响，保存接口据此
+//     拒绝本次配置，运行状态与面板显示保持一致；
+//   - 关旧 listener 只让它**停止接受新连接**，已建立的连接与在途流继续跑完 ——
+//     http.Server 按连接跟踪，不随 listener 关闭而中断；
+//   - Serve 返回错误是正常路径（换端口、退出都会），因此不再用 log.Fatalf。
+type listenerSwapper struct {
+	mu  sync.Mutex
+	srv *http.Server
+	ln  net.Listener
+}
+
+// serve 在 ln 上开始接受连接；listener 被关闭时 Serve 返回，属正常收尾。
+func (l *listenerSwapper) serve(ln net.Listener) {
+	go func() {
+		if err := l.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("[监听] %s 已停止接受新连接: %v", ln.Addr(), err)
+		}
+	}()
+}
+
+// SwapListenAddr 实现 server.ListenerSwapper。
+func (l *listenerSwapper) SwapListenAddr(addr string) error {
+	newLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	l.mu.Lock()
+	old := l.ln
+	l.ln = newLn
+	l.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	l.serve(newLn)
+	log.Printf("[监听] 已切换到 %s（旧连接与在途流继续完成）", newLn.Addr())
+	return nil
 }
 
 func printBanner(cfg *config.Config, p *pool.Pool, loaded int) {

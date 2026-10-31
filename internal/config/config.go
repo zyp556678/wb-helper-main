@@ -63,6 +63,15 @@ type ServerSection struct {
 	// 空值回落 300s；"0" = 不限制；负值无语义（静默钳 0 会把保护悄悄关掉）。
 	// 该字段属装配期：http.Server 只在启动时构造，改动需重启进程。
 	ReadTimeout string `json:"read_timeout"`
+	// Addr 是监听地址，留空沿用启动参数 -addr（默认 127.0.0.1）。
+	//
+	// 与 ReadTimeout 不同，**改这个不需要重启**（对照 wb-gateway v1.14.38）：
+	// 保存时先在进程内起一个新监听，起得来才落库，起不来保留旧端口继续服务。
+	// 已有连接与在途流不受影响 —— 只关掉旧 listener（停止接受新连接）。
+	Addr string `json:"addr"`
+	// Port 是监听端口，0 表示沿用启动参数 -port。
+	// 新端口被占用时保存会被拒绝，旧端口继续服务。
+	Port int `json:"port"`
 }
 
 // debugFileConfig 是 config.json 的 debug 段。
@@ -603,7 +612,15 @@ func (c *Config) UpdateClient() *http.Client {
 
 // ListenAddr 返回 host:port。
 func (c *Config) ListenAddr() string {
-	return c.Addr + ":" + itoa(c.Port)
+	addr := c.Addr
+	if s := strings.TrimSpace(c.Server.Addr); s != "" {
+		addr = s
+	}
+	port := c.Port
+	if c.Server.Port > 0 {
+		port = c.Server.Port
+	}
+	return addr + ":" + itoa(port)
 }
 
 func itoa(n int) string {

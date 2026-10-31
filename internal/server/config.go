@@ -168,6 +168,18 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("配置保存失败: "+err.Error()))
 		return
 	}
+	// 监听地址热切换（对照 wb-gateway v1.14.38）：必须早于换快照。
+	// 新端口起不来就直接拒绝本次保存 —— 内存配置、磁盘文件、面板显示三者保持一致，
+	// 旧端口继续服务。反过来的顺序会让面板显示的地址与实际监听不一致。
+	if next.ListenAddr() != s.config().ListenAddr() {
+		if sw := s.listenerSwapper(); sw != nil {
+			if err := sw.SwapListenAddr(next.ListenAddr()); err != nil {
+				writeJSON(w, http.StatusConflict,
+					errBody("新监听地址无法启用，已保留原端口: "+err.Error()))
+				return
+			}
+		}
+	}
 	s.storeConfig(next)
 
 	s.logf("[配置] 已保存（热生效 %v，需重启 %v）", applied, needRestart)
