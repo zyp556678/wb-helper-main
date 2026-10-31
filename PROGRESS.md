@@ -448,6 +448,63 @@ wb2api-panel 与 wb-switch 仍停在 2026-10-12，无新增。
   v1.14.20 的 `addAccountQr` 清空动作在本项目的 React 对话框里等价于切换 phase（组件直接卸载），
   无需单独实现。
 
+**上游跟进（2026-11-01，wb-gateway v1.14.22 → v1.14.41 + wb2api-panel 10-21 批量合并）**：
+
+本轮范围：wb-gateway 从 `v1.14.21` 到 `v1.14.41`（16 个提交 / 57 文件 / +9309 −692）；
+wb2api-panel 补 2026-10-21 一次性合并的 25 个 PR（34 个非合并提交 / +10985 −241）；
+wb-switch 自 `v0.1.62` 起零新增，本轮无动作。三个上游的只读克隆按约定放在 `repos/`
+（已被 `.gitignore` 排除）。完整缺口矩阵与切片排序见 `docs/upstream-merge-plan.md`。
+
+**已搬运**：
+
+- **Windows Winsock RST 文案**（`internal/upstream/client.go`，对照 v1.14.22）：补
+  `forcibly closed`（WSAECONNRESET）与 `an established connection was aborted`
+  （WSAECONNABORTED）。原先 marker 表只有 POSIX 文案，Windows 上的 RST 被判成永久
+  错误 —— `doChatWithRetry` 不重试，本机上的瞬时重试实际是失效的。
+- **DSH 历史 11-128 兼容**（`internal/outbound/sanitizeprefix.go` + 新增
+  `dshguicontext.go`，对照 v1.14.24）：身份前缀从「只认 system 第一个文本块」扩到
+  system/developer 与 **assistant 历史**的每一个文本单元（Messages 会把多个 system
+  块合并，合并后每块开头都可能成为整段开头）；新增 DSH GUI 环境句的等义归一，围栏
+  代码、缩进代码与行内反引号内一律不动，反引号状态跨行保留。
+- **`identity` 身份改写配置化**（新增 `internal/outbound/identity.go` +
+  `config.IdentitySection`，对照 v1.14.29 / v1.14.40）：前缀表扩到 5 条
+  （DSH / Claude Code / Claude / Codex / ZCode）并按长度降序；默认替换目标是**中性
+  描述**、默认只改偏移 0、默认保留 v1.14.40 的两条渠道兼容替换。
+  **与上游的两处刻意差异**：上游默认把 5 个身份词在正文里全文替换成 `WorkBuddy`
+  （官方文档自己承认会改掉正文中的产品名与技能说明），本实现默认只改开头、不冒充。
+  想复刻上游形态时配 `identity.prefix` 与 `identity.replacements` 即可。
+- **6021 渠道满载 / 11158 模型权限 / refresh 单飞**（`internal/upstream/classify.go`、
+  `internal/server/chat.go`、`internal/pool/pool.go`，对照 wb2api-panel）：
+  6021 若落进 429 兜底会逐号软冷却，几秒内绞杀整池健康号，现单独成
+  `ErrUpstreamBusy` 并 fail-fast 返回 503；11158 只锁 (账号, 模型)；
+  令牌刷新的过期判断移进锁内二次确认，避免并发下用旧 RT 重刷撞 12153 掉登录。
+
+**待搬运（本轮未做，按建议顺序）**：
+
+1. `requestProfile` 官方出站兼容（v1.14.23 / v1.14.29，约 500 行 + 文档）—— 最大一块，
+   且上游正在收紧反代，收益需单独评估。
+2. 首字节前 SSE 心跳与安全重放（v1.14.24）。
+3. Responses 工具保真：namespace / custom / web_search（v1.14.29）。
+4. 随机签到计划与启动按分钟补签（v1.14.36 / v1.14.37，约 740 行）。
+5. 监听端口热切换（v1.14.38）。
+6. panel 侧：`cn.chat_base`、`dns_servers`、裸模型名跨域回退、联网搜索端点
+   `POST /v1/search/messages`、企业切换会话门控、按地区独立轮询。
+
+**未跟随**：v1.14.35 统计图悬浮联动（上游是原生 JS 面板，本项目是 React）；
+v1.14.41 移除 `promptcompat`（本项目从未引入该模块）；v1.14.30 并发控制
+（本地 `pool.MaxInFlight` / `MaxInFlightGlobal` 语义已等价）；panel 的纯 UI 项
+（手机端适配、积分历史、Global 模型可用性等）与已覆盖项（账号备注、任务补领、
+缓存告警对称反推、`models.hidden`、`ProxyFromEnvironment`）。
+
+**本轮发现的两个工程约束**（都不在代码里，值得记住）：
+
+- `web/embed.go` 是 `//go:embed all:dist`，而 `dist` 被 `web/.gitignore` 排除 ——
+  **不先 `npm ci && npm run build`，`go build ./...` 直接失败**。这是仓库描述里
+  「不含工具链」的实际后果。
+- `core.autocrlf=true` 且没有 `.gitattributes`，工作区全是 CRLF，`gofmt -l` 会标记
+  **每一个** Go 文件。因此**不能跑 `gofmt -w`**（会把全仓库重写成 LF），要校验格式
+  得先把文件归一化成 LF 再看。建议后续补 `*.go text eol=lf`。
+
 **切片 1（账号与登录）已完成**：
 
 - 面板内 OAuth 添加账号：授权链接 + 二维码 + 轮询，成功后凭据落盘并热加载进池，自动查一次额度。
