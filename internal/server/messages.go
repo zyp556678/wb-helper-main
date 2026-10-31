@@ -978,10 +978,18 @@ func (s *Server) streamMessagesResponse(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "服务器不支持流式响应 Flush")
 		return
 	}
+	// 首字节前心跳（对照 wb-gateway v1.14.24）：上游排队与预处理期间下游可能几十秒
+	// 收不到任何字节，客户端读超时会把连接判死。
+	heartbeat := startFirstByteHeartbeat(w, flusher, streamHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	writeEvent := func(b []byte) {
 		if len(b) == 0 {
 			return
 		}
+		// 首个事件发出前先停掉首字节心跳并等它退出：writeEvent 是这条路径唯一的
+		// 写出点，这样两者不会并发写 ResponseWriter（见 streamheartbeat.go）。
+		heartbeat.Stop()
 		_, _ = w.Write(b)
 		flusher.Flush()
 	}

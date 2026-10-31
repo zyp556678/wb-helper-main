@@ -587,6 +587,12 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 		return
 	}
 
+	// 首字节前心跳（对照 wb-gateway v1.14.24）：上游排队与预处理期间下游可能几十秒
+	// 收不到任何字节，客户端读超时会把连接判死。心跳只在「还没有数据写出」时运行，
+	// 且 Stop 会等 goroutine 退出 —— 与下面的数据写入不并发（见 streamheartbeat.go）。
+	heartbeat := startFirstByteHeartbeat(w, flusher, streamHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	body := upstreamWatchdog(resp.Body, s.config().IdleTimeout)
 	defer body.Close()
 
@@ -624,6 +630,9 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 			ttft = time.Since(started)
 			s.metrics.RecordTTFT(modelName, ttft)
 			first = false
+			// 首个有效分片到了：先把心跳停掉并等它退出，再往下写数据。
+			// 顺序不能反 —— 反了就会有两个 goroutine 同时写 ResponseWriter。
+			heartbeat.Stop()
 		}
 		var chunk map[string]any
 		parsed := json.Unmarshal([]byte(clean), &chunk) == nil

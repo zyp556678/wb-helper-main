@@ -576,7 +576,14 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, resp *h
 	body := upstreamWatchdog(resp.Body, s.config().IdleTimeout)
 	defer body.Close()
 
+	// 首字节前心跳（对照 wb-gateway v1.14.24）：上游排队与预处理期间下游可能几十秒
+	// 收不到任何字节。send 是这条路径唯一的写出点，首个事件发出前先停掉心跳并等它
+	// 退出，两者因此不会并发写 ResponseWriter（见 streamheartbeat.go）。
+	heartbeat := startFirstByteHeartbeat(w, flusher, streamHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	send := func(eventType string, payload map[string]any) {
+		heartbeat.Stop()
 		data, _ := json.Marshal(payload)
 		_, _ = io.WriteString(w, "event: "+eventType+"\n")
 		_, _ = io.WriteString(w, "data: "+string(data)+"\n\n")
