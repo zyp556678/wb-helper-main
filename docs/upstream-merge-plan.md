@@ -38,7 +38,7 @@
 | `dns_servers` 可指定 | ✅ | `internal/config`（私有解析器，只影响出站） |
 | 裸模型名跨域回退（默认关） | ⬜ 待做 | `internal/pool` |
 | 联网搜索端点 `POST /v1/search/messages` | ⬜ 待做 | 新增入口，工作量不小 |
-| 企业切换会话 `enterprise_switch` 门控 | ⬜ 待做 | `internal/auth` |
+| 企业切换会话 `enterprise_switch` 门控 | ⚪ 已覆盖 | `auth.Credential.IsEnterprise()`，判据是 `enterpriseId` 而非 `token_source`；已接在签到（`scheduler.go`）、成长任务（`tasks.go` / `growth.go`）、保活（`oauth.go`）四处 |
 | 按地区独立配置轮询与顺序耗尽调度 | ⬜ 待做 | `internal/pool` |
 | 模型级 `6004` 双时钟 | 🟡 部分 | 本地有 `6004` 处理，缺「明示两个时刻」的显示 |
 | 到期提醒快照与「检查」同口径 | 🟡 部分 | `internal/creditwatch` |
