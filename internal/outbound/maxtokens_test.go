@@ -16,7 +16,7 @@ func TestEnsureCatalogMaxTokens(t *testing.T) {
 		name     string
 		body     string
 		table    map[string]int
-		want     any  // 期望的 max_tokens 值；nil 表示不应存在该字段
+		want     any // 期望的 max_tokens 值；nil 表示不应存在该字段
 		injected int
 	}{
 		{

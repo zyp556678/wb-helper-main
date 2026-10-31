@@ -147,7 +147,7 @@ type runtimeFile struct {
 		TransientRetries      *int `json:"transientRetries"`
 		TransientRetriesSnake *int `json:"transient_retries"`
 	} `json:"upstream"`
-	Debug debugFileConfig `json:"debug"`
+	Debug  debugFileConfig `json:"debug"`
 	Models struct {
 		Blocklist []string `json:"blocklist"`
 		Allowlist []string `json:"allowlist"`
@@ -302,8 +302,8 @@ type Config struct {
 	// DebugFullRequests 是 `debug.full_requests`：把入站与出站请求正文的
 	// **完整脱敏副本**写进调试事件流。默认关、可热改；只有 debug.enabled 也打开时生效。
 	DebugFullRequests bool
-	ModelBlock            []string
-	ModelAllow            []string
+	ModelBlock        []string
+	ModelAllow        []string
 	// ModelAccountRules 是「模型 → 可用凭据文件」名单，键为小写去空格的模型名。
 	// 未配置的模型不在表里，视为不限制。
 	ModelAccountRules map[string]ModelAccountRule

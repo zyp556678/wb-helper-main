@@ -163,10 +163,10 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 		}
 
 		row := map[string]any{
-			"id":                 m.ID,
-			"name":               m.Name,
-			"description":        m.Description,
-			"context_length":     m.ContextLength(),
+			"id":             m.ID,
+			"name":           m.Name,
+			"description":    m.Description,
+			"context_length": m.ContextLength(),
 			// context_length 是**默认档**（上游 contextWindow.defaultLength），
 			// 可选档位与最大输入分开展示：deepseek-v4.1-flash 默认 300K、可选
 			// 300K/600K/1M、最大输入 1M —— 只给默认值时面板会把它说小。
@@ -174,15 +174,15 @@ func (s *Server) handlePanelModels(w http.ResponseWriter, r *http.Request) {
 			"max_input_tokens":       m.MaxInputTokens,
 			"max_output_tokens":      m.MaxOutputTokens,
 			"max_allowed_size":       m.MaxAllowedSize,
-			"available_accounts": available,
-			"requests":           s.metrics.RequestsFor(m.ID),
-			"blocked":            blocked,
-			"sites":              siteInfo,
-			"supports_images":    m.SupportsImages,
-			"supports_tool_call": m.SupportsToolCall,
-			"is_default":         m.IsDefault,
-			"tags":               m.Tags,
-			"vendor":             m.Vendor,
+			"available_accounts":     available,
+			"requests":               s.metrics.RequestsFor(m.ID),
+			"blocked":                blocked,
+			"sites":                  siteInfo,
+			"supports_images":        m.SupportsImages,
+			"supports_tool_call":     m.SupportsToolCall,
+			"is_default":             m.IsDefault,
+			"tags":                   m.Tags,
+			"vendor":                 m.Vendor,
 		}
 		// 运行指标：
 		//   - 计数类（请求/成功/失败/token/均值）在 range=5h 时来自持久化统计；

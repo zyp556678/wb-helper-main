@@ -6,7 +6,7 @@
 //
 // 因此这里用转发器顶替 windres 这个名字，在转发时插入
 //
-//     --preprocessor=<同目录的 rcpp.exe>
+//	--preprocessor=<同目录的 rcpp.exe>
 //
 // 真品 windres 放在子目录 windres-bin/ 里，与它需要的运行库 DLL 同目录。
 //

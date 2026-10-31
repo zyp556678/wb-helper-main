@@ -4,7 +4,7 @@
 // windres 编译 .rc 前会调用 C 预处理器来展开 #include / #define。rustup 的
 // windows-gnu 工具链里那个 gcc 只是**链接驱动**，没有 cc1 编译内核：
 //
-//     x86_64-w64-mingw32-gcc.exe: fatal error: cannot execute 'cc1'
+//	x86_64-w64-mingw32-gcc.exe: fatal error: cannot execute 'cc1'
 //
 // 于是 windres 报 "preprocessing failed"，进而让 tauri-build 的资源编译整体失败
 // （tauri-winres 只从 PATH 找 windres，set_windres_path 是空实现，无法换工具）。
@@ -14,10 +14,11 @@
 // 头文件、crt，200MB+ 且依赖十余个包）不划算，故给出这个最小实现。
 //
 // ── 行为 ──────────────────────────────────────────────────────────────
-//   · 与真实预处理器一致的调用约定：从最后一个非选项参数读输入（无则读 stdin），
-//     结果写 stdout；`-D` / `-I` / `-U` 等选项被忽略
-//   · `#pragma code_page(...)` 被改写为 GNU windres 的等价指令形式后再输出，
-//     因为 GNU windres 对 `#pragma code_page(65001)` 这类 MSVC 扩展支持有限
+//
+//	· 与真实预处理器一致的调用约定：从最后一个非选项参数读输入（无则读 stdin），
+//	  结果写 stdout；`-D` / `-I` / `-U` 等选项被忽略
+//	· `#pragma code_page(...)` 被改写为 GNU windres 的等价指令形式后再输出，
+//	  因为 GNU windres 对 `#pragma code_page(65001)` 这类 MSVC 扩展支持有限
 //
 // 注意：本程序不做真实的 #include 展开。若将来 .rc 里出现 #include，
 // 必须换成完整的 GCC 预处理器（见 desktop/README.md 的说明）。

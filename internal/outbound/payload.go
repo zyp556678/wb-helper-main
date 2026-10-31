@@ -17,7 +17,7 @@ import (
 //  3. 强制 stream:true —— 上游不接受非流式。
 //  4. stream_options 兜底 include_usage —— 不带它上游末帧不给 usage，指标就没数据。
 //  5. max_completion_tokens → max_tokens —— 上游只认后者，别名字段会被忽略后回落默认上限。
-//  5a. 未声明输出预算时按目录补 max_tokens —— 收回上游为输出默认预留的额度，
+//     5a. 未声明输出预算时按目录补 max_tokens —— 收回上游为输出默认预留的额度，
 //     避免长会话被 400 code=11133 拒绝（见 maxtokens.go）。
 //  6. tool_choice / role / image_url 归一 —— 都是上游参数校验的白名单/形态问题。
 //  7. 工具序列自愈 —— 必须在 role 归一之后：developer→system 会影响消息拓扑判定。

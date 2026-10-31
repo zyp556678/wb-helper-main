@@ -3,12 +3,12 @@
 // 背景：rustc 在 x86_64-pc-windows-gnu 目标上调用 dlltool 生成 raw-dylib 的
 // import library 时，固定传入
 //
-//     --temp-prefix kernel32.dll:
+//	--temp-prefix kernel32.dll:
 //
 // 注意结尾的**冒号**。在 Linux/macOS 上 `kernel32.dll:t.o` 是合法文件名，
 // 但在 Windows 上 `:` 是路径分隔/ADS 语法，dlltool 会报
 //
-//     error reading kernel32.dll:t.o: No such file or directory
+//	error reading kernel32.dll:t.o: No such file or directory
 //
 // 且产物为 0 字节，导致 windows-sys / parking_lot_core / getrandom 编译失败。
 //

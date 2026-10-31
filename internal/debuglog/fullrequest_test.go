@@ -160,4 +160,3 @@ func TestApplyIsIdempotent(t *testing.T) {
 		t.Fatal("关闭后应处于停用状态")
 	}
 }
-
