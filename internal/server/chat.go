@@ -128,12 +128,55 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer release()
+	// release 必须**恰好调用一次**：ReleaseInFlight 是计数递减，多调一次会让在途
+	// 名额漏算，少调一次会让账号一直占着名额。重放路径要提前归还上一跳，所以用
+	// 一个幂等包装。
+	released := false
+	doRelease := func() {
+		if released {
+			return
+		}
+		released = true
+		release()
+	}
+	defer doRelease()
 
 	if wantStream {
-		s.streamChatResponse(w, r, resp, modelName, acc, sessionKey, started, s.markupRepairFor(upstreamBytes))
+		_, pending := s.streamChatResponse(w, r, resp, modelName, acc, sessionKey, started, s.markupRepairFor(upstreamBytes))
+		// 首字节前安全重放（对照 wb-gateway v1.14.24）。
+		//
+		// pending 非空是「一个数据帧都没发出去就失败了」的信号 —— 此时客户端什么都
+		// 还没收到，可以安全重放一次上游调度。已经写出过数据时 streamChatResponse
+		// 会自己把错误帧补发掉，不会交回 pending。
+		// 客户端已断开就不重放：没人接收，只会白烧额度。
+		if pending != nil && r.Context().Err() == nil {
+			doRelease()
+			if resp2, acc2, release2, ok2 := s.dispatchRouted(w, r, modelName, upstreamBytes, pinID, route, nil); ok2 {
+				_, pending2 := s.streamChatResponse(w, r, resp2, modelName, acc2, sessionKey, started, s.markupRepairFor(upstreamBytes))
+				release2()
+				if pending2 != nil {
+					writeStreamErrorFrame(w, pending2)
+				}
+				return
+			}
+			// 重放调度本身失败（没有可用账号等）：补发原始错误帧，别让客户端干等。
+		}
+		if pending != nil {
+			writeStreamErrorFrame(w, pending)
+		}
 	} else {
 		s.aggregateChatResponse(w, r, resp, modelName, acc, sessionKey, started, upstreamBytes)
+	}
+}
+
+// writeStreamErrorFrame 补发一个被推迟的 SSE 错误帧（首字节前失败且没有重放时用）。
+//
+// 为什么单独抽出来：错误帧现在有两个可能的下发点（流内即时下发、以及重放决定之后
+// 由调用方补发），两处必须写出完全相同的字节，否则客户端解析会不一致。
+func writeStreamErrorFrame(w http.ResponseWriter, payload []byte) {
+	_, _ = io.WriteString(w, "data: "+string(payload)+"\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -573,7 +616,7 @@ func (s *Server) applyFrameClass(acc *pool.Account, modelName string, class upst
 //
 // 关键约定：流被中断时绝不补发 [DONE]（补发等于告诉下游「正常结束」，
 // 会让残缺的工具调用被当成完整结果执行），而是下发一条明确的错误事件。
-func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time, repair *markupStreamRepair) {
+func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, acc *pool.Account, sessionKey string, started time.Time, repair *markupStreamRepair) (delivered bool, pending []byte) {
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -605,6 +648,10 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 	ttft := time.Duration(0)
 	var usage map[string]any
 	first := true
+	// delivered 表示「客户端确实收到过数据帧」。心跳注释帧不算 —— 它不构成内容，
+	// 而首字节前重放恰好发生在这个「只发过心跳、还没发过数据」的窗口里。
+	// first 在第一个数据分片处翻转，所以两者等价。
+	defer func() { delivered = !first }()
 	interrupted := false
 	// sawDone 记「上游发了 [DONE]」，finishReason 记「上游宣布过结束」。
 	// 两者分开：只有确认收到过非空 finish_reason 才补发 [DONE]（见循环后的判定）。
@@ -703,8 +750,15 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 				"code":    "stream_interrupted",
 			},
 		})
-		_, _ = io.WriteString(w, "data: "+string(errPayload)+"\n\n")
-		flusher.Flush()
+		// 首字节前失败：**先不写错误帧**。调用方可能重放一次上游调度，
+		// 先写会让客户端看到一个 error 事件紧跟一段重放内容。
+		// 交回 pending，由调用方在「不重放」或「重放也失败」时补发。
+		if first {
+			pending = errPayload
+		} else {
+			_, _ = io.WriteString(w, "data: "+string(errPayload)+"\n\n")
+			flusher.Flush()
+		}
 		s.metrics.RecordFailure(modelName, "流中断")
 		s.logf("[异常] 账号=%s 上游流式读取中断: %v", acc.Cred.AccountID(), err)
 		s.sticky.Unbind(sessionKey)
@@ -735,8 +789,13 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 				"code":    "stream_closed_without_finish",
 			},
 		})
-		_, _ = io.WriteString(w, "data: "+string(errPayload)+"\n\n")
-		flusher.Flush()
+		// 同上：首字节前不写错误帧，交给调用方决定重放还是补发。
+		if first {
+			pending = errPayload
+		} else {
+			_, _ = io.WriteString(w, "data: "+string(errPayload)+"\n\n")
+			flusher.Flush()
+		}
 		s.metrics.RecordFailure(modelName, "流未正常结束")
 		s.logf("[异常] 账号=%s 上游流正常关闭但没有非空 finish_reason（sawDone=%t），拒绝当成成功",
 			acc.Cred.AccountID(), sawDone)
@@ -784,6 +843,7 @@ func (s *Server) streamChatResponse(w http.ResponseWriter, r *http.Request, resp
 	s.logf("[请求完成] 模型=%s 账号=%s 流式 首字=%v 总耗时=%v 输入token=%d 输出token=%d 总token=%d 速率=%.1f tok/s",
 		modelName, acc.Cred.AccountID(), ttft, time.Since(started), inputTokens, outputTokens, total,
 		tokensPerSecond(outputTokens, time.Since(started), ttft))
+	return delivered, pending
 }
 
 // aggregateChatResponse 把上游 SSE 聚合成一次完整的非流式响应。
