@@ -1,0 +1,15 @@
+# Go 源码一律 LF。
+#
+# 为什么需要显式声明：Windows 上 core.autocrlf=true 会把工作区写成 CRLF，而
+# gofmt 输出的是 LF —— 于是 `gofmt -l` 会把**每一个** Go 文件都标成「格式不符」，
+# 格式检查彻底失去意义（也意味着不能跑 `gofmt -w`，那会把全仓库重写成 LF、
+# 制造几千行无关 diff）。
+#
+# gitattributes 的优先级高于 core.autocrlf，所以这条能让 .go 文件在工作区就是 LF，
+# gofmt 恢复正常。仓库里存的本来就是 LF（autocrlf 提交时已归一），因此加上这条
+# **不会产生任何内容 diff**。
+*.go text eol=lf
+
+# go.mod / go.sum 同理：它们是文本，且工具链对行尾敏感度低但不该被平台改写。
+go.mod text eol=lf
+go.sum text eol=lf
