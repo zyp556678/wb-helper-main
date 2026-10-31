@@ -64,7 +64,8 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 		return
 	}
 	changed := r.PromptApplied || r.SystemInjected || r.Sanitized ||
-		r.SystemPrefixSanitized > 0 ||
+		r.SystemPrefixSanitized > 0 || r.AssistantPrefixSanitized > 0 ||
+		r.GUIContextNormalized > 0 ||
 		r.ToolRepair.Changed() || r.EffortFrom != "" || r.ThinkingInjected ||
 		r.MaxTokensInjected > 0
 	if !changed {
@@ -93,7 +94,13 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 	if r.SystemPrefixSanitized > 0 {
 		// 与「指纹脱敏」分开说：这一条是「不改就会被整单拦下」，
 		// 而脱敏是可选的降误报手段，混在一句话里会让人误判严重程度。
-		parts = append(parts, "改写 system 开头 "+strconv.Itoa(r.SystemPrefixSanitized)+" 条")
+		parts = append(parts, "改写 system 开头 "+strconv.Itoa(r.SystemPrefixSanitized)+" 处")
+	}
+	if r.AssistantPrefixSanitized > 0 {
+		parts = append(parts, "改写 assistant 历史 "+strconv.Itoa(r.AssistantPrefixSanitized)+" 处")
+	}
+	if r.GUIContextNormalized > 0 {
+		parts = append(parts, "归一 DSH GUI 环境句 "+strconv.Itoa(r.GUIContextNormalized)+" 处")
 	}
 	if r.Sanitized {
 		parts = append(parts, "指纹脱敏")
@@ -131,6 +138,14 @@ func (s *Server) logOutbound(modelName, account, trace string, r outbound.Result
 		// 与面板日志页，正文进去了等于把用户提示词暴露给所有能开面板的人。
 		fields["system_prefix_rule"] = "deepseek_harness_system_prefix"
 		fields["system_prefix_action"] = "改写为中性前缀，正文其余部分逐字保留"
+	}
+	if r.AssistantPrefixSanitized > 0 {
+		fields["assistant_prefix_sanitized"] = r.AssistantPrefixSanitized
+		fields["assistant_prefix_action"] = "assistant 历史里的同一句身份前缀改写为中性前缀"
+	}
+	if r.GUIContextNormalized > 0 {
+		fields["gui_context_normalized"] = r.GUIContextNormalized
+		fields["gui_context_action"] = "DSH GUI 环境句归一为中性描述（跳过代码块）"
 	}
 	s.events.Info(eventlog.ChannelOutbound, "outbound_rewrite",
 		"出站改写："+strings.Join(parts, "、"), fields)
