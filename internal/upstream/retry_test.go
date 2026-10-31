@@ -197,6 +197,12 @@ func TestIsTransientNetworkError(t *testing.T) {
 		{"keep-alive 被回收", errors.New("http: server closed idle connection"), true},
 		{"意外 EOF", errors.New("unexpected EOF"), true},
 		{"HTTP2 GOAWAY", errors.New("http2: server sent GOAWAY"), true},
+		// Windows Winsock 文案（对照 wb-gateway v1.14.22）：与 POSIX 完全不同，
+		// 不含 "connection reset by peer"。漏判会让 Windows 上的 RST 被判成永久
+		// 错误而直接不重试 —— 本机正是 Windows，这条曾经是真实失效点。
+		{"Windows RST（wsarecv）", errors.New("read tcp 10.0.0.1:443->20.205.243.166:443: wsarecv: An existing connection was forcibly closed by the remote host."), true},
+		{"Windows RST（wsasend）", errors.New("Post \"https://copilot.tencent.com/v2/chat/completions\": wsasend: An existing connection was forcibly closed by the remote host."), true},
+		{"Windows 连接中止（WSAECONNABORTED）", errors.New("read tcp: An established connection was aborted by the software in your host machine."), true},
 		{"业务错误不重试", errors.New("上游业务错误 code=11102 msg=not found"), false},
 		{"解析失败不重试", errors.New("解析上游 JSON 失败"), false},
 	}

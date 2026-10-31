@@ -284,6 +284,15 @@ func (c *Client) Chat(ctx context.Context, cred *CredentialView, p *Profile, bod
 //
 // 注意 context.Canceled / DeadlineExceeded **不算**：前者是客户端主动断开，
 // 后者是明确超时，重试都无意义甚至有害（客户端已经走了，重试只是白烧额度）。
+//
+// Windows 上同一类故障的文案与 POSIX 不同（对照 wb-gateway v1.14.22）：
+// Winsock 的发送/接收失败表现为
+// "An existing connection was forcibly closed by the remote host"
+// （WSAECONNRESET，常带 wsasend:/wsarecv: 前缀），或
+// "An established connection was aborted by the software in your host machine"
+// （WSAECONNABORTED）—— 两者都不包含 "connection reset by peer"。
+// 两套文案必须同时匹配，否则 Windows 上的 RST 会被当成永久错误：
+// doChatWithRetry 不重试，首字节前的安全重放也会因此失效。
 func IsTransientNetworkError(err error) bool {
 	if err == nil {
 		return false
@@ -311,6 +320,10 @@ func IsTransientNetworkError(err error) bool {
 		"unexpected eof",
 		"http2: server sent goaway",
 		"stream error",
+		// Windows Winsock：WSAECONNRESET / WSAECONNABORTED 的文案与 POSIX 不同，
+		// 不含 "connection reset by peer"。msg 已转小写，此处必须小写。
+		"forcibly closed",
+		"an established connection was aborted",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
