@@ -10,9 +10,11 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -148,6 +150,9 @@ type runtimeFile struct {
 		// 一起改会把签到、额度这些走 Web 域的接口打到错误的 host 上。
 		CNChatBase      string `json:"cnChatBase"`
 		CNChatBaseSnake string `json:"cn_chat_base"`
+		// DNSServers 指定出站解析用的 DNS 服务器（"ip:port" 列表，对照 wb2api-panel 的
+		// dns_servers）。留空沿用系统解析。只影响**上游出站**，不改本机其它程序的解析。
+		DNSServers []string `json:"dns_servers"`
 		// TransientRetries 是瞬时网络错误重试次数；**显式 0 表示禁用**，
 		// 所以不能沿用 firstPositive（那会把 0 当成「未配置」而落回默认值）。
 		TransientRetries      *int `json:"transientRetries"`
@@ -304,6 +309,9 @@ type Config struct {
 	// 留空表示沿用 upstream.ProfileCN 里内置的域名。只覆盖 API 域（Base），
 	// 不动 Web / 计费域（Origin）—— 两者是不同 host，一起改会把签到与额度打歪。
 	CNChatBase string
+	// DNSServers 是出站解析用的 DNS 服务器（"ip:port"）；空表示沿用系统解析。
+	// 只作用于网关自己的上游连接，不改本机其它程序的解析。
+	DNSServers []string
 	// TransientRetries 是瞬时网络错误重试次数（0 表示禁用）。
 	TransientRetries int
 	// TransientRetryBackoff 是重试间隔（测试可调小）。
@@ -486,6 +494,17 @@ func (cfg *Config) loadRuntimeFile() error {
 		if base := firstNonEmpty(f.Upstream.CNChatBaseSnake, f.Upstream.CNChatBase); base != "" {
 			cfg.CNChatBase = base
 		}
+		// 出站 DNS（对照 wb2api-panel 的 dns_servers）：只收 "ip:port" 形态，
+		// 写错的不静默丢弃 —— 一条都没有时退回系统解析，但把非法项记下来。
+		if len(f.Upstream.DNSServers) > 0 {
+			servers := make([]string, 0, len(f.Upstream.DNSServers))
+			for _, s := range f.Upstream.DNSServers {
+				if host, port, err := net.SplitHostPort(strings.TrimSpace(s)); err == nil && host != "" && port != "" {
+					servers = append(servers, net.JoinHostPort(host, port))
+				}
+			}
+			cfg.DNSServers = servers
+		}
 		// 显式 0 是合法值（禁用重试），所以先取 snake 再取 camel，两者都为 nil 才用默认。
 		if n := firstPtr(f.Upstream.TransientRetriesSnake, f.Upstream.TransientRetries); n != nil && *n >= 0 {
 			cfg.TransientRetries = *n
@@ -547,6 +566,30 @@ func (c *Config) ReloadFromFile() (*Config, error) {
 	return next, nil
 }
 
+// newPrivateResolver 返回一个只向 servers 里列出的服务器发查询的解析器。
+//
+// PreferGo 必须开：走 cgo 的解析器会绕开这里的 Dial，直接用系统配置，
+// 那样 dns_servers 就成了摆设。
+func newPrivateResolver(servers []string, dialer *net.Dialer) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var lastErr error
+			for _, s := range servers {
+				conn, err := dialer.DialContext(ctx, "udp", s)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("没有配置可用的 DNS 服务器")
+			}
+			return nil, lastErr
+		},
+	}
+}
+
 // buildClients 装配两个 http.Client：控制类有总时长上限，对话流不设总时长。
 // 两者共用同一 Transport，因此上游超时策略只有一份实现。
 //
@@ -567,6 +610,40 @@ func (c *Config) buildClients() error {
 			return errors.New("无效的代理地址 " + c.ProxyURL + ": " + err.Error())
 		}
 		transport.Proxy = http.ProxyURL(u)
+	}
+	// 出站 DNS 指定（对照 wb2api-panel 的 dns_servers）。
+	//
+	// 为什么不用 net.DefaultResolver：那是**进程级**设置，会连带改掉本机其它程序的
+	// 解析行为。这里只给网关自己的 Transport 装一个私有解析器，影响面收敛在出站连接上。
+	//
+	// 解析失败时**退回系统解析**而不是直接报错：配错一个 DNS 服务器不该让整个网关
+	// 无法出网，那样排查成本远高于它带来的收益。
+	if len(c.DNSServers) > 0 {
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		resolver := newPrivateResolver(c.DNSServers, dialer)
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			// 已经是字面 IP 就不必解析（直连 IP 的配置很常见）。
+			if ip := net.ParseIP(host); ip != nil {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			ips, lookupErr := resolver.LookupIPAddr(ctx, host)
+			if lookupErr != nil || len(ips) == 0 {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			var lastErr error
+			for _, ip := range ips {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, lastErr
+		}
 	}
 	hot := NewHotTransport(transport, nil)
 	c.hotTransport = hot

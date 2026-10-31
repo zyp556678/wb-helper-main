@@ -34,8 +34,8 @@
 | `6021 queue.full` 渠道级繁忙 | ✅ `932a4e9` | `internal/upstream/classify.go` |
 | `11158` 模型权限错误分流 | ✅ `932a4e9` | 同上 |
 | 同账号 refresh 单飞（防 `12153`） | ✅ `932a4e9` | `internal/pool/pool.go` |
-| `cn.chat_base` 覆盖国内版上游 base | ⬜ 待做 | `internal/upstream/profile.go` |
-| `dns_servers` 可指定 | ⬜ 待做 | `internal/config` |
+| `cn.chat_base` 覆盖国内版上游 base | ✅ `1218c22` | `internal/upstream/profile.go` |
+| `dns_servers` 可指定 | ✅ | `internal/config`（私有解析器，只影响出站） |
 | 裸模型名跨域回退（默认关） | ⬜ 待做 | `internal/pool` |
 | 联网搜索端点 `POST /v1/search/messages` | ⬜ 待做 | 新增入口，工作量不小 |
 | 企业切换会话 `enterprise_switch` 门控 | ⬜ 待做 | `internal/auth` |
