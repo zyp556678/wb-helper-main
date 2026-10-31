@@ -23,7 +23,11 @@ var sanitizeFeatures = []string{
 	"Main branch (",                                   // 注入指令句
 	"You are a coding agent running in the Codex CLI", // Codex 指令首段
 	"github.com/anthropics/",                          // 反馈句里的仓库链接
-	"11128",                                           // 上游反探测：裸错误码
+	// 身份前缀被 identity 改写之后，"You are Claude Code" 已经不在了，但句子里
+	// 剩下的 "Anthropic's official CLI for Claude" 仍然是同一段指纹。不补这条，
+	// hasFingerprint 会判成「干净」而整段跳过脱敏 —— 指纹反而漏得更彻底。
+	"official CLI for Claude",
+	"11128", // 上游反探测：裸错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -44,6 +48,13 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 // 匹配串刻意**不带结尾标点**，因为同一句在不同客户端里结尾不同
 // （CLI 版以句号收尾，桌面版以逗号接后继内容）；带标点会漏掉一半形态、指纹照样发上游。
 var sanitizeRewrites = [][2]string{
+	{
+		// 与下面那条整句规则同源，但**不带** "You are Claude Code, " 前缀。
+		// 身份前缀被 identity 改写后，剩下的正是这个形态；不单独列一条，
+		// 整句规则就永远匹配不上，指纹会原样发给上游。
+		"Anthropic's official CLI for Claude",
+		"Anthropic's official CLI tool for Claude",
+	},
 	{
 		"You are Claude Code, Anthropic's official CLI for Claude",
 		"You are Claude Code, Anthropic's official CLI tool for Claude",

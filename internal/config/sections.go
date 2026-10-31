@@ -200,6 +200,40 @@ type PromptSection struct {
 	DSMLWeakMatch *bool `json:"dsml_weak_match"`
 }
 
+// IdentitySection 是出站身份改写参数（对照 wb-gateway v1.14.29 / v1.14.40）。
+//
+// 上游按提示词里的身份陈述做渠道校验，命中即整单拦下（11-128）。不同客户端自报的
+// 身份不同（DSH / Claude Code / Codex / ZCode），网关必须在出站前把开头那句改掉。
+//
+// # 与上游的两处刻意差异
+//
+//  1. **默认只改偏移 0**，不做全文替换。上游默认把 5 个身份词在正文里全文替换，
+//     官方文档也承认「正文中的产品名和技能说明也会被替换」——那会改动正常内容。
+//  2. **默认替换目标是中性描述**，不是 `WorkBuddy`。让请求自称官方客户端属于冒充，
+//     本项目不默认这么做。想要上游那种激进形态，自己配 Replacements。
+//
+// 需要激进形态时的写法：
+//
+//	"identity": {"enabled": true, "prefix": "You are WorkBuddy",
+//	             "replacements": {"Claude Code": "WorkBuddy", "Claude": "WorkBuddy",
+//	                              "DeepSeek Harness": "WorkBuddy", "Codex": "WorkBuddy",
+//	                              "ZCode": "WorkBuddy"}}
+type IdentitySection struct {
+	// Enabled 是总开关，缺省 true。
+	Enabled *bool `json:"enabled"`
+	// Prefix 是偏移 0 命中后的替换前缀；留空用内置中性句。
+	Prefix string `json:"prefix"`
+	// Replacements 是**术语替换**表（键为原文，值为替换文本），作用于
+	// system/developer/assistant 文本的任意位置。留空时使用内置的两条渠道兼容替换；
+	// 非空时**整体替代**内置表（与上游语义一致）。
+	Replacements map[string]string `json:"replacements"`
+}
+
+// IdentityEnabled 报告身份改写是否启用（缺省 true）。
+func (c *Config) IdentityEnabled() bool {
+	return c.Identity.Enabled == nil || *c.Identity.Enabled
+}
+
 // LocalSection 是本机代理参数（切片 7）。
 //
 // Enabled 用指针：默认 true，但服务端部署会显式关掉，必须能区分「没提交」与「显式关掉」。
@@ -760,6 +794,7 @@ type Patch struct {
 	Sticky   *StickySection   `json:"session_sticky"`
 	Schedule *ScheduleSection `json:"schedule"`
 	Prompt   *PromptSection   `json:"prompt"`
+	Identity *IdentitySection `json:"identity"`
 	Local    *LocalSection    `json:"local"`
 	Update   *UpdateSection   `json:"update"`
 	Server   *ServerSection   `json:"server"`
@@ -910,6 +945,21 @@ func (p *Patch) applyTo(c *Config, present map[string]bool) {
 		}
 		if p.Prompt.DSMLWeakMatch != nil {
 			c.Prompt.DSMLWeakMatch = p.Prompt.DSMLWeakMatch
+		}
+	}
+	if p.Identity != nil {
+		// 逐字段覆盖：未提交的字段保持原值，避免「关一次开关把自定义替换表清空」。
+		if p.Identity.Enabled != nil {
+			c.Identity.Enabled = p.Identity.Enabled
+		}
+		// Prefix / Replacements 允许显式清空（回到内置默认），但只在真的提交了
+		// 该叶子键时才覆盖 —— 否则 {"identity":{"enabled":false}} 会顺手把
+		// 用户配好的替换表抹掉。
+		if present["identity.prefix"] {
+			c.Identity.Prefix = p.Identity.Prefix
+		}
+		if present["identity.replacements"] {
+			c.Identity.Replacements = p.Identity.Replacements
 		}
 	}
 	if p.Local != nil {

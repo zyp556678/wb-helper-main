@@ -160,6 +160,7 @@ type runtimeFile struct {
 	SessionSticky StickySection   `json:"session_sticky"`
 	Schedule      ScheduleSection `json:"schedule"`
 	Prompt        PromptSection   `json:"prompt"`
+	Identity      IdentitySection `json:"identity"`
 	Local         LocalSection    `json:"local"`
 	Tasks         TasksSection    `json:"tasks"`
 	Update        UpdateSection   `json:"update"`
@@ -310,6 +311,8 @@ type Config struct {
 	Sticky   StickySection
 	Schedule ScheduleSection
 	Prompt   PromptSection
+	// Identity 是出站身份改写参数（见 sections.go 的 IdentitySection）。
+	Identity IdentitySection
 	Local    LocalSection
 	Tasks    TasksSection
 	// Update 是「检查更新」的参数：默认开，可在 config.json 里关掉，

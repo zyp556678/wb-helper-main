@@ -41,6 +41,11 @@ func (s *Server) prepareOutboundBody(body []byte, degrade bool) ([]byte, outboun
 		DefaultEfforts:    defaults,
 		MaxOutputTokens:   maxOut,
 		Degrade:           degrade,
+		Identity: outbound.IdentitySettings{
+			Disabled:     !s.config().IdentityEnabled(),
+			Prefix:       s.config().Identity.Prefix,
+			Replacements: s.config().Identity.Replacements,
+		},
 	})
 	return res.Body, res
 }

@@ -45,6 +45,9 @@ type Options struct {
 	MaxOutputTokens map[string]int
 	// Degrade 为真时强制使用降级中性提示词（拦截后重试用）。
 	Degrade bool
+	// Identity 是出站身份改写参数（见 identity.go）。
+	// 零值等于内置默认：启用、中性前缀、默认渠道兼容替换。
+	Identity IdentitySettings
 }
 
 // Result 汇总本次改写的实际动作，供日志与面板展示。
@@ -93,6 +96,8 @@ type Result struct {
 // 这是转发关键路径，坏 body 应该让上游去报真实的参数错误，而不是我们先造一个。
 func Prepare(body []byte, opts Options) Result {
 	res := Result{PromptMode: normalizeMode(opts.PromptMode)}
+	// 身份改写参数：零值在这里被补成内置默认，后续步骤直接用。
+	identity := opts.Identity.withDefaults()
 	if len(body) == 0 {
 		res.Body = body
 		return res
@@ -204,8 +209,8 @@ func Prepare(body []byte, opts Options) Result {
 	// 一旦先被身份前缀规则改写，后面的精确匹配就再也抓不到（见 dshguicontext.go）。
 	if msgs, ok := obj["messages"].([]any); ok {
 		res.GUIContextNormalized = normalizeDSHGUIContexts(msgs)
-		res.SystemPrefixSanitized = sanitizeSystemPrefixes(msgs)
-		res.AssistantPrefixSanitized = normalizeAssistantPrefixes(msgs)
+		res.SystemPrefixSanitized = sanitizeSystemPrefixes(msgs, identity)
+		res.AssistantPrefixSanitized = normalizeAssistantPrefixes(msgs, identity)
 	}
 
 	// 11. 指纹脱敏
