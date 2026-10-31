@@ -142,6 +142,12 @@ type runtimeFile struct {
 		IdleTimeoutSeconds        int `json:"idleTimeoutSeconds"`
 		HeaderTimeoutSecondsSnake int `json:"header_timeout_seconds"`
 		IdleTimeoutSecondsSnake   int `json:"idle_timeout_seconds"`
+		// CNChatBase 覆盖国内站上游 base（对照 wb2api-panel 的 cn.chat_base）。
+		// 上游换域名、或要走私有反代时用；留空沿用内置的 copilot.tencent.com。
+		// 只改 Base（API 域），**不改 Origin**（Web / 计费域）—— 两者本就是不同域名，
+		// 一起改会把签到、额度这些走 Web 域的接口打到错误的 host 上。
+		CNChatBase      string `json:"cnChatBase"`
+		CNChatBaseSnake string `json:"cn_chat_base"`
 		// TransientRetries 是瞬时网络错误重试次数；**显式 0 表示禁用**，
 		// 所以不能沿用 firstPositive（那会把 0 当成「未配置」而落回默认值）。
 		TransientRetries      *int `json:"transientRetries"`
@@ -294,6 +300,10 @@ type Config struct {
 
 	HeaderTimeout time.Duration
 	IdleTimeout   time.Duration
+	// CNChatBase 覆盖国内站上游 base（对照 wb2api-panel 的 cn.chat_base）。
+	// 留空表示沿用 upstream.ProfileCN 里内置的域名。只覆盖 API 域（Base），
+	// 不动 Web / 计费域（Origin）—— 两者是不同 host，一起改会把签到与额度打歪。
+	CNChatBase string
 	// TransientRetries 是瞬时网络错误重试次数（0 表示禁用）。
 	TransientRetries int
 	// TransientRetryBackoff 是重试间隔（测试可调小）。
@@ -471,6 +481,10 @@ func (cfg *Config) loadRuntimeFile() error {
 		}
 		if sec := firstPositive(f.Upstream.IdleTimeoutSecondsSnake, f.Upstream.IdleTimeoutSeconds); sec > 0 {
 			cfg.IdleTimeout = time.Duration(sec) * time.Second
+		}
+		// 国内站 base 覆盖（对照 wb2api-panel 的 cn.chat_base）：snake 优先，留空不覆盖。
+		if base := firstNonEmpty(f.Upstream.CNChatBaseSnake, f.Upstream.CNChatBase); base != "" {
+			cfg.CNChatBase = base
 		}
 		// 显式 0 是合法值（禁用重试），所以先取 snake 再取 camel，两者都为 nil 才用默认。
 		if n := firstPtr(f.Upstream.TransientRetriesSnake, f.Upstream.TransientRetries); n != nil && *n >= 0 {
@@ -683,6 +697,17 @@ func (c *Config) SetFlagPresence(reloadSet, modelsSet bool) {
 }
 
 // firstPositive 返回第一个正数（用于兼容同一字段的两种拼写）。
+// firstNonEmpty 返回第一个去空白后非空的字符串。
+// 用于「两种拼写都接受」的字段：snake 优先，两者都空时返回 ""（表示不覆盖）。
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func firstPositive(vals ...int) int {
 	for _, v := range vals {
 		if v > 0 {

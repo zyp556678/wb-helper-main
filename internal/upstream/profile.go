@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"net/url"
+	"strings"
 	"time"
 
 	"workbuddy-gateway/internal/auth"
@@ -28,6 +29,19 @@ const (
 	// modelsPath 是上游模型目录端点（相对 Base）。
 	modelsPath = "/v2/enterprises/personal/models"
 )
+
+// ApplyCNChatBase 覆盖国内站上游 base（对照 wb2api-panel 的 cn.chat_base）。
+//
+// 只改 Base（API 域），**不动 Origin**（Web / 计费域）：两者本就是不同 host
+// （API 走 copilot.tencent.com，Web 走 www.codebuddy.cn），一起改会把签到、
+// 额度、成长任务这些走 Web 域的接口打到错误的 host 上。
+//
+// base 为空表示不覆盖（沿用内置域名）。启动时与配置热加载时各调用一次。
+func ApplyCNChatBase(base string) {
+	if s := strings.TrimSpace(base); s != "" {
+		ProfileCN.Base = s
+	}
+}
 
 var (
 	// ProfileCN 国内站：copilot.tencent.com，控制台 www.codebuddy.cn。

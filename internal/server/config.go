@@ -9,6 +9,7 @@ import (
 	"workbuddy-gateway/internal/config"
 	"workbuddy-gateway/internal/debuglog"
 	"workbuddy-gateway/internal/pool"
+	"workbuddy-gateway/internal/upstream"
 )
 
 // handlePanelConfigRoute 按方法分发：GET 读配置，POST 保存配置补丁。
@@ -214,6 +215,9 @@ func (s *Server) storeConfig(next *config.Config) {
 // （保存接口会在 need_restart 里如实告知）；调试开关在下面热同步。
 func (s *Server) applyRuntimeConfig() {
 	c := s.config()
+	// 国内站 base 覆盖（对照 wb2api-panel 的 cn.chat_base）：空值不覆盖。
+	// 放在热加载路径里而不是装配期，因为换 base 不需要重启 —— 下一次上游请求就用新域名。
+	upstream.ApplyCNChatBase(c.CNChatBase)
 	s.pool.SetConfig(c)
 	s.pool.SetGov(pool.GovFromConfig(c))
 	s.pool.SetCreditFloor(c.CreditFloor())

@@ -5,18 +5,53 @@
 
 ## 进度（2026-11-01）
 
+### wb-gateway
+
 | 切片 | 状态 | 提交 / 说明 |
 | --- | --- | --- |
 | 1 工具链 + 绿色基线 | ✅ | Go 1.27.3；`build` / `vet` / `test` 全绿 |
 | 2 Windows RST 文案 | ✅ | `c3cd2cf` |
 | 3 DSH 历史 11-128 兼容 | ✅ | `70de27a` |
 | 4 `identity` 配置化 | ✅ | `b98f160` |
+| 5a SSE 首字节前心跳 | ✅ | `2dd3d37`（三条流式路径全覆盖） |
+| 5b 首字节前安全重放 | ✅ | `ab140fe`（错误帧推迟到重放决定之后） |
 | 6 panel 协议修复（6021 / 11158 / 12153） | ✅ | `932a4e9` |
-| 5 SSE 首字节前心跳 | ✅ | `2dd3d37`（三条流式路径全覆盖） |
-| 5b 首字节前安全重放 | ⬜ 待做 | — |
-| 7 `requestProfile` 官方出站兼容 | ⬜ 待做 | — |
-| 8 监听端口热切换 | ⬜ 待做 | — |
-| 9 随机签到计划 | ⬜ 待做 | — |
+| 8 监听端口热切换 | ✅ | `5b1a449` |
+| 7 `requestProfile` 官方出站兼容 | ⬜ 待做 | 约 500 行；上游收紧反代，建议先评估收益 |
+| 9 随机签到计划 | ⬜ 待做 | 约 740 行；需先定「替代还是并存」`checkin_hours` |
+| v1.14.29 Responses 工具保真 | ⬜ 待做 | namespace / custom / web_search，请求侧与响应侧必须同时改 |
+| v1.14.30 并发控制 | ⚪ 已覆盖 | 本地 `MaxInFlight` / `MaxInFlightGlobal` |
+| v1.14.37 启动补签 | ⚪ 已覆盖 | 本地 `dueSlot` 就是「时点已过就补跑」 |
+| v1.14.35 统计图悬浮 | ⚪ N/A | 上游原生 JS 面板，本项目是 React |
+| v1.14.41 移除 `promptcompat` | ⚪ N/A | 本项目从未引入该模块 |
+
+### wb2api-panel
+
+上游已于 2026-10-21 停止维护，这是一笔**冻结的一次性欠账**，不会再增长。
+
+| 项 | 状态 | 本地对应 |
+| --- | --- | --- |
+| `6021 queue.full` 渠道级繁忙 | ✅ `932a4e9` | `internal/upstream/classify.go` |
+| `11158` 模型权限错误分流 | ✅ `932a4e9` | 同上 |
+| 同账号 refresh 单飞（防 `12153`） | ✅ `932a4e9` | `internal/pool/pool.go` |
+| `cn.chat_base` 覆盖国内版上游 base | ⬜ 待做 | `internal/upstream/profile.go` |
+| `dns_servers` 可指定 | ⬜ 待做 | `internal/config` |
+| 裸模型名跨域回退（默认关） | ⬜ 待做 | `internal/pool` |
+| 联网搜索端点 `POST /v1/search/messages` | ⬜ 待做 | 新增入口，工作量不小 |
+| 企业切换会话 `enterprise_switch` 门控 | ⬜ 待做 | `internal/auth` |
+| 按地区独立配置轮询与顺序耗尽调度 | ⬜ 待做 | `internal/pool` |
+| 模型级 `6004` 双时钟 | 🟡 部分 | 本地有 `6004` 处理，缺「明示两个时刻」的显示 |
+| 到期提醒快照与「检查」同口径 | 🟡 部分 | `internal/creditwatch` |
+| 账号备注 | ⚪ 已覆盖 | `internal/accountmeta` |
+| 任务补领清扫（先查后领） | ⚪ 已覆盖 | `internal/tasks` |
+| 缓存命中对称反推 | ⚪ 已覆盖 | `internal/tokenstats/scan.go` |
+| `models.hidden` 黑名单 | ⚪ 已覆盖 | 本地模型黑白名单 |
+| 出站代理 `ProxyFromEnvironment` | ⚪ 已覆盖 | `internal/config/config.go` |
+| 手机端适配 / 积分历史 / Global 模型可用性 等纯 UI 项 | ⚪ 不搬 | 本地 React 面板形态不同 |
+
+### wb-switch
+
+`main` 自 `v0.1.62`（2026-10-12）零新增，本轮无动作。
 
 逐项细节与「未跟随」理由见 [PROGRESS.md](../PROGRESS.md) 的「上游跟进（2026-11-01）」。
 

@@ -331,6 +331,8 @@ func runServe(args []string) {
 	defer localSup.Stop()
 
 	server.Version = version
+	// 国内站 base 覆盖必须在构造各组件之前生效：池与调度器在 New 里就会读 ProfileCN。
+	upstream.ApplyCNChatBase(cfg.CNChatBase)
 	srv := server.New(cfg, p, client, cat, registry, sticky, sched, events, taskMgr, statStore, localSup, panelFS)
 	srv.SetCreditWatch(creditWatch)
 	// 账号备注 / 显示字段（批次 4）：本机展示偏好，单独落一个文件，
