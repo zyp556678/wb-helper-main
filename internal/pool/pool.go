@@ -623,6 +623,26 @@ func (p *Pool) refreshToken(ctx context.Context, a *Account, force, allowDisable
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// 锁内二次确认（单飞，对照 wb2api-panel「同账号 refresh 单飞，避免 RT 复用撞
+	// 12153 掉登录」）。
+	//
+	// 上面的过期判断是在**锁外**做的：并发请求会同时看到「已过期」，然后一起排队。
+	// 等它们拿到锁时，前一个已经把令牌换新、refreshToken 也随之轮换；若仍用锁外
+	// 抓到的那份旧 RT 再刷一次，上游会判定 refresh token 被复用并返回 12153，
+	// 账号直接被踢下线 —— 一次并发高峰就能把健康号刷死。
+	//
+	// 因此必须用锁内读到的最新凭据重新判一次：已被别人换新就直接返回。
+	cred = a.Cred
+	if !force && cred.ExpiresAt > 0 && time.Now().Add(TokenRefreshLead).Unix() < cred.ExpiresAt {
+		return nil
+	}
+	if cred.RefreshToken == "" {
+		if cred.ExpiresAt > 0 && time.Now().Unix() >= cred.ExpiresAt {
+			return errors.New("令牌已过期且缺少 refreshToken，请重新登录")
+		}
+		return nil
+	}
+
 	view := &upstream.CredentialView{
 		AccessToken:  cred.AccessToken,
 		RefreshToken: cred.RefreshToken,

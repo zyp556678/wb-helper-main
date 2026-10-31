@@ -34,6 +34,18 @@ const (
 	ErrUpstream5xx  = "upstream_5xx"  // 服务端错误：喂熔断器
 	ErrNetwork      = "network"       // 网络层错误
 	ErrUnknown      = "unknown"       // 其余：连败降权
+	// ErrUpstreamBusy 是渠道级容量满载（6021 queue.full，对照 wb2api-panel
+	// 「classify 6021 queue.full as channel-level busy」）。
+	//
+	// 为什么必须单独成类：上游推理集群排队打满时返回 HTTP 429 + code 6021。
+	// 若不识别，它会落进 429 兜底成为 ErrSoftRate，于是**逐号软冷却 + 轮转换号**——
+	// 而同一时刻换任何账号撞的都是同一堵墙。实测能在几秒内把整池健康号全部误杀。
+	// 这是渠道容量事件，与账号无关：不罚号、不轮转，直接把 503 透传给客户端退避重试。
+	ErrUpstreamBusy = "upstream_busy"
+	// ErrModelDenied 是「该账号对此模型无权限」（11158，对照 wb2api-panel
+	// 「识别 11158 模型权限错误」）。它是确定性拒绝而非限流，因此只锁
+	// (账号, 模型) 这一对，切模型立即可用，不该把整个账号判死。
+	ErrModelDenied = "model_denied"
 )
 
 // hardCreditMarkers 是余额耗尽的关键词（不限状态码，上游偶尔用 400 表达）。
@@ -97,6 +109,22 @@ func Classify(status int, body string) ErrClass {
 		return c
 	}
 
+	// 6021 queue.full：渠道级容量满载。必须排在 429 兜底**之前**，
+	// 否则会先落进 ErrSoftRate，逐号软冷却把整池健康号绞杀（见 ErrUpstreamBusy）。
+	// 结构化 code 是主判据，"queue.full" 文案作外卡（上游偶有只给文案的形态）。
+	if c.Code == 6021 || containsAny(body, []string{"queue.full"}) {
+		c.Kind = ErrUpstreamBusy
+		c.Retryable = true
+		return c
+	}
+
+	// 11158：账号对该模型没有权限。确定性拒绝，只锁 (账号, 模型) 这一对。
+	if c.Code == 11158 {
+		c.Kind = ErrModelDenied
+		c.Model = extractModel(body)
+		return c
+	}
+
 	// 1. 余额耗尽
 	if status == 402 || containsAny(body, hardCreditMarkers) {
 		c.Kind = ErrHardCredit
@@ -148,7 +176,9 @@ func Classify(status int, body string) ErrClass {
 // Punishable 报告该类别是否应该处罚账号（冷却/熔断/降权）。
 func (c ErrClass) Punishable() bool {
 	switch c.Kind {
-	case ErrContentBlock, ErrBadRequest:
+	case ErrContentBlock, ErrBadRequest, ErrUpstreamBusy:
+		// ErrUpstreamBusy 是渠道容量事件：账号余额与会话本就健康，
+		// 罚它只会把一次上游拥堵放大成整池不可用。
 		return false
 	default:
 		return true

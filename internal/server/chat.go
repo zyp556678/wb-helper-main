@@ -391,6 +391,23 @@ func (s *Server) dispatchRouted(w http.ResponseWriter, r *http.Request, modelNam
 				return nil, nil, nil, false
 			}
 
+			// 6021 queue.full：渠道级容量满载，**不轮转**（对照 wb2api-panel）。
+			// 同一时刻换任何账号撞的都是同一堵墙：轮转只会把一次上游拥堵放大成
+			// MaxRotate 倍的无效请求，还白占在途名额。直接 503 + 上游原文，
+			// 客户端 SDK 按退避重试即可；等待窗口过去渠道恢复即成功。
+			if class.Kind == upstream.ErrUpstreamBusy {
+				s.applyClass(acc, modelName, class)
+				acc.ReleaseInFlight()
+				s.metrics.RecordFailure(modelName, "上游渠道容量满载")
+				msg := strings.TrimSpace(string(errBody))
+				if msg == "" {
+					msg = "上游渠道容量已满（queue.full），请稍后重试"
+				}
+				s.logf("[%s] 账号 %s 撞上渠道容量满载（6021），已终止轮换", modelName, acc.Cred.AccountID())
+				s.writeAPIError(w, r, http.StatusServiceUnavailable, "upstream_busy", msg)
+				return nil, nil, nil, false
+			}
+
 			s.applyClass(acc, modelName, class)
 			acc.ReleaseInFlight()
 			continue
@@ -494,6 +511,15 @@ func (s *Server) applyClass(acc *pool.Account, modelName string, class upstream.
 		acc.NoteBreaker()
 	case upstream.ErrContentBlock, upstream.ErrBadRequest:
 		acc.MarkFailure(class.Kind) // 请求侧问题：只记录，不处罚
+	case upstream.ErrUpstreamBusy:
+		// 渠道级容量满载（6021）：账号余额与会话本就健康，只记一笔 ——
+		// 不冷却、不熔断、不计连败。罚它会把一次上游拥堵放大成整池不可用。
+		acc.MarkFailure("渠道容量满载（6021）")
+	case upstream.ErrModelDenied:
+		// 该账号对这个模型没有权限（11158）：确定性拒绝，只锁 (账号, 模型) 这一对，
+		// 切换其他模型立即可用，不该把整个账号判死。
+		acc.MarkFailure("模型权限拒绝（11158）")
+		acc.CooldownModel(modelName, g.SoftRate, time.Time{}, "该账号无此模型权限（11158）")
 	case upstream.ErrNetwork:
 		acc.MarkFailure("网络错误")
 		acc.NoteDegrade()
